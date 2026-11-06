@@ -1,0 +1,57 @@
+{
+  "manifest_version": 3,
+  "name": "风神考核看板（通用版）",
+  "version": "3.2.0",
+  "description": "风神页面常驻小图标，点击直接展开考核看板：规划单量完成率、标2骑手占比、考核得分、时段×商圈片达成矩阵。跟随当前浏览器登录态，换账号自动换商，无需本地服务。支持从 GitHub 自动检查与更新新版本。",
+  "permissions": [
+    "tabs",
+    "storage",
+    "scripting",
+    "declarativeNetRequestWithHostAccess",
+    "alarms",
+    "downloads"
+  ],
+  "host_permissions": [
+    "*://*.ele.me/*",
+    "https://httpizza.ele.me/*",
+    "https://*.aliyuncs.com/*",
+    "https://raw.githubusercontent.com/*"
+  ],
+  "declarative_net_request": {
+    "rule_resources": [
+      {
+        "id": "fengshen_headers",
+        "enabled": true,
+        "path": "rules.json"
+      }
+    ]
+  },
+  "background": {
+    "service_worker": "sw.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "打开/收起风神考核看板"
+  },
+  "content_scripts": [
+    {
+      "matches": ["*://*.ele.me/*"],
+      "all_frames": false,
+      "run_at": "document_idle",
+      "js": ["launcher.js"]
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "dashboard.html",
+        "dashboard.css",
+        "dashboard.js",
+        "assess.js",
+        "xlsx.js",
+        "update-ui.js"
+      ],
+      "matches": ["*://*.ele.me/*"]
+    }
+  ]
+}

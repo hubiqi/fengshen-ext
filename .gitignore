@@ -1,0 +1,9 @@
+# Chrome 加载「已解压的扩展程序」时自动生成的缓存，不要提交
+_metadata/
+generated_indexed_rulesets/
+
+# 本机 / 构建产物
+.DS_Store
+*.zip
+.env
+node_modules/

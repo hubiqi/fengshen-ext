@@ -1,0 +1,26 @@
+[
+  {
+    "id": 1,
+    "priority": 1,
+    "action": {
+      "type": "modifyHeaders",
+      "requestHeaders": [
+        {
+          "header": "Origin",
+          "operation": "set",
+          "value": "https://a.ele.me"
+        },
+        {
+          "header": "Referer",
+          "operation": "set",
+          "value": "https://a.ele.me/app/fnjp-gfe/pikipek-apps/aeolus/index.html?platform=fs"
+        }
+      ]
+    },
+    "condition": {
+      "urlFilter": "||httpizza.ele.me/xtop/",
+      "resourceTypes": ["xmlhttprequest"],
+      "excludedInitiatorDomains": ["a.ele.me", "r.ele.me", "ele.me"]
+    }
+  }
+]

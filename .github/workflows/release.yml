@@ -1,0 +1,58 @@
+name: Build extension zip & create Release
+
+# 每次推送 main 都检查 version.json：若该版本尚无 Release，则打 zip 并发布。
+# 幂等：版本未变化时重复推送不会重复发版。也可在 Actions 页面手动运行。
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read version from version.json
+        id: ver
+        run: |
+          VERSION=$(node -p "require('./version.json').version")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Detected version: $VERSION"
+
+      - name: Check whether this version was already released
+        id: exists
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "v${{ steps.ver.outputs.version }}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Release v${{ steps.ver.outputs.version }} already exists, skip."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # 只打包运行时文件，避免把 README / workflow / 脚本塞进扩展目录
+      - name: Build installable zip
+        if: steps.exists.outputs.exists == 'false'
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          zip -r "fengshen-ext-v${VERSION}.zip" \
+            manifest.json version.json rules.json \
+            sw.js updater.js launcher.js update-ui.js \
+            dashboard.html dashboard.css dashboard.js assess.js xlsx.js
+
+      - name: Create GitHub Release with the zip
+        if: steps.exists.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          NOTES=$(node -p "require('./version.json').notes")
+          gh release create "v${VERSION}" "fengshen-ext-v${VERSION}.zip" \
+            --title "v${VERSION}" --notes "${NOTES}"

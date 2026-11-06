@@ -1,0 +1,6 @@
+{
+  "version": "3.2.0",
+  "notes": "新增 GitHub 自动更新：定时检查新版本、看板与悬浮球提示、一键下载新版 zip、覆盖文件后自动重载生效",
+  "download": "https://github.com/hubiqi/fengshen-ext/releases/download/v3.2.0/fengshen-ext-v3.2.0.zip",
+  "published_at": "2026-11-06"
+}
