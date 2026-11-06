@@ -147,15 +147,34 @@ const ASSESS = (() => {
     }
 
     // ---------------- 运单：实际完单 / 时段完单 / 骑手完单 ----------------
+    // 口径（与 assess_image.py / 系统一致）：只有「配送成功」计入实际完单。
+    // 接口实测：state=40 / stateDesc=配送成功；state=90 / stateDesc=配送失败。
+    // 接口 total 是「全部运单」，含配送失败，所以进度条里的「拉取 N 单」必然大于完单数，
+    // 两者必须分开标注，否则看起来就像把失败单算进了完单。
+    // 判定顺序：先排除任何明确的失败/取消状态，再认成功；状态缺失或不明一律不计入，
+    // 避免「state=40 但描述是失败」或将来新增状态被误算成完单。
+    const FAIL_WORDS = ["失败", "取消", "关闭", "退款", "拒收", "退回", "未妥投", "异常"];
+    const SUCCESS_WORDS = ["配送成功", "配送完成", "已妥投"];
+    const classify = (r) => {
+      const desc = String(r.stateDesc || r.statusDesc || "").trim();
+      const st = Number(r.state);
+      if (desc && FAIL_WORDS.some((w) => desc.includes(w))) return "failed";
+      if (st === 90) return "failed";
+      if (desc && SUCCESS_WORDS.some((w) => desc.includes(w))) return "success";
+      if (!desc && st === 40) return "success";       // 兼容没有描述字段的旧数据
+      return "unknown";
+    };
+    const orderStats = { total: orders.length, success: 0, failed: 0, unknown: 0 };
     const done = new Map(), periodDone = new Map();
     const knightDay = new Map(), knightSite = new Map();
-    const isSuccess = (r) => r.state === 40 || String(r.stateDesc) === "配送成功";
 
     for (const r of orders) {
       const site = key(r.teamName);
       const area = areaOfSite(site);
       areaSet.add(area);
-      if (!isSuccess(r)) continue;
+      const cls = classify(r);
+      orderStats[cls]++;
+      if (cls !== "success") continue;
       done.set(area, (done.get(area) || 0) + 1);
       const per = periodOf(r.completeAt || r.trackingFinishAt);
       if (per) {
@@ -222,7 +241,7 @@ const ASSESS = (() => {
     }
 
     return {
-      rows, totals, totalPd, periods: PERIOD_NAMES,
+      rows, totals, totalPd, periods: PERIOD_NAMES, orderStats,
       scheduleOk, attendanceOk,
       mapped: mappedCnt > 0, mappingFallback: fallbackCnt > 0,
       areaLabel: mappedCnt > 0 ? "商圈片" : "商圈"

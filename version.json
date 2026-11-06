@@ -1,6 +1,6 @@
 {
-  "version": "3.3.3",
-  "notes": "检查更新无论有无新版本都给出明确反馈：独立状态条显示「已是最新 + 已连上 GitHub 的源 + 远端版本号」，失败明确提示「无法确认是否有新版本」，不再让「已是最新」和「链接不通」看起来一样",
-  "download": "https://github.com/hubiqi/fengshen-ext/releases/download/v3.3.3/fengshen-ext-v3.3.3.zip",
+  "version": "3.3.4",
+  "notes": "拆分「接口运单总数」与「实际完单」口径：进度条/底部显示配送成功与配送失败拆分，明确失败单已剔除；运单状态判定加固（失败关键词优先、兼容字符串 state、状态不明不计入完单）",
+  "download": "https://github.com/hubiqi/fengshen-ext/releases/download/v3.3.4/fengshen-ext-v3.3.4.zip",
   "published_at": "2026-11-06"
 }

@@ -180,13 +180,19 @@ function setProgress(page, pages, mode) {
   const bar = $("bar");
   bar.style.width = ratio + "%";
   bar.className = "bar" + (mode === "done" ? " done" : "") + (mode === "err" ? " err" : "");
+  // 「拉取 N 单」是接口返回的全部运单（含配送失败），不是实际完单，必须写清楚口径
+  const st = state.assess && state.assess.orderStats;
+  const scope = st
+    ? `拉取 ${fmt(state.rows.length)} 单（配送成功 ${fmt(st.success)} · 配送失败 ${fmt(st.failed)}${st.unknown ? ` · 状态不明 ${fmt(st.unknown)}` : ""}）`
+    : `拉取 ${fmt(state.rows.length)} 单`;
+  const doneTail = st ? ` · 实际完单 ${fmt(st.success)}（仅配送成功）` : "";
   $("progress-text").textContent =
-    mode === "done" ? `${state.sync.mode === "incremental" ? "增量完成" : "全量完成"} · ${state.sync.pages} 页 / ${fmt(state.rows.length)} 单` :
+    mode === "done" ? `${state.sync.mode === "incremental" ? "增量完成" : "全量完成"} · ${state.sync.pages} 页 / ${scope}${doneTail}` :
     mode === "err" ? "加载失败" :
     mode === "export" ? "正在获取排班 / 考勤…" :
     mode === "connect" ? "连接风神接口…" :
     mode === "anchor" ? "校验当日总数…" :
-    `${mode === "incr" ? "增量同步" : "全量同步"} ${page}/${pages} 页（${fmt(state.rows.length)} 单）`;
+    `${mode === "incr" ? "增量同步" : "全量同步"} ${page}/${pages} 页（${scope}）`;
 }
 function setBusy(b) { $("btn-refresh").disabled = b; $("btn-refresh").textContent = b ? "加载中…" : "立即刷新"; }
 
@@ -203,7 +209,8 @@ function renderTable1(a) {
   const colgroup = `<colgroup><col style="width:228px"><col style="width:70px"><col style="width:70px">` +
     `<col style="width:96px"><col style="width:86px"><col style="width:90px">` +
     `<col style="width:70px"><col style="width:92px"><col style="width:84px"></colgroup>`;
-  const out = [colgroup, "<thead><tr>" + head.map((h) => `<th>${h}</th>`).join("") + "</tr></thead><tbody>"];
+  const out = [colgroup, "<thead><tr>" + head.map((h, i) =>
+    `<th${i === 2 ? ' title="仅统计「配送成功」运单（state=40），已剔除配送失败"' : ""}>${h}</th>`).join("") + "</tr></thead><tbody>"];
   const compCell = (v) => a.scheduleOk ? `<td class="${v < 90 ? "red" : "bold"}">${p1(v)}</td>` : `<td class="zero">—</td>`;
   for (const r of a.rows) {
     const b2cls = r.b2r < 70 ? "red" : (r.b2r < 80 ? "orange" : "bold");
@@ -263,7 +270,7 @@ function renderBroadcast(a) {
   if (!list.length) { $("broadcast").innerHTML = `<span class="muted">暂无数据</span>`; return; }
   const t = a.totals, worst = list[0];
   let h = `<div class="bc-head">整商订单完成率 <b>${a.scheduleOk ? p1(t.comp) : "—"}</b>` +
-    `（实际 ${fmt(t.done)} / 规划 ${a.scheduleOk ? fmt(t.plan) : "—"}）` +
+    `（实际完单 ${fmt(t.done)} / 规划 ${a.scheduleOk ? fmt(t.plan) : "—"}）` +
     `｜标二占比 <b>${a.attendanceOk && a.scheduleOk ? p1(t.b2r) : "—"}</b></div>`;
   h += `<ul class="bc-list">` + list.map((r, i) =>
     `<li class="${i === 0 ? "worst" : ""}"><span class="num">${i + 1}</span>${esc(r.area)}` +
@@ -280,7 +287,7 @@ function syncSummary() {
   if (!s.pages && !s.reused) return "";
   const out = [
     `${s.mode === "incremental" ? "增量同步" : "全量同步"}：本次 ${s.pages} 页请求`,
-    `复用 ${fmt(s.reused)} 单 · 新增 ${fmt(s.added)} 单 · 状态回写 ${fmt(s.updated)} 单`
+    `缓存复用 ${fmt(s.reused)} 单 · 新增 ${fmt(s.added)} 单 · 状态回写 ${fmt(s.updated)} 单`
   ];
   if (s.mode === "incremental" && s.fullPages > s.pages) out.push(`省去 ${fmt(s.fullPages - s.pages)} 页全量拉取`);
   if (s.reason && s.mode === "full") out.push(`触发原因：${s.reason}`);
@@ -318,6 +325,9 @@ function render() {
 
   $("foot-meta").textContent =
     `数据源：queryTracking/2.0 + exportSchedule/1.0 + exportAttendance/1.0（均在插件内直接请求，跟随当前登录账号）` +
+    (a.orderStats
+      ? ` · 运单口径：接口 ${fmt(state.rows.length)} 单 = 配送成功 ${fmt(a.orderStats.success)} + 配送失败 ${fmt(a.orderStats.failed)}${a.orderStats.unknown ? ` + 状态不明 ${fmt(a.orderStats.unknown)}` : ""}；实际完单只算配送成功，失败单已剔除`
+      : "") +
     ` · 口径与 assess_image.py 一致 · ${a.mapped ? "已匹配钉钉商圈片分组" : "按接口原生商圈分组"}` +
     ` · pageSize=${PAGE_SIZE} · 页间节流 ${THROTTLE_MS}ms` +
     (syncSummary() ? ` · ${syncSummary()}` : "") +
