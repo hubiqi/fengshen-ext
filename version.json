@@ -1,6 +1,6 @@
 {
-  "version": "3.3.0",
-  "notes": "运单改为增量同步（本地缓存 + 15 分钟水位窗口 + 总数对账，异常自动降级全量），刷新不再全量重拉；新增「全量重拉」按钮与同步统计；移除「原图对照」功能",
-  "download": "https://github.com/hubiqi/fengshen-ext/releases/download/v3.3.0/fengshen-ext-v3.3.0.zip",
+  "version": "3.3.1",
+  "notes": "版本检查增加备用源：raw.githubusercontent.com 超时/失败自动切 cdn.jsdelivr.net，避免国内网络下检查更新失败",
+  "download": "https://github.com/hubiqi/fengshen-ext/releases/download/v3.3.1/fengshen-ext-v3.3.1.zip",
   "published_at": "2026-11-06"
 }

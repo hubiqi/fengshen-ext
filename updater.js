@@ -1,6 +1,7 @@
 /* 风神考核看板 · 自动更新模块（MV3 Service Worker / ES module）
  *
  * 版本源：GitHub 公开仓库 main 分支的 version.json，匿名只读，无需任何令牌。
+ *        主源 raw.githubusercontent.com，备源 cdn.jsdelivr.net（国内网络下主源偶发超时/502 时自动切换）。
  * 职责：
  *   1. 每 6 小时（以及安装 / 浏览器启动 / 手动点击）检查 GitHub 上的最新版本号
  *   2. 把状态写入 chrome.storage.local，供看板页面与 content script 渲染提示
@@ -16,7 +17,12 @@
 const OWNER = "hubiqi";
 const REPO = "fengshen-ext";
 const BRANCH = "main";
-const VERSION_URL = `https://raw.githubusercontent.com/${OWNER}/${REPO}/${BRANCH}/version.json`;
+// 两个源返回同一份 version.json；任一可达即可完成检查，避免单点网络故障
+const VERSION_URLS = [
+  `https://raw.githubusercontent.com/${OWNER}/${REPO}/${BRANCH}/version.json`,
+  `https://cdn.jsdelivr.net/gh/${OWNER}/${REPO}@${BRANCH}/version.json`
+];
+const REMOTE_TIMEOUT_MS = 8000;              // 单个源最多等 8 秒，超时立即换下一个
 
 const STATE_KEY = "wb_update_state";
 const ALARM_CHECK = "wb-upd-check";
@@ -70,10 +76,31 @@ async function refreshBadge(s) {
   } catch (e) { /* 少数内核不支持 badge，忽略 */ }
 }
 
-async function fetchJSON(url) {
-  const res = await fetch(url, { cache: "no-store", credentials: "omit" });
-  if (!res.ok) throw new Error("HTTP " + res.status);
-  return res.json();
+async function fetchJSON(url, timeoutMs = 0) {
+  const ctrl = new AbortController();
+  const timer = timeoutMs ? setTimeout(() => ctrl.abort(), timeoutMs) : null;
+  try {
+    const res = await fetch(url, { cache: "no-store", credentials: "omit", signal: ctrl.signal });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    return await res.json();
+  } finally { if (timer) clearTimeout(timer); }
+}
+
+/** 依次尝试各版本源：超时 / 网络错误 / 内容不合法都会自动换下一个 */
+async function fetchVersionJSON() {
+  const errors = [];
+  for (const base of VERSION_URLS) {
+    try {
+      const data = await fetchJSON(base + "?t=" + Date.now(), REMOTE_TIMEOUT_MS);
+      if (!data || !/^\d+(\.\d+)*$/.test(String(data.version || ""))) {
+        throw new Error("version.json 格式不正确");
+      }
+      return data;
+    } catch (e) {
+      errors.push(`${new URL(base).hostname}: ${e && e.message ? e.message : e}`);
+    }
+  }
+  throw new Error("版本源均不可达（" + errors.join("；") + "）");
 }
 
 /** 磁盘自检：解压加载的扩展，其静态资源是实时从磁盘读取的，
@@ -108,10 +135,7 @@ async function checkForUpdate(manual = false) {
   } catch (e) { /* 自检失败不影响联网检查 */ }
 
   try {
-    const remote = await fetchJSON(VERSION_URL + "?t=" + Date.now());
-    if (!remote || !/^\d+(\.\d+)*$/.test(String(remote.version || ""))) {
-      throw new Error("version.json 格式不正确");
-    }
+    const remote = await fetchVersionJSON();
     const latest = String(remote.version);
     const cmp = compareVersion(latest, currentVersion());
     const s = await getState();
