@@ -1,4 +1,4 @@
-// 风神考核看板（插件版 v3.3.0）—— 与 fengshen-data/assess_image.py 生成的钉钉看板同口径、同排版
+// 风神考核看板（插件版 v3.3.6）—— 与 fengshen-data/assess_image.py 生成的钉钉看板同口径、同排版
 // 数据源全部在插件内获取，跟随当前浏览器登录态：
 //   1) queryTracking/2.0      -> 运单明细（实际完单 / 时段完单 / 骑手完单 / 站点商圈）
 //   2) exportSchedule/1.0     -> 排班 xlsx（规划单量 / 应排骑手 / 时段预估单量）
@@ -8,6 +8,8 @@
 // v3.3.0：运单改为增量同步（sync.js 持久化当日缓存 + 时间水位窗口 + total 对账）。
 //   刷新时先用缓存秒开渲染，再只查「上次同步 - 2h 回溯窗口」拿新单/状态变更；
 //   对账不一致、跨天、换商、缓存异常、手动「全量重拉」时才回退到全量分页。
+// v3.3.6：标2 / 完单达标只认「非人工改派」的配送成功单（isReassign != 1，KPI 第十三条）；
+//   片区「实际完单 / 订单完成率 / 时段完单」口径不变，仍按全部配送成功单统计。
 
 const XT = "https://httpizza.ele.me/xtop/";
 const API_QUERY = XT + "xtop.agencyTrackingFs.queryTracking/2.0";
@@ -211,8 +213,13 @@ function renderTable1(a) {
   const colgroup = `<colgroup><col style="width:228px"><col style="width:70px"><col style="width:70px">` +
     `<col style="width:96px"><col style="width:86px"><col style="width:90px">` +
     `<col style="width:70px"><col style="width:92px"><col style="width:84px"></colgroup>`;
+  const thTitle = {
+    2: "实际完单：仅统计配送成功（state=40），已剔除配送失败；人工改派单仍计入片区实际完单",
+    4: "完单达标人数：按骑手当日「非人工改派」配送成功单判定（UB≥26 / 其他≥24）",
+    5: "标2骑手：非人工改派完单达标 且 全天有效在线时长≥6h；人工改派完单已剔除"
+  };
   const out = [colgroup, "<thead><tr>" + head.map((h, i) =>
-    `<th${i === 2 ? ' title="仅统计「配送成功」运单（state=40），已剔除配送失败"' : ""}>${h}</th>`).join("") + "</tr></thead><tbody>"];
+    `<th${thTitle[i] ? ' title="' + thTitle[i] + '"' : ""}>${h}</th>`).join("") + "</tr></thead><tbody>"];
   const compCell = (v) => a.scheduleOk ? `<td class="${v < 90 ? "red" : "bold"}">${p1(v)}</td>` : `<td class="zero">—</td>`;
   for (const r of a.rows) {
     const b2cls = r.b2r < 70 ? "red" : (r.b2r < 80 ? "orange" : "bold");
@@ -330,6 +337,9 @@ function render() {
     `数据源：queryTracking/2.0 + exportSchedule/1.0 + exportAttendance/1.0（均在插件内直接请求，跟随当前登录账号）` +
     (a.orderStats
       ? ` · 运单口径：接口 ${fmt(state.rows.length)} 单 = 配送成功 ${fmt(a.orderStats.success)} + 配送失败 ${fmt(a.orderStats.failed)}${a.orderStats.unknown ? ` + 状态不明 ${fmt(a.orderStats.unknown)}` : ""}；实际完单只算配送成功，失败单已剔除`
+      : "") +
+    (a.reassignStats
+      ? ` · 标2口径：人工改派成功单 ${fmt(a.reassignStats.excluded)} 单已从骑手达标统计剔除（完单达标 ${fmt(a.reassignStats.dokRaw)}→${fmt(a.reassignStats.dok)}、标2 ${fmt(a.reassignStats.b2Raw)}→${fmt(a.reassignStats.b2)}，${fmt(a.reassignStats.downgraded)} 人因此跌破门槛）；片区实际完单仍含改派单`
       : "") +
     ` · 口径与 assess_image.py 一致 · ${a.mapped ? "已匹配钉钉商圈片分组" : "按接口原生商圈分组"}` +
     ` · pageSize=${PAGE_SIZE} · 页间节流 ${THROTTLE_MS}ms` +

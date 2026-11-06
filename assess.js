@@ -164,9 +164,26 @@ const ASSESS = (() => {
       if (!desc && st === 40) return "success";       // 兼容没有描述字段的旧数据
       return "unknown";
     };
-    const orderStats = { total: orders.length, success: 0, failed: 0, unknown: 0 };
+
+    // 「人工改派」判定：queryTracking/2.0 实测字段 isReassign（0/1），
+    // 对应 KPI 第十三条「系统已指派骑手后，站长手动将订单由原骑手分配给新骑手」。
+    // 实测某日首页 90 单里 3 单 isReassign=1，且全部为配送成功单 —— 正是会抬高
+    // 骑手完单达标/标2 的那批单。字段名做兼容，接口若新增更细的「人工改派」标记可直接命中。
+    // 字段缺失 / 为 0 / 为否 一律按「未改派」处理：宁可少剔除，也不误判达标骑手。
+    const REASSIGN_KEYS = ["isManualReassign", "isManualAssign", "isReassign", "reassignFlag", "isChangeAssign"];
+    const truthy = (v) => {
+      if (v == null || v === "") return false;
+      if (typeof v === "number") return v > 0;
+      if (typeof v === "boolean") return v;
+      const s = String(v).trim().toLowerCase();
+      return !["0", "false", "no", "n", "否", "无", "null", "undefined"].includes(s);
+    };
+    const isReassigned = (r) => REASSIGN_KEYS.some((k) => k in r && truthy(r[k]));
+
+    // reassigned 只统计「配送成功」里的改派单，即真正从骑手达标里剔除的数量
+    const orderStats = { total: orders.length, success: 0, failed: 0, unknown: 0, reassigned: 0 };
     const done = new Map(), periodDone = new Map();
-    const knightDay = new Map(), knightSite = new Map();
+    const knightDay = new Map(), knightDayRaw = new Map(), knightSite = new Map();
 
     for (const r of orders) {
       const site = key(r.teamName);
@@ -175,6 +192,10 @@ const ASSESS = (() => {
       const cls = classify(r);
       orderStats[cls]++;
       if (cls !== "success") continue;
+      const reassigned = isReassigned(r);
+      if (reassigned) orderStats.reassigned++;
+      // 片区「实际完单」与时段完单不受改派剔除影响：KPI 只规定标1–标5 剔除，
+      // 规划单量完成率仍按考核单位承接的全部配送成功单统计。
       done.set(area, (done.get(area) || 0) + 1);
       const per = periodOf(r.completeAt || r.trackingFinishAt);
       if (per) {
@@ -184,17 +205,32 @@ const ASSESS = (() => {
       }
       const rid = key(r.knightId);
       if (rid) {
-        knightDay.set(rid, (knightDay.get(rid) || 0) + 1);
         knightSite.set(rid, site);
+        knightDayRaw.set(rid, (knightDayRaw.get(rid) || 0) + 1);   // 对账用：含改派单
+        // 骑手达标只认「非人工改派」的完成单
+        if (!reassigned) knightDay.set(rid, (knightDay.get(rid) || 0) + 1);
       }
     }
 
     // ---------------- 标2 / 完单达标 ----------------
+    // KPI 第十三条「人工改派结算限制」：改派完单量在标1–标5 中剔除。
+    // 因此「完单达标人数 / 标2 骑手数」只用 knightDay（非改派成功单）判定；
+    // knightDayRaw 仅用于算出「若不剔除会虚高多少人」，方便核对口径变化。
+    const thresholdOf = (site) => (isUB(site) ? 26 : 24);
     const doneOk = new Map(), b2 = new Map();
+    let dokRaw = 0, b2Raw = 0, downgraded = 0;
+    for (const [rid, cntRaw] of knightDayRaw) {
+      const site = knightSite.get(rid) || "";
+      const th = thresholdOf(site);
+      if (cntRaw < th) continue;
+      dokRaw++;
+      if ((att.get(rid) || 0.0) >= ONLINE_MIN_HOURS) b2Raw++;
+      if ((knightDay.get(rid) || 0) < th) downgraded++;   // 原本达标、剔除改派单后跌破门槛
+    }
     for (const [rid, cnt] of knightDay) {
       const site = knightSite.get(rid) || "";
       const area = areaOfSite(site);
-      if (cnt < (isUB(site) ? 26 : 24)) continue;
+      if (cnt < thresholdOf(site)) continue;
       doneOk.set(area, (doneOk.get(area) || 0) + 1);
       const dur = att.get(rid) || 0.0;
       if (dur >= ONLINE_MIN_HOURS) b2.set(area, (b2.get(area) || 0) + 1);
@@ -233,6 +269,12 @@ const ASSESS = (() => {
       plan: tPlan, done: tDone, comp: tComp, dok: tDok, b2: tB2, hc: tHead, b2r: tB2r,
       tot: scoreComplete(tComp) * 0.4 + scoreBiao2(tB2r) * 0.6
     };
+    // 改派口径对账：excluded=被剔除的改派成功单；dokRaw/b2Raw=不剔除时的人数；
+    // downgraded=因剔除改派单从达标变不达标的骑手数。看板底部据此展示，便于人工核对。
+    const reassignStats = {
+      excluded: orderStats.reassigned,
+      dokRaw, b2Raw, dok: tDok, b2: tB2, downgraded
+    };
     const totalPd = {};
     for (const per of PERIOD_NAMES) {
       let pl = 0, dv = 0;
@@ -241,7 +283,7 @@ const ASSESS = (() => {
     }
 
     return {
-      rows, totals, totalPd, periods: PERIOD_NAMES, orderStats,
+      rows, totals, totalPd, periods: PERIOD_NAMES, orderStats, reassignStats,
       scheduleOk, attendanceOk,
       mapped: mappedCnt > 0, mappingFallback: fallbackCnt > 0,
       areaLabel: mappedCnt > 0 ? "商圈片" : "商圈"
