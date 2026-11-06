@@ -1,6 +1,6 @@
 {
-  "version": "3.2.0",
-  "notes": "新增 GitHub 自动更新：定时检查新版本、看板与悬浮球提示、一键下载新版 zip、覆盖文件后自动重载生效",
-  "download": "https://github.com/hubiqi/fengshen-ext/releases/download/v3.2.0/fengshen-ext-v3.2.0.zip",
+  "version": "3.3.0",
+  "notes": "运单改为增量同步（本地缓存 + 15 分钟水位窗口 + 总数对账，异常自动降级全量），刷新不再全量重拉；新增「全量重拉」按钮与同步统计；移除「原图对照」功能",
+  "download": "https://github.com/hubiqi/fengshen-ext/releases/download/v3.3.0/fengshen-ext-v3.3.0.zip",
   "published_at": "2026-11-06"
 }

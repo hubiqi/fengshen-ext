@@ -1,9 +1,13 @@
-// 风神考核看板（插件版 v3.0）—— 与 fengshen-data/assess_image.py 生成的钉钉看板同口径、同排版
+// 风神考核看板（插件版 v3.3.0）—— 与 fengshen-data/assess_image.py 生成的钉钉看板同口径、同排版
 // 数据源全部在插件内获取，跟随当前浏览器登录态：
 //   1) queryTracking/2.0      -> 运单明细（实际完单 / 时段完单 / 骑手完单 / 站点商圈）
 //   2) exportSchedule/1.0     -> 排班 xlsx（规划单量 / 应排骑手 / 时段预估单量）
 //   3) exportAttendance/1.0   -> 考勤 xlsx（全天有效在线时长，用于标2 6h 门槛）
 // 不访问任何本地服务，不依赖 Python，换账号登录即自动切换合作商。
+//
+// v3.3.0：运单改为增量同步（sync.js 持久化当日缓存 + 时间水位窗口 + total 对账）。
+//   刷新时先用缓存秒开渲染，再只查「上次同步 - 2h 回溯窗口」拿新单/状态变更；
+//   对账不一致、跨天、换商、缓存异常、手动「全量重拉」时才回退到全量分页。
 
 const XT = "https://httpizza.ele.me/xtop/";
 const API_QUERY = XT + "xtop.agencyTrackingFs.queryTracking/2.0";
@@ -15,7 +19,7 @@ const REFRESH_MS = 5 * 60 * 1000;
 
 const $ = (id) => document.getElementById(id);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-// 原图用 f"{int(x)}"，不带千分位分隔符，保持一致
+// 数值展示不带千分位分隔符，与钉钉下发看板保持一致
 const fmt = (n) => String(Math.round(Number(n || 0)));
 const p1 = (n) => Number(n || 0).toFixed(1) + "%";
 const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g,
@@ -26,12 +30,18 @@ const todayStr = () => {
 };
 const hhmm = (d) => d.toTimeString().slice(0, 5);
 
+const newSyncStat = () => ({
+  mode: "full", reason: "", pages: 0, fullPages: 0,
+  added: 0, updated: 0, reused: 0, saved: true
+});
+
 const state = {
   via: localStorage.getItem("wb_via") || "direct",
-  rows: [], seen: new Set(), total: 0, pages: 0,
+  rows: [], index: new Map(), total: 0, pages: 0,
   loading: false, gen: 0, errors: [], fallbackTried: false, agencyWarned: false,
   startedAt: null, finishedAt: null, lastErr: "",
-  schSheets: [], attSheets: [], dataNote: "", assess: null
+  schSheets: [], attSheets: [], dataNote: "", assess: null,
+  sync: newSyncStat()
 };
 
 // ---------------------------------------------------------------- 请求体
@@ -40,13 +50,15 @@ function windowToday() {
   const start = new Date(now); start.setHours(0, 0, 0, 0);
   return { start, end: now };
 }
-function buildQueryPayload(page) {
-  const { start, end } = windowToday();
+// since/end 省略时为「当日 00:00 ~ 现在」的全量窗口；
+// 增量同步传入水位窗口，只取这段时间内完单/状态变化的数据。
+function buildQueryPayload(page, since, end) {
+  const { start, end: now } = windowToday();
   return { params: { request: {
     deliverTypeList: [1, 2],
     teamIds: [],
-    trackingFinishStart: start.getTime(),
-    trackingFinishEnd: end.getTime(),
+    trackingFinishStart: since == null ? start.getTime() : since,
+    trackingFinishEnd: end == null ? now.getTime() : end,
     merchantConsumerDistanceStart: "0", merchantConsumerDistanceEnd: "999999",
     payAmountStart: "0", payAmountEnd: "999999",
     weightStart: "0", weightEnd: "999999",
@@ -169,10 +181,12 @@ function setProgress(page, pages, mode) {
   bar.style.width = ratio + "%";
   bar.className = "bar" + (mode === "done" ? " done" : "") + (mode === "err" ? " err" : "");
   $("progress-text").textContent =
-    mode === "done" ? `已完成 · ${pages} 页 / ${fmt(state.rows.length)} 单` :
+    mode === "done" ? `${state.sync.mode === "incremental" ? "增量完成" : "全量完成"} · ${state.sync.pages} 页 / ${fmt(state.rows.length)} 单` :
     mode === "err" ? "加载失败" :
     mode === "export" ? "正在获取排班 / 考勤…" :
-    `${mode} ${page}/${pages} 页（${fmt(state.rows.length)} 单）`;
+    mode === "connect" ? "连接风神接口…" :
+    mode === "anchor" ? "校验当日总数…" :
+    `${mode === "incr" ? "增量同步" : "全量同步"} ${page}/${pages} 页（${fmt(state.rows.length)} 单）`;
 }
 function setBusy(b) { $("btn-refresh").disabled = b; $("btn-refresh").textContent = b ? "加载中…" : "立即刷新"; }
 
@@ -261,6 +275,19 @@ function renderBroadcast(a) {
   $("broadcast").innerHTML = h;
 }
 
+function syncSummary() {
+  const s = state.sync;
+  if (!s.pages && !s.reused) return "";
+  const out = [
+    `${s.mode === "incremental" ? "增量同步" : "全量同步"}：本次 ${s.pages} 页请求`,
+    `复用 ${fmt(s.reused)} 单 · 新增 ${fmt(s.added)} 单 · 状态回写 ${fmt(s.updated)} 单`
+  ];
+  if (s.mode === "incremental" && s.fullPages > s.pages) out.push(`省去 ${fmt(s.fullPages - s.pages)} 页全量拉取`);
+  if (s.reason && s.mode === "full") out.push(`触发原因：${s.reason}`);
+  if (!s.saved) out.push("缓存写入失败，下次刷新将退化为全量");
+  return out.join(" · ");
+}
+
 function render() {
   const a = state.assess;
   if (!a) return;
@@ -285,6 +312,7 @@ function render() {
     `合作商 <b>${esc(mainName)}</b>${agencyId ? `（ID ${esc(agencyId)}）` : ""}` +
     ` · <b>${a.rows.length}</b> ${a.areaLabel}` +
     ` · 更新 <b>${hhmm(now)}</b>` +
+    ` · 同步 <b>${state.sync.mode === "incremental" ? "增量" : "全量"}</b>` +
     ` · 通道 <b>${state.via === "bridge" ? "静默桥接" : "直连"}</b>` +
     ` · 排班/考勤 <b>${a.scheduleOk ? "✓" : "…"}/${a.attendanceOk ? "✓" : "…"}</b>`;
 
@@ -292,96 +320,216 @@ function render() {
     `数据源：queryTracking/2.0 + exportSchedule/1.0 + exportAttendance/1.0（均在插件内直接请求，跟随当前登录账号）` +
     ` · 口径与 assess_image.py 一致 · ${a.mapped ? "已匹配钉钉商圈片分组" : "按接口原生商圈分组"}` +
     ` · pageSize=${PAGE_SIZE} · 页间节流 ${THROTTLE_MS}ms` +
+    (syncSummary() ? ` · ${syncSummary()}` : "") +
     (state.dataNote ? ` · ${state.dataNote}` : "") +
     (state.errors.length ? ` · 失败页 ${state.errors.length}` : "") +
     (state.startedAt && state.finishedAt ? ` · 本次耗时 ${((state.finishedAt - state.startedAt) / 1000).toFixed(0)}s` : "");
 }
 
-// ---------------------------------------------------------------- 主流程
+// ---------------------------------------------------------------- 主流程（增量 / 全量）
+const SYNC = (typeof WB_SYNC !== "undefined") ? WB_SYNC : null;
+
+// 按 trackingId 建索引：新单追加、状态变化的单直接覆盖，既不重复计数也不丢历史
+function resetRows(rows) {
+  state.rows = rows ? rows.slice() : [];
+  state.index = new Map();
+  state.rows.forEach((r, i) => {
+    const id = String(r.trackingId || r.platformTrackingId || "");
+    if (id && !state.index.has(id)) state.index.set(id, i);
+  });
+  state.sync.added = 0;
+  state.sync.updated = 0;
+}
 function pushRows(rows) {
   for (const r of rows) {
     const id = String(r.trackingId || r.platformTrackingId || "");
-    if (id && state.seen.has(id)) continue;
-    if (id) state.seen.add(id);
-    state.rows.push(r);
+    if (!id) { state.rows.push(r); state.sync.added++; continue; }
+    const at = state.index.get(id);
+    if (at == null) { state.index.set(id, state.rows.length); state.rows.push(r); state.sync.added++; }
+    else { state.rows[at] = r; state.sync.updated++; }
   }
 }
 
-async function loadAll() {
+// 排班 / 考勤 + 落缓存 + 收尾渲染，增量与全量共用
+async function finishSync(gen, date, agencyId, total, mode) {
+  if (gen !== state.gen) return;
+  setProgress(1, 1, "export");
+  const teamIds = [...new Set(state.rows.map((r) => String(r.teamId || "")).filter(Boolean))];
+  const results = await Promise.allSettled([
+    loadExportSheet(API_SCHEDULE, "schedule", teamIds),
+    loadExportSheet(API_ATTENDANCE, "attendance", teamIds)
+  ]);
+  if (gen !== state.gen) return;
+  if (results[0].status === "fulfilled") state.schSheets = results[0].value;
+  if (results[1].status === "fulfilled") state.attSheets = results[1].value;
+  const failed = [];
+  if (results[0].status === "rejected") failed.push("排班（" + results[0].reason.message + "）");
+  if (results[1].status === "rejected") failed.push("考勤（" + results[1].reason.message + "）");
+  if (failed.length) {
+    state.dataNote = "部分数据未取到：" + failed.join("、");
+    showNotice(`排班 / 考勤未全部取到：${esc(failed.join("；"))}。完成率、标二占比、考核得分相关列暂显示「—」，其余数据不受影响。`);
+  }
+  recompute();
+
+  // 缓存写入失败不影响本次展示，只让下次刷新退化为全量
+  const aid = localStorage.getItem("wb_agency") || agencyId || "";
+  const saved = SYNC ? await SYNC.write({ date, agencyId: aid, rows: state.rows, lastTotal: total, mode }) : false;
+  state.sync.saved = saved;
+  if (!saved) state.dataNote = (state.dataNote ? state.dataNote + "；" : "") + "本地缓存写入失败，下次刷新将退化为全量";
+
+  state.finishedAt = new Date();
+  render();
+  setProgress(1, 1, "done");
+  if (state.errors.length && !failed.length) {
+    showNotice(`有 ${state.errors.length} 页运单加载失败（已展示其余数据）。可点「立即刷新」重试。`);
+  } else if (!state.total) {
+    showNotice("当日暂无运单。请确认已在本浏览器登录风神（a.ele.me）且账号有数据。", "blue");
+  }
+}
+
+async function loadAll(opts) {
   if (state.loading) return;
   const gen = ++state.gen;
   state.loading = true;
+  const date = todayStr();
+  const forceFull = !!(opts && opts.forceFull);
+  const agencyId = localStorage.getItem("wb_agency") || "";
+
   Object.assign(state, {
-    rows: [], seen: new Set(), total: 0, pages: 0, errors: [], lastErr: "",
+    rows: [], total: 0, pages: 0, errors: [], lastErr: "",
     fallbackTried: false, agencyWarned: false, schSheets: [], attSheets: [],
-    dataNote: "", assess: null, startedAt: new Date(), finishedAt: null
+    dataNote: "", assess: null, startedAt: new Date(), finishedAt: null,
+    sync: newSyncStat()
   });
-  setBusy(true); clearNotice(); setProgress(0, 1, "连接风神接口…");
+  state.index = new Map();
+  setBusy(true); clearNotice(); setProgress(0, 1, "connect");
 
   try {
-    // 1) 运单明细（分页，渐进渲染）
-    const first = await callApi(API_QUERY, buildQueryPayload(1), true);
+    const res = SYNC ? await SYNC.read(date, agencyId) : { ok: false, reason: "缓存模块不可用" };
+    const p = SYNC ? SYNC.plan(res, windowToday().start.getTime(), forceFull) : { mode: "full", reason: "缓存模块不可用" };
+    state.sync.mode = p.mode;
+    state.sync.reason = p.reason || "";
+    let anchorTotal = 0;
+
+    if (p.mode === "incremental") {
+      resetRows(p.rows);
+      state.sync.reused = p.baseCount;
+      recompute();                         // 先拿本地缓存秒开渲染，不等网络
+
+      // A) 全日第 1 页：拿 total 作对账锚点，顺便刷新最新一页的状态
+      const anchor = await callApi(API_QUERY, buildQueryPayload(1), true);
+      if (gen !== state.gen) return;
+      anchorTotal = Number(anchor.total || 0);
+      state.total = anchorTotal;
+      state.sync.pages++;
+      state.sync.fullPages = Math.max(1, Math.ceil(anchorTotal / PAGE_SIZE));
+      state.pages = state.sync.fullPages;
+      pushRows(Array.isArray(anchor.data) ? anchor.data : []);
+      recompute();
+      setProgress(1, 1, "anchor");
+
+      // B) 只查「上次同步 - 常规窗口」内的新单 / 状态变更，分页窗口固定避免漂移
+      const end = Date.now();
+      const pullWindow = async (since) => {
+        await sleep(THROTTLE_MS);
+        if (gen !== state.gen) return false;
+        const w1 = await callApi(API_QUERY, buildQueryPayload(1, since, end), false);
+        if (gen !== state.gen) return false;
+        const winPages = Math.max(1, Math.ceil(Number(w1.total || 0) / PAGE_SIZE));
+        state.sync.pages++;
+        pushRows(Array.isArray(w1.data) ? w1.data : []);
+        recompute();
+        setProgress(1, winPages, "incr");
+        for (let i = 2; i <= winPages; i++) {
+          if (gen !== state.gen) return false;
+          await sleep(THROTTLE_MS);
+          if (gen !== state.gen) return false;
+          try {
+            const d = await callApi(API_QUERY, buildQueryPayload(i, since, end), false);
+            if (gen !== state.gen) return false;
+            pushRows(Array.isArray(d.data) ? d.data : []);
+            recompute();
+          } catch (e) { state.errors.push(`增量第 ${i} 页：${e.message}`); }
+          state.sync.pages++;
+          setProgress(i, winPages, "incr");
+        }
+        return true;
+      };
+      // C) 对账：新增行数必须等于接口 total 的增量；total 变小说明撤单，分页失败也不能算成功
+      const reconcile = () => {
+        const grew = state.rows.length - p.baseCount;
+        const expect = anchorTotal - p.lastTotal;
+        return {
+          ok: anchorTotal > 0 && expect >= 0 && grew === expect && !state.errors.length,
+          grew, expect
+        };
+      };
+
+      await pullWindow(p.since);
+      if (gen !== state.gen) return;
+      let r = reconcile();
+      if (!r.ok && r.expect >= 0) {
+        // 常规窗口没补齐（接口入库延迟等）→ 扩大到 2 小时再试一次，避免直接退回全量
+        state.errors.length = 0;
+        await pullWindow(p.retrySince);
+        if (gen !== state.gen) return;
+        r = reconcile();
+      }
+      if (r.ok) {
+        await finishSync(gen, date, agencyId, anchorTotal, "incremental");
+        return;
+      }
+      state.sync.reason = `对账需全量校准（缓存 ${p.lastTotal} → 接口 ${anchorTotal}，本地新增 ${r.grew} / 预期 ${r.expect}${state.errors.length ? "，且增量分页有失败" : ""}）`;
+      state.errors.length = 0;
+      state.sync.mode = "full";
+    }
+
+    // ---- 全量路径：首次 / 跨天 / 换商 / 手动 / 对账降级 ----
+    state.sync.mode = "full";
+    resetRows();
+    state.sync.reused = 0;
+    const dayEnd = Date.now();
+    const first = await callApi(API_QUERY, buildQueryPayload(1, undefined, dayEnd), true);
     if (gen !== state.gen) return;
     state.total = Number(first.total || 0);
     state.pages = Math.max(1, Math.ceil(state.total / PAGE_SIZE));
+    state.sync.fullPages = state.pages;
+    state.sync.pages++;
+    anchorTotal = state.total;
     pushRows(Array.isArray(first.data) ? first.data : []);
     recompute();
-    setProgress(1, state.pages, "正在加载明细…");
-
-    for (let p = 2; p <= state.pages; p++) {
+    setProgress(1, state.pages, "full");
+    for (let i = 2; i <= state.pages; i++) {
       if (gen !== state.gen) return;
       await sleep(THROTTLE_MS);
       if (gen !== state.gen) return;
       try {
-        const d = await callApi(API_QUERY, buildQueryPayload(p), false);
+        const d = await callApi(API_QUERY, buildQueryPayload(i, undefined, dayEnd), false);
         if (gen !== state.gen) return;
         pushRows(Array.isArray(d.data) ? d.data : []);
         recompute();
-      } catch (e) { state.errors.push(`第 ${p} 页：${e.message}`); }
-      setProgress(p, state.pages, "正在加载明细…");
+      } catch (e) { state.errors.push(`第 ${i} 页：${e.message}`); }
+      state.sync.pages++;
+      setProgress(i, state.pages, "full");
     }
     if (gen !== state.gen) return;
-
-    // 2) 排班 + 考勤（同步返回 xlsx 链接 -> 扩展页直接下载并解析）
-    setProgress(state.pages, state.pages, "export");
-    const teamIds = [...new Set(state.rows.map((r) => String(r.teamId || "")).filter(Boolean))];
-    const results = await Promise.allSettled([
-      loadExportSheet(API_SCHEDULE, "schedule", teamIds),
-      loadExportSheet(API_ATTENDANCE, "attendance", teamIds)
-    ]);
-    if (gen !== state.gen) return;
-    if (results[0].status === "fulfilled") state.schSheets = results[0].value;
-    if (results[1].status === "fulfilled") state.attSheets = results[1].value;
-    const failed = [];
-    if (results[0].status === "rejected") failed.push("排班（" + results[0].reason.message + "）");
-    if (results[1].status === "rejected") failed.push("考勤（" + results[1].reason.message + "）");
-    if (failed.length) {
-      state.dataNote = "部分数据未取到：" + failed.join("、");
-      showNotice(`排班 / 考勤未全部取到：${esc(failed.join("；"))}。完成率、标二占比、考核得分相关列暂显示「—」，其余数据不受影响。`);
-    }
-    recompute();
-
-    state.finishedAt = new Date();
-    render();
-    setProgress(state.pages, state.pages, "done");
-    if (state.errors.length && !failed.length) {
-      showNotice(`有 ${state.errors.length} 页运单加载失败（已展示其余数据）。可点「立即刷新」重试。`);
-    } else if (!state.total) {
-      showNotice("当日暂无运单。请确认已在本浏览器登录风神（a.ele.me）且账号有数据。", "blue");
-    }
+    await finishSync(gen, date, agencyId, anchorTotal, "full");
   } catch (e) {
     state.lastErr = e.message || String(e);
     setProgress(0, 1, "err");
-    showNotice(`加载失败：${esc(state.lastErr)}。请确认：① 已在本浏览器登录风神（a.ele.me）；② chrome://extensions 中已重新加载本扩展；③ 可点右上角「通道」手动切换直连 / 静默桥接后重试。`);
+    const cached = state.rows.length && state.sync.mode === "incremental" ? "当前展示的是本地缓存数据；" : "";
+    showNotice(`同步失败：${esc(state.lastErr)}。${cached}请确认：① 已在本浏览器登录风神（a.ele.me）；② chrome://extensions 中已重新加载本扩展；③ 可点右上角「通道」手动切换直连 / 静默桥接后重试。`);
   } finally {
     if (gen === state.gen) { state.loading = false; setBusy(false); }
   }
 }
 
-function restart() { state.gen++; state.loading = false; loadAll(); }
+function restart(opts) { state.gen++; state.loading = false; loadAll(opts); }
 
 // ---------------------------------------------------------------- 事件
-$("btn-refresh").addEventListener("click", restart);
+$("btn-refresh").addEventListener("click", () => restart());
+// 「全量重拉」：忽略本地缓存，重新分页拉当日全部运单并重建缓存（数据校准用）
+$("btn-full").addEventListener("click", () => restart({ forceFull: true }));
 $("auto").addEventListener("change", (e) => localStorage.setItem("wb_auto", e.target.checked ? "1" : "0"));
 $("btn-channel").addEventListener("click", async () => {
   const next = state.via === "direct" ? "bridge" : "direct";
@@ -403,19 +551,6 @@ $("btn-clean").addEventListener("click", () => {
   b.onclick = () => { document.body.classList.remove("clean"); b.remove(); $("btn-clean").textContent = "纯净看板"; };
   document.body.appendChild(b);
 });
-$("btn-image").addEventListener("change", (e) => {
-  const f = e.target.files && e.target.files[0];
-  if (!f) return;
-  const url = URL.createObjectURL(f);
-  $("compare-img").src = url;
-  $("image-panel").hidden = false;
-  document.body.classList.remove("clean");
-  $("btn-clean").textContent = "纯净看板";
-  const old = $("btn-clean-float"); if (old) old.remove();
-  $("image-panel").scrollIntoView({ behavior: "smooth", block: "start" });
-});
-$("btn-close-image").addEventListener("click", () => { $("image-panel").hidden = true; $("btn-image").value = ""; });
-
 setInterval(() => {
   if (!$("auto").checked || state.loading || document.hidden) return;
   loadAll();

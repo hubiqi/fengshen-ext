@@ -20,10 +20,8 @@
     <button id="btn-refresh" class="primary">立即刷新</button>
     <button id="btn-channel" class="ghost">通道：直连</button>
     <button id="btn-clean" class="ghost">纯净看板</button>
+    <button id="btn-full" class="ghost" title="忽略本地缓存，重新拉取当日全部运单（用于数据校准）">全量重拉</button>
     <button id="btn-update" class="ghost" title="检查 GitHub 上是否有新版本">检查更新</button>
-    <label class="ghost file" title="对照钉钉下发的原图（仅本地查看，不上传）">
-      原图对照<input type="file" id="btn-image" accept="image/*" hidden>
-    </label>
   </div>
 </div>
 
@@ -76,12 +74,6 @@
   <div class="doc-foot small">注：考勤为当日实时快照，上午时段有效在线时长普遍未满6h，6h口径在上午偏低；时段实际完单仅统计 08:00-24:00 七时段（不含 00:00-08:00 凌晨单）。完整考核以当日结束/次日刷新后为准</div>
 </main>
 
-<!-- 原图对照（用户本地选择 PNG，纯前端显示，不上传、不依赖服务） -->
-<section class="extra image-panel" id="image-panel" hidden>
-  <div class="extra-head">钉钉原图对照 <button id="btn-close-image" class="ghost">关闭</button></div>
-  <img id="compare-img" alt="考核看板原图">
-</section>
-
 <!-- 附加：与钉钉文字播报同口径生成，不属于 PNG 画面 -->
 <section class="extra" id="broadcast-panel">
   <div class="extra-head">考核进度播报 <span class="hint">与钉钉文字播报同口径（整商 + 各片区完成率由低到高 + 最低片区）</span></div>
@@ -92,6 +84,7 @@
 
 <script src="xlsx.js"></script>
 <script src="assess.js"></script>
+<script src="sync.js"></script>
 <script src="dashboard.js"></script>
 <script src="update-ui.js"></script>
 </body>
