@@ -1,6 +1,6 @@
 {
-  "version": "3.3.4",
-  "notes": "拆分「接口运单总数」与「实际完单」口径：进度条/底部显示配送成功与配送失败拆分，明确失败单已剔除；运单状态判定加固（失败关键词优先、兼容字符串 state、状态不明不计入完单）",
-  "download": "https://github.com/hubiqi/fengshen-ext/releases/download/v3.3.4/fengshen-ext-v3.3.4.zip",
+  "version": "3.3.5",
+  "notes": "增量同步改用「运单终态时间」水位（缓存记录最大 trackingFinishAt，不再用本地同步时刻），状态回写可被增量窗口捕获；新增每 30 分钟自动全量校准，兜住终态时间回退/改判导致的状态不同步；底部显示终态时间水位",
+  "download": "https://github.com/hubiqi/fengshen-ext/releases/download/v3.3.5/fengshen-ext-v3.3.5.zip",
   "published_at": "2026-11-06"
 }

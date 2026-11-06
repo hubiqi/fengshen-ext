@@ -31,7 +31,7 @@ const todayStr = () => {
 const hhmm = (d) => d.toTimeString().slice(0, 5);
 
 const newSyncStat = () => ({
-  mode: "full", reason: "", pages: 0, fullPages: 0,
+  mode: "full", reason: "", pages: 0, fullPages: 0, watermark: 0,
   added: 0, updated: 0, reused: 0, saved: true
 });
 
@@ -50,8 +50,10 @@ function windowToday() {
   const start = new Date(now); start.setHours(0, 0, 0, 0);
   return { start, end: now };
 }
-// since/end 省略时为「当日 00:00 ~ 现在」的全量窗口；
-// 增量同步传入水位窗口，只取这段时间内完单/状态变化的数据。
+// 时间维度固定为「运单终态时间」：trackingFinishStart / trackingFinishEnd
+// 接口按 trackingFinishAt 过滤并倒序返回；状态回写会改变终态时间，
+// 所以增量窗口必须沿这条时间轴推进，才能把新单和状态变更一起捞回来。
+// since/end 省略时为「当日 00:00 ~ 现在」的全量窗口。
 function buildQueryPayload(page, since, end) {
   const { start, end: now } = windowToday();
   return { params: { request: {
@@ -290,6 +292,7 @@ function syncSummary() {
     `缓存复用 ${fmt(s.reused)} 单 · 新增 ${fmt(s.added)} 单 · 状态回写 ${fmt(s.updated)} 单`
   ];
   if (s.mode === "incremental" && s.fullPages > s.pages) out.push(`省去 ${fmt(s.fullPages - s.pages)} 页全量拉取`);
+  if (s.watermark) out.push(`水位=终态时间 ${hhmm(new Date(s.watermark))}`);
   if (s.reason && s.mode === "full") out.push(`触发原因：${s.reason}`);
   if (!s.saved) out.push("缓存写入失败，下次刷新将退化为全量");
   return out.join(" · ");
@@ -383,7 +386,13 @@ async function finishSync(gen, date, agencyId, total, mode) {
 
   // 缓存写入失败不影响本次展示，只让下次刷新退化为全量
   const aid = localStorage.getItem("wb_agency") || agencyId || "";
-  const saved = SYNC ? await SYNC.write({ date, agencyId: aid, rows: state.rows, lastTotal: total, mode }) : false;
+  // 终态时间水位：本次所见运单里最大的 trackingFinishAt，作为下次增量窗口的起点
+  const finishWatermark = state.rows.reduce((m, r) => {
+    const t = Number(r.trackingFinishAt || r.completeAt || r.trackingCancelAt || 0);
+    return t > m ? t : m;
+  }, 0) || Date.now();
+  state.sync.watermark = finishWatermark;   // 底部展示（全量也能看到终态时间水位）
+  const saved = SYNC ? await SYNC.write({ date, agencyId: aid, rows: state.rows, lastTotal: total, mode, finishWatermark }) : false;
   state.sync.saved = saved;
   if (!saved) state.dataNote = (state.dataNote ? state.dataNote + "；" : "") + "本地缓存写入失败，下次刷新将退化为全量";
 
@@ -419,6 +428,7 @@ async function loadAll(opts) {
     const p = SYNC ? SYNC.plan(res, windowToday().start.getTime(), forceFull) : { mode: "full", reason: "缓存模块不可用" };
     state.sync.mode = p.mode;
     state.sync.reason = p.reason || "";
+    state.sync.watermark = Number(p.watermark || 0);
     let anchorTotal = 0;
 
     if (p.mode === "incremental") {
