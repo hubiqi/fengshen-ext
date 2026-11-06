@@ -129,4 +129,18 @@ body.clean .sheet { padding-top: 8px; }
 .ub-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
 .ub-actions button[hidden] { display: none; }
 /* 纯净看板用于截图，隐藏所有工具性质的内容 */
-body.clean .update-banner { display: none !important; }
+body.clean .update-banner, body.clean .update-status { display: none !important; }
+
+/* 检查更新结果反馈：与横幅独立，无新版时也看得见 */
+.update-status { display: flex; align-items: center; gap: 8px; margin: 8px 18px 0;
+  padding: 6px 10px; border-radius: 5px; font-size: 12px; line-height: 1.5;
+  border: 1px solid #A7F3D0; background: #ECFDF5; color: #065F46; }
+.update-status[hidden] { display: none; }
+.update-status .us-icon { flex: 0 0 auto; font-weight: 700; }
+.update-status .us-text { flex: 1 1 auto; word-break: break-word; }
+.update-status .us-close { flex: 0 0 auto; border: 0; background: transparent; color: inherit;
+  font-size: 15px; line-height: 1; padding: 0 2px; cursor: pointer; opacity: .6; }
+.update-status .us-close:hover { opacity: 1; }
+.update-status.bad { border-color: #FECACA; background: #FEF2F2; color: #991B1B; }
+.update-status.new { border-color: #BFDBFE; background: #EFF6FF; color: #1E40AF; }
+.update-status.info { border-color: #E5E7EB; background: #F9FAFB; color: #374151; }

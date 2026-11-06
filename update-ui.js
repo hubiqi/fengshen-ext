@@ -1,6 +1,11 @@
 /* 风神考核看板 · 更新提示条（扩展页面脚本）
  * 只负责渲染与交互，所有业务逻辑都在 service worker 的 updater.js 里。
  * 非扩展环境（比如单独打开 dashboard.html）直接跳过，不影响原看板。
+ *
+ * 反馈原则：点「检查更新」后一定要给出明确结论。
+ *   「已是最新」必须带上实际命中的版本源与远端版本号，用来证明请求真的打通了；
+ *   「检查失败」必须明确说明「无法确认是否有新版」，绝不能让用户误以为是已是最新。
+ * 反馈条独立于 update-banner：无新版时横幅是隐藏的，反馈条仍然可见。
  */
 (function () {
   "use strict";
@@ -11,6 +16,7 @@
   const STATE_KEY = "wb_update_state";
   const $ = (id) => document.getElementById(id);
   const banner = $("update-banner");
+  const statusBar = $("update-status");
   if (!banner) return;
 
   const send = (msg) => chrome.runtime.sendMessage(msg);
@@ -21,7 +27,9 @@
   };
 
   let state = null;
-  let forceShow = false;   // 手动点「检查更新」后，即使失败也让提示条可见
+  let forceShow = false;      // 手动点「检查更新」后，即使失败也让更新横幅可见
+  let manualStatus = null;    // 手动检查的详细结论（含版本源），优先于「上次检查」简版
+  let statusDismissed = false;// 用户主动关闭反馈条后，不再被自动检查重新弹出
 
   function setHint(text, bad) {
     const el = $("ub-hint");
@@ -29,6 +37,39 @@
     el.textContent = text || "";
     el.hidden = !text;
     el.classList.toggle("bad", !!bad);
+  }
+
+  function showStatus(text, kind) {
+    if (!statusBar) return;
+    const icon = $("us-icon");
+    if (icon) icon.textContent = kind === "bad" ? "✕" : kind === "new" ? "↑" : kind === "info" ? "↻" : "✓";
+    const textEl = $("us-text");
+    if (textEl) textEl.textContent = text;
+    statusBar.classList.toggle("bad", kind === "bad");
+    statusBar.classList.toggle("new", kind === "new");
+    statusBar.classList.toggle("info", kind === "info");
+    statusBar.hidden = false;
+  }
+
+  /** 独立于横幅的「检查结果」反馈：无新版 / 有新版 / 失败三态，以及定时检查的静默结论 */
+  function renderStatus(s) {
+    if (!statusBar || statusDismissed || !s) return;
+    const hasNew = s.available && s.latest !== s.skipped;
+    if (hasNew) {
+      showStatus(`发现新版本 v${s.latest}（当前 v${s.current}），详见上方更新条`, "new");
+      return;
+    }
+    if (s.error) {
+      showStatus(`检查更新失败：${s.error} · 无法确认是否有新版本（这不代表已是最新），请检查网络后点「检查更新」重试`, "bad");
+      return;
+    }
+    if (manualStatus) { showStatus(manualStatus.text, manualStatus.kind); return; }
+    if (!s.checkedAt) { statusBar.hidden = true; return; }
+    showStatus(
+      `上次检查 ${timeText(s.checkedAt)}：已是最新版本 v${s.current}` +
+      (s.source ? ` · 已连上 GitHub（${s.source}），远端版本 v${s.remoteVersion || s.current}` : ""),
+      "ok"
+    );
   }
 
   function render(s) {
@@ -41,6 +82,7 @@
     const downloaded = hasNew && !!state.downloadedAt;
     const show = hasNew || (!!state.error && forceShow);
     banner.hidden = !show;
+    renderStatus(state);
     if (!show) return;
 
     $("ub-title").textContent = state.error && !hasNew
@@ -51,7 +93,8 @@
     $("ub-meta").textContent = [
       "当前 v" + state.current,
       state.publishedAt ? "发布于 " + state.publishedAt : "",
-      "上次检查 " + timeText(state.checkedAt)
+      "上次检查 " + timeText(state.checkedAt),
+      state.source ? "版本源 " + state.source : ""
     ].filter(Boolean).join(" · ");
 
     $("ub-notes").textContent = state.error && !hasNew
@@ -87,20 +130,48 @@
   }
 
   // ---------------------------------------------------------------- 交互
+  const btnClose = $("us-close");
+  if (btnClose) btnClose.addEventListener("click", () => {
+    statusDismissed = true;
+    manualStatus = null;
+    if (statusBar) statusBar.hidden = true;
+  });
+
   $("btn-update").addEventListener("click", async (e) => {
     const btn = e.currentTarget;
     forceShow = true;
+    manualStatus = null;
+    statusDismissed = false;
     btn.disabled = true;
     const old = btn.textContent;
     btn.textContent = "检查中…";
+    showStatus("正在连接 GitHub 读取版本文件…", "info");
     try {
       const r = await send({ type: "WB_UPD_CHECK" });
-      if (r && r.reloading) { setHint("检测到磁盘已是新版，正在自动重载…"); return; }
-      render(r && r.state);
-      if (r && !r.ok) setHint("检查失败，请确认网络可访问 raw.githubusercontent.com 后重试。", true);
-      else setHint(r && r.hasNew ? "发现新版本。" : "已是最新版本。");
+      if (r && r.reloading) {
+        manualStatus = { text: "检测到磁盘上的插件文件已是新版，正在自动重载…", kind: "info" };
+        showStatus(manualStatus.text, "info");
+        return;
+      }
+      if (!r) {
+        showStatus("插件后台没有返回结果，请在 chrome://extensions 里重新加载扩展后重试（这不代表已是最新）。", "bad");
+        return;
+      }
+      if (!r.ok) { render(r.state); return; }        // 失败：明确告知无法确认是否有新版
+      if (r.hasNew) { render(r.state); return; }    // 有新版本：横幅 + 「发现新版本」
+
+      const s = r.state || {};
+      const cur = s.current || chrome.runtime.getManifest().version || "";
+      const src = r.source || s.source || "";
+      const remote = r.remoteVersion || s.remoteVersion || cur;
+      manualStatus = {
+        text: `已是最新版本 v${cur} · 已成功连接 GitHub（${src || "版本源"}），远端版本 v${remote} · ${timeText(Date.now())} 检查`,
+        kind: "ok"
+      };
+      render(s);
     } catch (err) {
-      setHint("无法连接插件后台，请重新加载扩展后重试。", true);
+      manualStatus = null;
+      showStatus("无法连接插件后台，请在 chrome://extensions 里重新加载扩展后重试（这不代表已是最新）。", "bad");
     } finally {
       btn.disabled = false;
       btn.textContent = old;

@@ -39,7 +39,10 @@ const RELOAD_COOLDOWN_MS = 60 * 1000;      // 防止极端情况下反复 reload
 
 const DEFAULT_STATE = {
   current: "", latest: "", notes: "", download: "", publishedAt: "",
-  checkedAt: 0, available: false, skipped: "", downloading: false,
+  // source / remoteVersion 用来证明「这次真的连上了 GitHub、读到的远端版本号是多少」，
+  // 否则「没有新版本」和「检查请求根本没发出去」在界面上无法区分。
+  checkedAt: 0, source: "", remoteVersion: "",
+  available: false, skipped: "", downloading: false,
   downloadId: null, downloadedAt: 0, pollUntil: 0, lastReloadAt: 0, error: ""
 };
 
@@ -91,7 +94,8 @@ async function fetchJSON(url, timeoutMs = 0, headers = {}) {
   } finally { if (timer) clearTimeout(timer); }
 }
 
-/** 依次尝试各版本源：超时 / 网络错误 / 内容不合法都会自动换下一个 */
+/** 依次尝试各版本源：超时 / 网络错误 / 内容不合法都会自动换下一个。
+ *  返回 { data, source }，source 为实际命中的域名，用于给 UI 证明链路确实通了。 */
 async function fetchVersionJSON() {
   const errors = [];
   for (const src of VERSION_URLS) {
@@ -101,7 +105,7 @@ async function fetchVersionJSON() {
       if (!data || !/^\d+(\.\d+)*$/.test(String(data.version || ""))) {
         throw new Error("version.json 格式不正确");
       }
-      return data;
+      return { data, source: new URL(src.url).hostname };
     } catch (e) {
       errors.push(`${new URL(src.url).hostname}: ${e && e.message ? e.message : e}`);
     }
@@ -141,7 +145,7 @@ async function checkForUpdate(manual = false) {
   } catch (e) { /* 自检失败不影响联网检查 */ }
 
   try {
-    const remote = await fetchVersionJSON();
+    const { data: remote, source } = await fetchVersionJSON();
     const latest = String(remote.version);
     const cmp = compareVersion(latest, currentVersion());
     const s = await getState();
@@ -152,13 +156,15 @@ async function checkForUpdate(manual = false) {
       download: remote.download || "",
       publishedAt: remote.published_at || "",
       checkedAt: Date.now(),
+      source, remoteVersion: latest,
       available: cmp > 0 && !skipped,
       error: ""
     });
-    return { ok: true, state, hasNew: cmp > 0 };
+    return { ok: true, state, hasNew: cmp > 0, source, remoteVersion: latest };
   } catch (e) {
+    // 失败时清空上次成功的来源信息，避免界面把「旧记录」当成本次连接成功
     const state = await setState({
-      checkedAt: Date.now(),
+      checkedAt: Date.now(), source: "", remoteVersion: "",
       error: String(e && e.message ? e.message : e)
     });
     return { ok: false, state, error: state.error };

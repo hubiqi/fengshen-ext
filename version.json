@@ -1,6 +1,6 @@
 {
-  "version": "3.3.2",
-  "notes": "版本检查备源改为实时 GitHub contents API（raw accept 头），替换有长缓存的 jsDelivr；避免发版后备源滞后误判无新版",
-  "download": "https://github.com/hubiqi/fengshen-ext/releases/download/v3.3.2/fengshen-ext-v3.3.2.zip",
+  "version": "3.3.3",
+  "notes": "检查更新无论有无新版本都给出明确反馈：独立状态条显示「已是最新 + 已连上 GitHub 的源 + 远端版本号」，失败明确提示「无法确认是否有新版本」，不再让「已是最新」和「链接不通」看起来一样",
+  "download": "https://github.com/hubiqi/fengshen-ext/releases/download/v3.3.3/fengshen-ext-v3.3.3.zip",
   "published_at": "2026-11-06"
 }
