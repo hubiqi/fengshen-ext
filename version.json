@@ -1,6 +1,6 @@
 {
-  "version": "3.3.1",
-  "notes": "版本检查增加备用源：raw.githubusercontent.com 超时/失败自动切 cdn.jsdelivr.net，避免国内网络下检查更新失败",
-  "download": "https://github.com/hubiqi/fengshen-ext/releases/download/v3.3.1/fengshen-ext-v3.3.1.zip",
+  "version": "3.3.2",
+  "notes": "版本检查备源改为实时 GitHub contents API（raw accept 头），替换有长缓存的 jsDelivr；避免发版后备源滞后误判无新版",
+  "download": "https://github.com/hubiqi/fengshen-ext/releases/download/v3.3.2/fengshen-ext-v3.3.2.zip",
   "published_at": "2026-11-06"
 }

@@ -2,7 +2,7 @@
 
 风神页面常驻小图标，点击直接展开考核看板：**规划单量完成率、标 2 骑手占比、考核得分、时段 × 商圈片达成矩阵**。全部数据在本机浏览器内获取，跟随当前浏览器登录态，换账号自动换商，无需本地服务、无需 Python。
 
-从 **v3.2.0** 起支持从本 GitHub 仓库自动检查与更新新版本（v3.3.1 增加备用版本源）；从 **v3.3.0** 起运单改为增量同步，刷新不再重拉当日全量明细。
+从 **v3.2.0** 起支持从本 GitHub 仓库自动检查与更新新版本（v3.3.2 增加实时备用版本源）；从 **v3.3.0** 起运单改为增量同步，刷新不再重拉当日全量明细。
 
 ---
 
@@ -48,9 +48,9 @@ v3.3.0 起由 [`sync.js`](./sync.js) 把当日运单按 `trackingId` 缓存在 `
 
 ```json
 {
-  "version": "3.3.1",
+  "version": "3.3.2",
   "notes": "本次更新说明",
-  "download": "https://github.com/hubiqi/fengshen-ext/releases/download/v3.3.1/fengshen-ext-v3.3.1.zip",
+  "download": "https://github.com/hubiqi/fengshen-ext/releases/download/v3.3.2/fengshen-ext-v3.3.2.zip",
   "published_at": "2026-11-06"
 }
 ```
@@ -59,7 +59,7 @@ v3.3.0 起由 [`sync.js`](./sync.js) 把当日运单按 `trackingId` 缓存在 `
 
 | 时机 | 行为 |
 | --- | --- |
-| 安装 / 每次浏览器启动 / 每 6 小时 | 匿名读取 `version.json`（主源 `raw.githubusercontent.com`，超时/失败自动切到 `cdn.jsdelivr.net` 备源），与当前版本比较 |
+| 安装 / 每次浏览器启动 / 每 6 小时 | 匿名读取 `version.json`（主源 `raw.githubusercontent.com`，超时/失败自动切 `api.github.com` contents API 备源，两个源都实时无缓存），与当前版本比较 |
 | 发现新版本 | 工具栏图标出现红色 `NEW` 角标、风神页面悬浮球出现红标、看板顶部出现蓝色更新条（含版本说明） |
 | 点「下载新版 zip」 | 直接下载 Release 里的安装包，并开始 30 分钟的快速磁盘轮询 |
 | 新版文件覆盖到插件目录后 | 读到磁盘上的 `version.json` 比运行时新，自动 `chrome.runtime.reload()`，**无需手动去 `chrome://extensions` 点重新加载** |
@@ -120,9 +120,10 @@ Release 出现后，所有已安装的插件最迟 6 小时内自动发现新版
 
 ## 常见问题
 
-- **提示「检查更新失败」**：v3.3.1 起会在主源 `raw.githubusercontent.com` 超时/失败时自动切换 `cdn.jsdelivr.net` 备源（每个源最多等 8 秒）；若两个源都被网络拦截，手动到 Releases 页面查看即可，不影响看板取数。
+- **提示「检查更新失败」**：v3.3.2 起主源 `raw.githubusercontent.com` 超时/失败会自动切 `api.github.com` 备源（每个源最多等 8 秒，备源用 `Accept: application/vnd.github.raw+json` 直接取原始 JSON，实时无缓存）；若两个源都被网络拦截，手动到 Releases 页面查看即可，不影响看板取数。
+- **为什么不用 jsDelivr 等 CDN 镜像做备源**：它们对 `@main` 有长缓存，发版后仍返回上一版版本号，会让插件误判「没有新版本」。备源必须实时，因此选官方 API。
 - **下载 404**：Release 由 GitHub Actions 在推送后自动生成，稍等 1–2 分钟再试；也可在 Releases 页面手动下载。
 - **覆盖了文件但没自动重载**：确认 `version.json` 也一起覆盖、且目录就是 `chrome://extensions` 里显示的那个目录；点「已覆盖 · 立即生效」可强制检测。
 - **数据看着不对 / 想强制校准**：点工具条「全量重拉」，忽略缓存重新拉当日全部运单并重建缓存。日常刷新仍走增量。
 - **每次刷新还是显示「全量同步」**：看板底部会写出触发原因（跨天 / 换商 / 对账不一致 / 缓存写入失败）。最常见的是「缓存写入失败」，通常是浏览器禁用了扩展本地存储；另一个是接口分页漂移导致对账不一致，自动全量重建后即恢复。
-- **权限说明**：`alarms`（定时检查）、`downloads`（下载 zip）、`https://raw.githubusercontent.com/*` 与 `https://cdn.jsdelivr.net/*`（主/备版本源）均为自动更新所需；`storage` / `unlimitedStorage` 为运单增量缓存所需（数据只存本机，不上传）；`tabs` / `scripting` / `declarativeNetRequestWithHostAccess` 为原有看板取数能力。
+- **权限说明**：`alarms`（定时检查）、`downloads`（下载 zip）、`https://raw.githubusercontent.com/*` 与 `https://api.github.com/*`（主/备版本源）均为自动更新所需；`storage` / `unlimitedStorage` 为运单增量缓存所需（数据只存本机，不上传）；`tabs` / `scripting` / `declarativeNetRequestWithHostAccess` 为原有看板取数能力。
