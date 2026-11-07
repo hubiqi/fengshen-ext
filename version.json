@@ -1,6 +1,6 @@
 {
-  "version": "3.7.1",
-  "notes": "出勤达成日期选择器新增左右箭头，可逐日快速切换（连点即可翻到任意历史日期）；到今天或 90 天前边界自动置灰并给出悬停说明，不会误点未来或越界日期",
-  "download": "https://github.com/hubiqi/fengshen-ext/releases/download/v3.7.1/fengshen-ext-v3.7.1.zip",
+  "version": "3.8.0",
+  "notes": "考核看板新增日期选择（今天 / T-1，日期框左右箭头逐日快切，最近 90 天）；T-1 与 T0 取数链路分开：运单改走所选日整天终态时间窗口全量、排班按该日导出、考勤改用出勤统计历史骑手时段明细并标准化；历史结果不写当天增量缓存，凌晨空明细明确提示不误算 0 分",
+  "download": "https://github.com/hubiqi/fengshen-ext/releases/download/v3.8.0/fengshen-ext-v3.8.0.zip",
   "published_at": "2026-11-08"
 }

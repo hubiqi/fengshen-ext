@@ -184,6 +184,19 @@ const ASSESS = (() => {
         String(r[iValid] ?? "").trim(), String(r[iOrders] ?? "").trim()
       ]);
     }
+    // 刚过零点查 T-1 时常遇到：导出文件只有表头、0 行明细（出勤统计要次日才生成）。
+    // 绝不能把空表当成「无人达标」——否则标二占比 / 考核得分会算成 0，看板完全失真。
+    // 抛给调用方后，考核看板会把相关列显示「—」，出勤达成页会提示明细未就绪。
+    if (rows.length === 1) {
+      return {
+        sheets: [],
+        stats: {
+          rows: 0, riders: 0, dayRowsMissing: 0,
+          ignoredDayFlag: true, dayStandard: DAY_ATTEND_STANDARD, emptyDate: dateStr
+        },
+        error: `${dateStr} 的出勤统计明细尚未生成（导出文件只有表头）。请稍后再试，或改查更早日期。`
+      };
+    }
     return {
       sheets: [{ name: "出勤明细(标准化)", rows }],
       stats: {
