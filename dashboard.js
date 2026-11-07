@@ -1,8 +1,9 @@
-// 风神考核看板（插件版 v3.9.0）—— 与 fengshen-data/assess_image.py 生成的钉钉看板同口径、同排版
+// 风神考核看板（插件版 v3.10.0）—— 与 fengshen-data/assess_image.py 生成的钉钉看板同口径、同排版
 // 数据源全部在插件内获取，跟随当前浏览器登录态：
 //   1) exportSchedule/1.0     -> 排班 xlsx（规划单量 / 应排骑手 / 时段预估单量）
 //   2) exportAttendance/1.0   -> 实时考勤 xlsx（全天 / 时段有效在线时长 + 完单量）
 //   3) exportStatisticsDetail/1.0 -> 历史日期的出勤明细（骑手 × 时段，同样含时长与完单量）
+//   4) queryTracking/2.0 (isReassign=1) -> 只查当日人工改派单，用于标1–标5 剔除
 // 不访问任何本地服务，不依赖 Python。v3.9.0 起不再同步运单明细：完单量直接取自考勤统计。
 //
 // v3.3.0：运单改为增量同步（sync.js 持久化当日缓存 + 终态时间水位窗口 + total 对账）。
@@ -29,6 +30,12 @@
 //     T-1 及更早：exportStatisticsDetail/1.0 出勤明细，经 detailToAttendance() 标准化
 //   站点范围（teamIds）单独缓存，识别一次长期复用；只有首次 / 换商才查 1 次运单第 1 页。
 //   运单相关代码（增量 / 水位 / 对账 / 校准）保留在 sync.js 里，但考核看板已不再调用。
+// v3.10.0：补回「人工改派剔除」—— 只查改派单，不拉全量运单。
+//   实测出勤统计的全天完单 = 运单「配送成功」单数（11-06：9051 = 9051，逐骑手 233/233 全等），
+//   也就是考勤口径本身**没有**剔除人工改派，直接拿来算标2 会偏高。
+//   而 queryTracking/2.0 支持 isReassign=1 直接筛选：11-06 全天 9345 单里改派只有 159 单，
+//   2 页就取完。于是「排班 + 考勤 + 改派单」仍是 4 个请求、秒级出结果，
+//   既保住 v3.9.0 的速度，又把 KPI 第十三条的剔除加回来了。
 
 const XT = "https://httpizza.ele.me/xtop/";
 // 只用于「识别站点范围」：首次 / 换商时取 1 页拿 teamId，不再分页同步运单
@@ -63,7 +70,7 @@ const isToday = (d) => d === todayStr();
 const hhmm = (d) => d.toTimeString().slice(0, 5);
 
 // 本次加载的元信息：不再有「增量 / 全量 / 页数 / 水位」，只看数据来源与耗时
-const newLoadStat = () => ({ teamRequests: 0, history: false });
+const newLoadStat = () => ({ teamRequests: 0, history: false, reassignPages: 0, reassignTotal: 0 });
 
 const state = {
   via: localStorage.getItem("wb_via") || "direct",
@@ -71,6 +78,7 @@ const state = {
   loading: false, gen: 0, errors: [], fallbackTried: false,
   startedAt: null, finishedAt: null, lastErr: "",
   schSheets: [], attSheets: [], dataNote: "", assess: null, detailStats: null,
+  reassignOrders: null,   // null=没查/查询失败；数组=已查（可能是空数组，表示当天没有改派）
   teamSource: "", teamCount: 0, teamIds: [],
   memo: new Map(),   // 历史日期 -> 已加载结果，切回同日期秒回；「立即刷新」强制重拉
   load: newLoadStat()
@@ -90,7 +98,8 @@ function windowToday(date) {
 // 接口按 trackingFinishAt 过滤并倒序返回；状态回写会改变终态时间，
 // 所以增量窗口必须沿这条时间轴推进，才能把新单和状态变更一起捞回来。
 // since/end 省略时按所选日期给出全量窗口（历史日期是整天，今天是 00:00~现在）。
-function buildQueryPayload(page, since, end, date) {
+// extra 用于「只查改派单」：传 { isReassign: 1, teamIds } 即可让接口直接筛改派单。
+function buildQueryPayload(page, since, end, date, extra) {
   const w = windowToday(date);
   return { params: { request: {
     deliverTypeList: [1, 2],
@@ -101,7 +110,8 @@ function buildQueryPayload(page, since, end, date) {
     payAmountStart: "0", payAmountEnd: "999999",
     weightStart: "0", weightEnd: "999999",
     trackingFinishTimePeriodList: ["0-86400"],
-    current: page, pageSize: PAGE_SIZE
+    current: page, pageSize: PAGE_SIZE,
+    ...(extra || {})
   } } };
 }
 function buildExportPayload(kind, teamIds, date) {
@@ -216,6 +226,30 @@ async function loadAttendanceSheets(mode, teamIds, date) {
   return { sheets: conv.sheets, stats: conv.stats };
 }
 
+/** 只查「人工改派」运单（isReassign=1）。
+ *  为什么还要查运单：出勤统计的全天完单 = 运单「配送成功」单数（实测 11-06 逐骑手 233/233
+ *  完全相等），说明考勤口径**没有**剔除人工改派；而 KPI 第十三条要求在标1–标5 里剔除。
+ *  为什么不拉全量：接口支持 isReassign 直接筛选，11-06 全天 9345 单里改派只有 159 单，
+ *  2 页就取完 —— 比分页拉上万单便宜两个数量级，切日期仍是秒级。 */
+const MAX_REASSIGN_PAGES = 20;   // 兜底：异常时最多 20 页（1800 单），不让它把加载拖住
+async function loadReassignOrders(teamIds, date) {
+  const out = [];
+  let total = 0;
+  for (let page = 1; page <= MAX_REASSIGN_PAGES; page++) {
+    const d = await callApi(API_QUERY,
+      buildQueryPayload(page, undefined, undefined, date, { isReassign: 1, teamIds: teamIds || [] }),
+      page === 1);
+    const list = Array.isArray(d.data) ? d.data : [];
+    if (typeof d.total === "number") total = d.total;
+    out.push(...list);
+    state.load.reassignPages = page;
+    state.load.reassignTotal = total || out.length;
+    if (!list.length || out.length >= total) break;
+    await sleep(450);   // 接口有频率限制，改派单本来就只有两三页，慢一点更稳
+  }
+  return out;
+}
+
 // ---------------------------------------------------------------- 通知 / 进度
 function showNotice(text, kind) {
   const n = $("notice");
@@ -237,7 +271,7 @@ function setProgress(page, pages, mode) {
   $("progress-text").textContent =
     mode === "done" ? `${state.mode === "history" ? "历史定稿" : "实时快照"}完成${scope ? " · " + scope : ""}` :
     mode === "err" ? "加载失败" :
-    mode === "export" ? (state.mode === "history" ? "正在获取排班 / 历史出勤明细…" : "正在获取排班 / 实时考勤…") :
+    mode === "export" ? (state.mode === "history" ? "正在获取排班 / 历史出勤明细 / 改派单…" : "正在获取排班 / 实时考勤 / 改派单…") :
     mode === "team" ? "正在识别站点范围…" :
     "连接风神接口…";
 }
@@ -246,8 +280,11 @@ function setBusy(b) { $("btn-refresh").disabled = b; $("btn-refresh").textConten
 // ---------------------------------------------------------------- 计算 + 渲染
 function recompute() {
   // dateStr 传所选日期：排班统计 / 时段矩阵都按该日期的行过滤，历史日期不会串到今天。
-  // orders 传空数组 = 完单取自出勤统计（v3.9.0 起不再同步运单）。
-  state.assess = ASSESS.build([], state.schSheets, state.attSheets, state.date, XLSX_READER);
+  // orders 传空数组 = 完单取自出勤统计（v3.9.0 起不再同步运单）；
+  // opts.reassignOrders = 只查回来的改派单（v3.10.0），仅用于标1–标5 的达标剔除。
+  // 注意：null 与 [] 语义不同 —— null 表示「没查到」，此时不传 opts，标2 就退回不剔除。
+  const opts = Array.isArray(state.reassignOrders) ? { reassignOrders: state.reassignOrders } : undefined;
+  state.assess = ASSESS.build([], state.schSheets, state.attSheets, state.date, XLSX_READER, opts);
   render();
 }
 
@@ -259,8 +296,8 @@ function renderTable1(a) {
     `<col style="width:96px"><col style="width:86px"><col style="width:90px">` +
     `<col style="width:70px"><col style="width:92px"><col style="width:84px"></colgroup>`;
   const thTitle = {
-    2: "实际完单：仅统计配送成功（state=40），已剔除配送失败；人工改派单仍计入片区实际完单",
-    4: "完单达标人数：按骑手当日「非人工改派」配送成功单判定（UB≥26 / 其他≥24）",
+    2: "实际完单：出勤统计的全天完单合计（= 运单「配送成功」单数），人工改派单仍计入片区实际完单",
+    4: "完单达标人数：按骑手当日「非人工改派」完成单判定（UB≥26 / 其他≥24）",
     5: "标2骑手：非人工改派完单达标 且 全天有效在线时长≥6h；人工改派完单已剔除"
   };
   const out = [colgroup, "<thead><tr>" + head.map((h, i) =>
@@ -339,6 +376,9 @@ function loadSummary() {
   out.push(state.mode === "history"
     ? "历史定稿：排班统计 + 出勤明细导出，不读也不写任何运单缓存"
     : "实时快照：排班统计 + 实时考勤导出（含时段 / 全天完单量）");
+  if (state.load.reassignPages) {
+    out.push(`改派单 ${state.load.reassignTotal || 0} 张 / ${state.load.reassignPages} 次请求（只查 isReassign=1）`);
+  }
   if (state.load.teamRequests) out.push(`本次用 ${state.load.teamRequests} 次运单请求识别 teamId`);
   return out.join(" · ");
 }
@@ -373,11 +413,11 @@ function syncDateChrome() {
     ? "忽略本机缓存，重新拉取该历史日期的排班统计与出勤明细"
     : "忽略本机缓存，重新拉取今天的排班统计与实时考勤";
   $("doc-note").textContent = history
-    ? `标2骑手 = ${state.date} 完单≥门槛(UB26 / 其他24) 且 全天有效在线时长≥6h；完单量取自出勤统计（考核系统口径），片区「实际完单」= 该片区骑手全天完单合计`
-    : "标2骑手 = 当日 完单≥门槛(UB26 / 其他24) 且 全天有效在线时长≥6h（实时考勤快照）；完单量取自考勤导出，片区「实际完单」= 该片区骑手全天完单合计";
+    ? `标2骑手 = ${state.date} 完单≥门槛(UB26 / 其他24) 且 全天有效在线时长≥6h；完单量取自出勤统计（考核系统口径），标2 已剔除人工改派成功单，片区「实际完单」仍含改派单`
+    : "标2骑手 = 当日 完单≥门槛(UB26 / 其他24) 且 全天有效在线时长≥6h（实时考勤快照）；完单量取自考勤导出，标2 已剔除人工改派成功单，片区「实际完单」仍含改派单";
   $("doc-foot-small").textContent = history
-    ? `注：${state.date} 为历史定稿数据；排班取该日排班统计，完单量与有效在线时长取「出勤统计 → 导出明细数据」的骑手 × 时段明细（全天按 6h / 18 单手工判定，不采信系统达成标记）；时段矩阵按该日排班实际班次动态生成，不影响实际完单合计`
-    : "注：考勤为当日实时快照，上午时段有效在线时长普遍未满6h，6h口径在上午偏低；时段矩阵按当日排班实际班次动态生成（班次时间区间取自 KPI 11 时段标准）。完整考核以当日结束 / 次日刷新后为准";
+    ? `注：${state.date} 为历史定稿数据；排班取该日排班统计，完单量与有效在线时长取「出勤统计 → 导出明细数据」的骑手 × 时段明细（全天按 6h / 18 单手工判定，不采信系统达成标记）；人工改派单单独按 isReassign=1 查回后从骑手达标剔除；时段矩阵按该日排班实际班次动态生成，不影响实际完单合计`
+    : "注：考勤为当日实时快照，上午时段有效在线时长普遍未满6h，6h口径在上午偏低；标2 已按当日已发生的改派单剔除；时段矩阵按当日排班实际班次动态生成（班次时间区间取自 KPI 11 时段标准）。完整考核以当日结束 / 次日刷新后为准";
   return modeLabel;
 }
 
@@ -402,6 +442,7 @@ function render() {
     ` · 站点 <b>${state.teamCount || 0}</b> / <b>${a.rows.length}</b> ${a.areaLabel}` +
     ` · 数据源 <b>${modeLabel}</b>` +
     ` · 完单 <b>出勤统计</b>` +
+    (a.reassignStats ? ` · 改派 <b>${fmt(a.reassignStats.excluded)}</b> 已剔除` : "") +
     ` · 更新 <b>${hhmm(now)}</b>` +
     ` · 通道 <b>${state.via === "bridge" ? "静默桥接" : "直连"}</b>` +
     ` · 排班/考勤 <b>${a.scheduleOk ? "✓" : "…"}/${a.attendanceOk ? "✓" : "…"}</b>`;
@@ -416,10 +457,14 @@ function render() {
       : " · 不再同步运单明细，完单量与有效在线时长同源") +
     (a.doneSource === "waybill"
       ? ` · 完单口径：运单明细（配送成功 ${fmt(a.orderStats ? a.orderStats.success : 0)} / 共 ${fmt(a.orderStats ? a.orderStats.total : 0)} 单）`
-      : " · 完单口径：出勤统计的骑手完单量合计，与考核系统同源；不再逐单判定配送状态") +
+      : " · 完单口径：出勤统计的全天完单合计（实测 = 运单「配送成功」单数，逐骑手一致）") +
     (a.reassignStats
-      ? ` · 标2口径：人工改派成功单 ${fmt(a.reassignStats.excluded)} 单已从骑手达标统计剔除（完单达标 ${fmt(a.reassignStats.dokRaw)}→${fmt(a.reassignStats.dok)}、标2 ${fmt(a.reassignStats.b2Raw)}→${fmt(a.reassignStats.b2)}，${fmt(a.reassignStats.downgraded)} 人因此跌破门槛）；片区实际完单仍含改派单`
-      : " · 标2口径：出勤统计的完单量已按考核结算规则统好，含改派在内的逐单剔除需运单明细，当前不启用") +
+      ? (a.reassignStats.queried != null
+        // 考勤口径：改派单是单独查回来的，顺便写明查了多少张、多少张因未送达不参与剔除
+        ? ` · 标2口径：已单独查回该日人工改派单 ${fmt(a.reassignStats.queried)} 张，其中配送成功 ${fmt(a.reassignStats.excluded)} 张已从骑手达标剔除（完单达标 ${fmt(a.reassignStats.dokRaw)}→${fmt(a.reassignStats.dok)}、标2 ${fmt(a.reassignStats.b2Raw)}→${fmt(a.reassignStats.b2)}，${fmt(a.reassignStats.downgraded)} 人因此跌破门槛）；片区实际完单仍含改派单`
+        // 运单口径：全量运单里就地判定，没有「单独查回」这一步
+        : ` · 标2口径：人工改派成功单 ${fmt(a.reassignStats.excluded)} 单已从骑手达标统计剔除（完单达标 ${fmt(a.reassignStats.dokRaw)}→${fmt(a.reassignStats.dok)}、标2 ${fmt(a.reassignStats.b2Raw)}→${fmt(a.reassignStats.b2)}，${fmt(a.reassignStats.downgraded)} 人因此跌破门槛）；片区实际完单仍含改派单`)
+      : " · 标2口径：本次未取到改派单，标2 按考勤完单原值统计（含人工改派），人数可能偏高；点「立即刷新」重试即可") +
     (a.periods
       ? ` · 时段矩阵：按当日排班 ${a.periods.length} 个班次动态生成（${a.periods.join(" / ")}）` +
         (a.periodSource === "default" ? "，排班未取到故回退默认 7 班次" : "") +
@@ -491,14 +536,15 @@ async function resolveTeamIds(date) {
   return [];
 }
 
-/** 拉排班 + 考勤（历史日期为出勤明细），随后立即重算渲染。返回失败项，供上层决定是否缓存结果。 */
+/** 拉排班 + 考勤（历史日期为出勤明细）+ 改派单，随后立即重算渲染。返回失败项，供上层决定是否缓存结果。 */
 async function loadSheets(gen, date, teamIds) {
   const history = state.mode === "history";
   const attLabel = history ? "历史出勤明细" : "考勤";
   setProgress(0, 1, "export");
   const results = await Promise.allSettled([
     loadExportSheet(API_SCHEDULE, "schedule", teamIds, date),
-    loadAttendanceSheets(state.mode, teamIds, date)
+    loadAttendanceSheets(state.mode, teamIds, date),
+    loadReassignOrders(teamIds, date)
   ]);
   if (gen !== state.gen) return { failed: [] };
   if (results[0].status === "fulfilled") state.schSheets = results[0].value;
@@ -506,9 +552,12 @@ async function loadSheets(gen, date, teamIds) {
     state.attSheets = results[1].value.sheets;
     state.detailStats = results[1].value.stats;
   }
+  // 改派单失败时保持 null：宁可明确提示「标2 未剔除改派」，也不悄悄少扣一批人
+  state.reassignOrders = results[2].status === "fulfilled" ? results[2].value : null;
   const failed = [];
   if (results[0].status === "rejected") failed.push("排班（" + results[0].reason.message + "）");
   if (results[1].status === "rejected") failed.push(attLabel + "（" + results[1].reason.message + "）");
+  if (results[2].status === "rejected") failed.push("人工改派单（" + results[2].reason.message + "）");
   if (failed.length) {
     state.dataNote = "部分数据未取到：" + failed.join("、");
     showNotice(`排班 / ${attLabel}未全部取到：${esc(failed.join("；"))}。相关列显示「—」，其余列不受影响。` +
@@ -530,6 +579,7 @@ async function loadAll(opts) {
   Object.assign(state, {
     mode: history ? "history" : "live",
     errors: [], lastErr: "", schSheets: [], attSheets: [], detailStats: null,
+    reassignOrders: null,
     teamSource: "", teamCount: 0, teamIds: [], dataNote: "", assess: null,
     startedAt: new Date(), finishedAt: null, load: newLoadStat()
   });
@@ -543,6 +593,7 @@ async function loadAll(opts) {
     state.schSheets = memo.sch;
     state.attSheets = memo.att;
     state.detailStats = memo.detailStats;
+    state.reassignOrders = Array.isArray(memo.reassign) ? memo.reassign : null;
     state.teamSource = memo.teamSource;
     state.teamCount = memo.teamCount;
     state.finishedAt = memo.finishedAt || new Date();
@@ -572,6 +623,7 @@ async function loadAll(opts) {
     if (history && !failed.length) {
       state.memo.set(memoKey, {
         sch: state.schSheets, att: state.attSheets, detailStats: state.detailStats,
+        reassign: state.reassignOrders,
         teamSource: state.teamSource, teamCount: state.teamCount,
         finishedAt: state.finishedAt
       });
