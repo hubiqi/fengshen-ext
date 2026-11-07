@@ -1,13 +1,13 @@
-// 风神考核看板（插件版 v3.4.2）—— 与 fengshen-data/assess_image.py 生成的钉钉看板同口径、同排版
+// 风神考核看板（插件版 v3.4.3）—— 与 fengshen-data/assess_image.py 生成的钉钉看板同口径、同排版
 // 数据源全部在插件内获取，跟随当前浏览器登录态：
 //   1) queryTracking/2.0      -> 运单明细（实际完单 / 时段完单 / 骑手完单 / 站点商圈）
 //   2) exportSchedule/1.0     -> 排班 xlsx（规划单量 / 应排骑手 / 时段预估单量）
 //   3) exportAttendance/1.0   -> 考勤 xlsx（全天有效在线时长，用于标2 6h 门槛）
 // 不访问任何本地服务，不依赖 Python，换账号登录即自动切换合作商。
 //
-// v3.3.0：运单改为增量同步（sync.js 持久化当日缓存 + 时间水位窗口 + total 对账）。
-//   刷新时先用缓存秒开渲染，再只查「上次同步 - 2h 回溯窗口」拿新单/状态变更；
-//   对账不一致、跨天、换商、缓存异常、手动「全量重拉」时才回退到全量分页。
+// v3.3.0：运单改为增量同步（sync.js 持久化当日缓存 + 终态时间水位窗口 + total 对账）。
+//   刷新时先用缓存秒开渲染，再只查「终态水位 - 15min ~ 现在」拿新单/状态变更。
+//   全量只发生在：首次 / 跨天 / 换商 / 缓存异常 / 撤单 / 连续 3 次对账未补齐 / 手动「全量重拉」。
 // v3.3.6：标2 / 完单达标只认「非人工改派」的配送成功单（isReassign != 1，KPI 第十三条）；
 //   片区「实际完单 / 订单完成率 / 时段完单」口径不变，仍按全部配送成功单统计。
 // v3.4.0：工具条「复制图片」把 #sheet 渲染成 2 倍高清 PNG 写入剪贴板（capture.js），
@@ -16,6 +16,10 @@
 //   表 2 随班次数量动态压缩子列宽、保持 1218px 总宽不撑破「复制图片」画布。
 // v3.4.2：字体改用系统默认 UI 字体栈并统一数字等宽；移除 compact 的 10/11px 压缩，
 //   班次变多时只压缩列宽、字号一律保持常规（一级表头 colspan=2 本就足够宽）。
+// v3.4.3：取消「每 30 分钟强制全量校准」（自动刷新 5min → 每半小时必全量一次），
+//   改为滚动分片状态校准（每 30 分钟只查 1 片 2 小时历史窗口，仍是增量）；
+//   对账放宽：接口入库延迟不再降级全量，保留缓存 + 水位不推进 + 下次续补，
+//   连续 3 次补不齐才回退全量；只有 total 变小（撤单）才立即重建。
 
 const XT = "https://httpizza.ele.me/xtop/";
 const API_QUERY = XT + "xtop.agencyTrackingFs.queryTracking/2.0";
@@ -40,7 +44,8 @@ const hhmm = (d) => d.toTimeString().slice(0, 5);
 
 const newSyncStat = () => ({
   mode: "full", reason: "", pages: 0, fullPages: 0, watermark: 0,
-  added: 0, updated: 0, reused: 0, saved: true
+  added: 0, updated: 0, reused: 0, saved: true,
+  calib: null, short: 0, keepWatermark: false, prevWatermark: 0, missStreak: 0
 });
 
 const state = {
@@ -316,8 +321,10 @@ function syncSummary() {
     `缓存复用 ${fmt(s.reused)} 单 · 新增 ${fmt(s.added)} 单 · 状态回写 ${fmt(s.updated)} 单`
   ];
   if (s.mode === "incremental" && s.fullPages > s.pages) out.push(`省去 ${fmt(s.fullPages - s.pages)} 页全量拉取`);
+  if (s.calib) out.push(`历史状态校准 ${hhmm(new Date(s.calib.since))}–${hhmm(new Date(s.calib.end))}（增量分片，非全量）`);
+  if (s.short > 0) out.push(`接口待补 ${fmt(s.short)} 单（水位不推进，下次自动续补）`);
   if (s.watermark) out.push(`水位=终态时间 ${hhmm(new Date(s.watermark))}`);
-  if (s.reason && s.mode === "full") out.push(`触发原因：${s.reason}`);
+  if (s.reason) out.push(`触发原因：${s.reason}`);
   if (!s.saved) out.push("缓存写入失败，下次刷新将退化为全量");
   return out.join(" · ");
 }
@@ -421,13 +428,23 @@ async function finishSync(gen, date, agencyId, total, mode) {
 
   // 缓存写入失败不影响本次展示，只让下次刷新退化为全量
   const aid = localStorage.getItem("wb_agency") || agencyId || "";
-  // 终态时间水位：本次所见运单里最大的 trackingFinishAt，作为下次增量窗口的起点
-  const finishWatermark = state.rows.reduce((m, r) => {
+  // 终态时间水位：本次所见运单里最大的 trackingFinishAt，作为下次增量窗口的起点。
+  // 对账没补齐（接口入库延迟）时水位保持原值，下次窗口会从同一位置重新覆盖，
+  // 把延迟单自动续补回来，而不是靠降级全量去捞。
+  const latestWatermark = state.rows.reduce((m, r) => {
     const t = Number(r.trackingFinishAt || r.completeAt || r.trackingCancelAt || 0);
     return t > m ? t : m;
   }, 0) || Date.now();
+  const finishWatermark = (mode === "incremental" && state.sync.keepWatermark && state.sync.prevWatermark)
+    ? state.sync.prevWatermark : latestWatermark;
   state.sync.watermark = finishWatermark;   // 底部展示（全量也能看到终态时间水位）
-  const saved = SYNC ? await SYNC.write({ date, agencyId: aid, rows: state.rows, lastTotal: total, mode, finishWatermark }) : false;
+  const saved = SYNC ? await SYNC.write({
+    date, agencyId: aid, rows: state.rows, lastTotal: total, mode, finishWatermark,
+    calibFrom: state.sync.calib ? state.sync.calib.nextFrom : undefined,
+    // 全量本身已覆盖全天状态，也记为一次校准，避免刚同步完又立刻拉校准片
+    calibAt: (mode === "full" || state.sync.calib) ? Date.now() : undefined,
+    missStreak: state.sync.missStreak || 0
+  }) : false;
   state.sync.saved = saved;
   if (!saved) state.dataNote = (state.dataNote ? state.dataNote + "；" : "") + "本地缓存写入失败，下次刷新将退化为全量";
 
@@ -469,6 +486,7 @@ async function loadAll(opts) {
     if (p.mode === "incremental") {
       resetRows(p.rows);
       state.sync.reused = p.baseCount;
+      state.sync.prevWatermark = Number(p.watermark || 0);
       recompute();                         // 先拿本地缓存秒开渲染，不等网络
 
       // A) 全日第 1 页：拿 total 作对账锚点，顺便刷新最新一页的状态
@@ -483,12 +501,13 @@ async function loadAll(opts) {
       recompute();
       setProgress(1, 1, "anchor");
 
-      // B) 只查「上次同步 - 常规窗口」内的新单 / 状态变更，分页窗口固定避免漂移
+      // B) 常规窗口 / 扩窗 / 状态校准分片共用的分页拉取；窗口起止固定避免分页漂移
       const end = Date.now();
-      const pullWindow = async (since) => {
+      const pullWindow = async (since, wEnd, quiet) => {
+        const to = wEnd == null ? end : wEnd;
         await sleep(THROTTLE_MS);
         if (gen !== state.gen) return false;
-        const w1 = await callApi(API_QUERY, buildQueryPayload(1, since, end), false);
+        const w1 = await callApi(API_QUERY, buildQueryPayload(1, since, to), false);
         if (gen !== state.gen) return false;
         const winPages = Math.max(1, Math.ceil(Number(w1.total || 0) / PAGE_SIZE));
         state.sync.pages++;
@@ -500,43 +519,68 @@ async function loadAll(opts) {
           await sleep(THROTTLE_MS);
           if (gen !== state.gen) return false;
           try {
-            const d = await callApi(API_QUERY, buildQueryPayload(i, since, end), false);
+            const d = await callApi(API_QUERY, buildQueryPayload(i, since, to), false);
             if (gen !== state.gen) return false;
             pushRows(Array.isArray(d.data) ? d.data : []);
             recompute();
-          } catch (e) { state.errors.push(`增量第 ${i} 页：${e.message}`); }
+          } catch (e) { if (!quiet) state.errors.push(`增量第 ${i} 页：${e.message}`); }
           state.sync.pages++;
           setProgress(i, winPages, "incr");
         }
         return true;
       };
-      // C) 对账：新增行数必须等于接口 total 的增量；total 变小说明撤单，分页失败也不能算成功
+
+      // C) 对账：只有 total 变小（撤单）才立即全量重建。
+      //    total 增长但窗口没捞齐 = 接口入库延迟，不再降级全量：
+      //    保留缓存 + 水位不推进 + missStreak 计数，下次刷新从同一位置自动续补；
+      //    连续 MAX_MISS_STREAK 次仍补不齐才回退全量，避免接口长期异常时一直展示残缺数据。
       const reconcile = () => {
         const grew = state.rows.length - p.baseCount;
         const expect = anchorTotal - p.lastTotal;
         return {
-          ok: anchorTotal > 0 && expect >= 0 && grew === expect && !state.errors.length,
-          grew, expect
+          shrank: p.lastTotal > 0 && anchorTotal < p.lastTotal,
+          grew, expect,
+          // 用「缓存缺口」而不是「本次新增 vs total 增量」：后者在延迟单补回后
+          // 会因 expect 归零而让 missStreak 失效，前者能持续反映缓存是否真的缺单。
+          short: Math.max(0, anchorTotal - state.rows.length)
         };
       };
 
-      await pullWindow(p.since);
+      await pullWindow(p.since, end);
       if (gen !== state.gen) return;
       let r = reconcile();
-      if (!r.ok && r.expect >= 0) {
-        // 常规窗口没补齐（接口入库延迟等）→ 扩大到 2 小时再试一次，避免直接退回全量
+      if (!r.shrank && r.short > 0) {
+        // 常规窗口没补齐 → 扩大到 2 小时再试一次（仍是增量，不是全量）
         state.errors.length = 0;
-        await pullWindow(p.retrySince);
+        await pullWindow(p.retrySince, end);
         if (gen !== state.gen) return;
         r = reconcile();
       }
-      if (r.ok) {
+      const streak = r.short > 0 ? p.missStreak + 1 : 0;
+      if (r.shrank) {
+        state.sync.reason = `接口对账：运单总数变小（缓存 ${p.lastTotal} → 接口 ${anchorTotal}，疑似撤单），全量重建缓存`;
+      } else if (r.short > 0 && streak >= (SYNC ? SYNC.MAX_MISS_STREAK : 3)) {
+        state.sync.reason = `接口对账：连续 ${streak} 次未补齐（待补 ${r.short} 单），全量重建缓存`;
+      } else {
+        // 正常增量路径：保留缓存、按需推进水位，再做一片历史状态校准
+        state.sync.short = r.short;
+        state.sync.keepWatermark = r.short > 0;
+        state.sync.missStreak = streak;
+        if (p.calib) {
+          try {
+            // 校准分片失败不影响本次增量结果：calibFrom 不推进，下次重试同一片
+            const ok = await pullWindow(p.calib.since, p.calib.end, true);
+            if (!ok) return;
+            state.sync.calib = p.calib;
+          } catch (e) { /* 忽略，下次重试同一片 */ }
+        }
         await finishSync(gen, date, agencyId, anchorTotal, "incremental");
         return;
       }
-      state.sync.reason = `对账需全量校准（缓存 ${p.lastTotal} → 接口 ${anchorTotal}，本地新增 ${r.grew} / 预期 ${r.expect}${state.errors.length ? "，且增量分页有失败" : ""}）`;
       state.errors.length = 0;
       state.sync.mode = "full";
+      state.sync.keepWatermark = false;
+      state.sync.missStreak = 0;
     }
 
     // ---- 全量路径：首次 / 跨天 / 换商 / 手动 / 对账降级 ----
