@@ -1,8 +1,8 @@
-// 风神考核看板（插件版 v3.4.3）—— 与 fengshen-data/assess_image.py 生成的钉钉看板同口径、同排版
+// 风神考核看板（插件版 v3.5.0）—— 与 fengshen-data/assess_image.py 生成的钉钉看板同口径、同排版
 // 数据源全部在插件内获取，跟随当前浏览器登录态：
 //   1) queryTracking/2.0      -> 运单明细（实际完单 / 时段完单 / 骑手完单 / 站点商圈）
-//   2) exportSchedule/1.0     -> 排班 xlsx（规划单量 / 应排骑手 / 时段预估单量）
-//   3) exportAttendance/1.0   -> 考勤 xlsx（全天有效在线时长，用于标2 6h 门槛）
+//   2) exportSchedule/1.0     -> 排班 xlsx（规划单量 / 应排人数 / 排班人数 / 时段预估单量）
+//   3) exportAttendance/1.0   -> 考勤 xlsx（全天有效在线时长用于标2；逐时段有效在线 / 完单用于出勤达成）
 // 不访问任何本地服务，不依赖 Python，换账号登录即自动切换合作商。
 //
 // v3.3.0：运单改为增量同步（sync.js 持久化当日缓存 + 终态时间水位窗口 + total 对账）。
@@ -20,6 +20,10 @@
 //   改为滚动分片状态校准（每 30 分钟只查 1 片 2 小时历史窗口，仍是增量）；
 //   对账放宽：接口入库延迟不再降级全量，保留缓存 + 水位不推进 + 下次续补，
 //   连续 3 次补不齐才回退全量；只有 total 变小（撤单）才立即重建。
+// v3.5.0：新增「出勤达成」模块 —— 应排 / 实排 / 有效出勤 × 时段矩阵，
+//   两张宽表分别为「实排达成 = 有效出勤÷实排」「应排达成 = 有效出勤÷应排」。
+//   应排 / 实排取排班统计，有效出勤取实时考勤按 KPI 时段标准双达标去重骑手数；
+//   工具条可显示 / 隐藏该模块，隐藏时复制图片不含这两张表。
 
 const XT = "https://httpizza.ele.me/xtop/";
 const API_QUERY = XT + "xtop.agencyTrackingFs.queryTracking/2.0";
@@ -34,6 +38,14 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // 数值展示不带千分位分隔符，与钉钉下发看板保持一致
 const fmt = (n) => String(Math.round(Number(n || 0)));
 const p1 = (n) => Number(n || 0).toFixed(1) + "%";
+// 出勤达成百分比：与截图一致，整数不补 .0（95%、100%、102.3%、400%）
+const attPct = (n) => {
+  const v = Math.round(Number(n || 0) * 10) / 10;
+  return (Number.isInteger(v) ? String(v) : v.toFixed(1)) + "%";
+};
+// 商圈片全名 -> 出勤看板上的简称（福州台江区台江商圈片 -> 台江区台江）
+const shortArea = (s) => String(s).replace(/^福州/, "").replace(/商圈片$/, "").replace(/商圈$/, "");
+const attShown = () => localStorage.getItem("wb_att_show") !== "0";
 const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g,
   (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const todayStr = () => {
@@ -283,6 +295,87 @@ function renderTable2(a) {
   $("mt-main").textContent = `各${a.areaLabel} × 各时段 规划单量达成`;
 }
 
+// ---------------------------------------------------------------- 出勤达成模块（v3.5.0）
+// 两张表共用同一份「有效出勤」分子：实排达成 = 有效出勤/实排，应排达成 = 有效出勤/应排。
+// 分母为 0 显示「—」；未结束班次且暂无达标骑手时显示「统计中 / 未开始」，
+// 避免把考勤实时快照里「还没跑完的班次」误报成 0% 告警。
+function attCell(c, per, mode, att) {
+  const den = mode === "real" ? c.real : c.due;
+  const rate = mode === "real" ? c.realRate : c.dueRate;
+  const tip = `应排 ${fmt(c.due)} · 实排 ${fmt(c.real)} · 有效出勤 ${fmt(c.valid)}`;
+  if (!(den > 0) || rate == null) return `<td class="att-cell zero" title="${esc(tip)}">—</td>`;
+  if (c.valid === 0 && att.ongoing.includes(per)) {
+    const label = att.noData.includes(per) ? "未开始" : "统计中";
+    return `<td class="att-cell pending" title="${esc(tip)}"><b>${label}</b>` +
+           `<span>${fmt(c.valid)}/${fmt(den)}</span></td>`;
+  }
+  const cls = rate >= 100 ? "good" : (rate >= 80 ? "warn" : "bad");
+  return `<td class="att-cell ${cls}" title="${esc(tip + " · 达成 " + attPct(rate))}">` +
+         `<b>${attPct(rate)}</b><span>${fmt(c.valid)}/${fmt(den)}</span></td>`;
+}
+
+function renderAttTable(id, att, mode) {
+  const P = att.periods;
+  // 与表 2 一样锁 1218px 总宽：班次从 7 变 9/11 时只压缩列宽，字号保持常规
+  const firstW = 210, totalW = 1218;
+  const subW = ((totalW - firstW) / Math.max(1, P.length)).toFixed(2);
+  const cols = `<colgroup><col style="width:${firstW}px">` +
+    P.map(() => `<col style="width:${subW}px">`).join("") + `</colgroup>`;
+  const head = `<thead><tr><th>团队名称</th>` + P.map((p) => {
+    const st = att.standards[p];
+    const hint = p === "全天"
+      ? "全天：有效在线≥6小时 且 完单≥18单"
+      : `有效在线≥${(st && st.timeMin) || 0}分钟 且 完单≥${(st && st.orders) || 0}单`;
+    return `<th title="${esc(hint)}">${esc(p)}</th>`;
+  }).join("") + `</tr></thead>`;
+  const body = ["<tbody>"];
+  for (const r of att.rows) {
+    body.push(`<tr><td class="name" title="${esc(r.area)}">${esc(shortArea(r.area))}</td>` +
+      P.map((p) => attCell(r.cells[p], p, mode, att)).join("") + `</tr>`);
+  }
+  body.push(`<tr class="total"><td>总计</td>` +
+    P.map((p) => attCell(att.totals[p], p, mode, att)).join("") + `</tr></tbody>`);
+  const t = $(id);
+  t.style.width = totalW + "px";
+  t.style.minWidth = totalW + "px";
+  t.innerHTML = cols + head + body.join("");
+}
+
+function renderAttendance(a) {
+  const box = $("attendance-section");
+  const att = a.attendance;
+  if (!att) { box.hidden = true; return; }
+  box.hidden = !attShown();
+  // 排班 / 考勤任一侧取不到时，别把两张空表塞进「复制图片」的画面
+  const blocks = $("att-blocks");
+  if (!att.ok) {
+    blocks.hidden = true;
+    const why = att.missing.length ? att.missing.join("、") + " 未取到" : "排班 / 考勤未取到";
+    $("att-kpi").innerHTML = `<span class="muted">出勤达成暂不可用：${esc(why)}</span>`;
+    $("att-note").textContent = "本模块需要排班统计（应排人数 / 排班人数）与实时考勤（排班状态 / 时段 / 时段有效在线时长 / 时段完单量）同时可用；数据取到后会自动显示两张达成表。";
+    return;
+  }
+  blocks.hidden = false;
+  const day = att.totals["全天"] || { due: 0, real: 0, valid: 0, realRate: null, dueRate: null };
+  $("att-kpi").innerHTML =
+    `整商全天：应排 <b>${fmt(day.due)}</b> · 实排 <b>${fmt(day.real)}</b> · 有效出勤 <b>${fmt(day.valid)}</b>` +
+    `　｜　实排达成 <b>${day.realRate == null ? "—" : attPct(day.realRate)}</b>` +
+    ` · 应排达成 <b>${day.dueRate == null ? "—" : attPct(day.dueRate)}</b>`;
+  const note = `应排 = 排班统计「应排人数」；实排 = 「排班人数」；有效出勤 = 实时考勤「排班状态=排班」且` +
+    `（时段有效在线≥该时段标准 且 时段完单≥该时段标准）的去重骑手数，全天按 6h / 18 单。` +
+    `实排达成 = 有效出勤÷实排；应排达成 = 有效出勤÷应排（多排班可 >100%，不封顶）。` +
+    `考勤为当日实时快照，未结束班次会随时间补齐。`;
+  let extra = "";
+  if (att.degraded) {
+    extra += ` <span class="warn-text">考勤导出缺少「完单量」列，有效出勤已降级为只看有效在线时长。</span>`;
+  }
+  $("att-note").innerHTML = note + extra;
+  $("att-title-real").textContent = `${todayStr()} · 实排达成（有效出勤 / 实排）`;
+  $("att-title-due").textContent = `${todayStr()} · 应排达成（有效出勤 / 应排）`;
+  renderAttTable("table3", att, "real");
+  renderAttTable("table4", att, "due");
+}
+
 function checkAgency(name, id) {
   if (!name || name === "未识别" || name === "未知" || state.agencyWarned) return;
   const k = id || name;
@@ -345,6 +438,7 @@ function render() {
 
   renderTable1(a);
   renderTable2(a);
+  renderAttendance(a);
   renderBroadcast(a);
 
   const now = state.finishedAt || new Date();
@@ -372,6 +466,9 @@ function render() {
       : "") +
     (a.unknownPeriods && a.unknownPeriods.length
       ? ` · 排班中有未识别班次：${a.unknownPeriods.join("、")}（字典无对应时间区间，未纳入时段矩阵，其预估单量仍计入规划单量）`
+      : "") +
+    (a.attendance && a.attendance.ok
+      ? ` · 出勤达成：应排 ${fmt(a.attendance.totals["全天"].due)} / 实排 ${fmt(a.attendance.totals["全天"].real)} / 有效出勤 ${fmt(a.attendance.totals["全天"].valid)}（整商全天）；有效出勤按 KPI 时段标准（有效在线时长 + 完单量双达标）判定`
       : "") +
     ` · 口径与 assess_image.py 一致 · ${a.mapped ? "已匹配钉钉商圈片分组" : "按接口原生商圈分组"}` +
     ` · pageSize=${PAGE_SIZE} · 页间节流 ${THROTTLE_MS}ms` +
@@ -657,6 +754,16 @@ $("btn-copy-image").addEventListener("click", async (e) => {
     btn.textContent = label;
   }
 });
+// 「出勤达成」：控制新模块是否出现在看板画面里；隐藏时「复制图片」也不会带上这两张宽表
+$("btn-attendance").addEventListener("click", () => {
+  const on = !attShown();
+  localStorage.setItem("wb_att_show", on ? "1" : "0");
+  $("btn-attendance").textContent = "出勤达成：" + (on ? "显示" : "隐藏");
+  if (state.assess) renderAttendance(state.assess);
+  showNotice(on
+    ? "已显示「出勤达成」模块，点「复制图片」会一起导出实排达成 / 应排达成两张表。"
+    : "已隐藏「出勤达成」模块，复制图片只含原有考核看板。", "blue");
+});
 // 「全量重拉」：忽略本地缓存，重新分页拉当日全部运单并重建缓存（数据校准用）
 $("btn-full").addEventListener("click", () => restart({ forceFull: true }));
 $("auto").addEventListener("change", (e) => localStorage.setItem("wb_auto", e.target.checked ? "1" : "0"));
@@ -695,6 +802,7 @@ window.addEventListener("keydown", (e) => {
 (async function init() {
   const a = localStorage.getItem("wb_auto"); if (a != null) $("auto").checked = a === "1";
   $("btn-channel").textContent = "通道：" + (state.via === "bridge" ? "静默桥接" : "直连");
+  $("btn-attendance").textContent = "出勤达成：" + (attShown() ? "显示" : "隐藏");
   try { await chrome.runtime.sendMessage({ type: "ENSURE_RULES" }); } catch (e) { /* ignore */ }
   if (state.via === "bridge") showNotice("当前使用「静默桥接」通道：后台标签页取数，不会打断浏览。", "blue");
   // 测试钩子：仅在离线渲染验证时置位，生产环境恒为 false

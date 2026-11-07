@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>指定日考核看板 · 规划单量完成率 &amp; 标2骑手占比</title>
+  <title>指定日考核看板 · 规划单量完成率 / 标2骑手占比 / 出勤达成</title>
   <link rel="stylesheet" href="dashboard.css">
 </head>
 <body>
@@ -19,6 +19,7 @@
     <label class="chk"><input type="checkbox" id="auto" checked> 自动刷新 5 分钟</label>
     <button id="btn-refresh" class="primary">立即刷新</button>
     <button id="btn-copy-image" class="primary" title="把看板画面复制为高清 PNG，可直接粘贴到钉钉 / 微信；按住 Shift 点击则另存为 PNG 文件">复制图片</button>
+    <button id="btn-attendance" class="ghost" title="显示 / 隐藏「出勤达成」模块；隐藏后复制图片也不会包含该模块">出勤达成：显示</button>
     <button id="btn-channel" class="ghost">通道：直连</button>
     <button id="btn-clean" class="ghost">纯净看板</button>
     <button id="btn-full" class="ghost" title="忽略本地缓存，重新拉取当日全部运单（用于数据校准）">全量重拉</button>
@@ -58,7 +59,7 @@
 
 <!-- ============ 以下为 1:1 复刻钉钉考核看板 PNG 的画面 ============ -->
 <main class="sheet" id="sheet">
-  <div class="doc-title">指定日考核看板 · 规划单量完成率 &amp; 标2骑手占比</div>
+  <div class="doc-title">指定日考核看板 · 规划单量完成率 / 标2骑手占比 / 出勤达成</div>
   <div class="doc-sub" id="doc-sub">考核日期 —&nbsp;&nbsp;&nbsp;&nbsp;生成时间 —</div>
   <div class="doc-note">标2骑手 = 当日「非人工改派」完单≥门槛(UB26 / 其他24) 且 考勤「全天有效在线时长」≥6h（实际达成时长判定）；人工改派完单按 KPI 第十三条不计入运力达标，片区「实际完单」仍按全部配送成功单统计</div>
 
@@ -77,6 +78,19 @@
   <div class="tbl-scroll">
     <table class="tbl t2" id="table2"></table>
   </div>
+
+  <!-- ============ 出勤达成模块（v3.5.0）：应排 / 实排 / 有效出勤 ============ -->
+  <section class="att-section" id="attendance-section" hidden>
+    <div class="att-title">出勤达成 · 应排 / 实排 / 有效出勤</div>
+    <div class="att-kpi" id="att-kpi"></div>
+    <div class="att-note" id="att-note"></div>
+    <div id="att-blocks">
+      <div class="att-block-title" id="att-title-real">实排达成</div>
+      <div class="tbl-scroll"><table class="tbl att" id="table3"></table></div>
+      <div class="att-block-title" id="att-title-due">应排达成</div>
+      <div class="tbl-scroll"><table class="tbl att" id="table4"></table></div>
+    </div>
+  </section>
 
   <div class="doc-foot">计分：完成率40% / 标二占比60%。完成率 ≥105→100, 100-105→90-100线性, 90-100→60-90线性, &lt;90→0；标二占比 ≥90→100, 80-90→80-90线性, 70-80→0-80线性, &lt;70→0</div>
   <div class="doc-foot small">注：考勤为当日实时快照，上午时段有效在线时长普遍未满6h，6h口径在上午偏低；时段矩阵按当日排班实际班次动态生成（班次时间区间取自 KPI 11 时段标准），落在未排班时段的完单不计入矩阵、但仍计入实际完单。完整考核以当日结束/次日刷新后为准</div>

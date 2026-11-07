@@ -1,4 +1,5 @@
 // 考核计算：与 fengshen-data/assess_image.py 逐行对齐（规划单量完成率 + 标2骑手占比）
+// v3.5.0 追加「出勤达成」：应排 / 实排 / 有效出勤 × 时段矩阵（口径对齐 config.py + review_report.py）
 // 通用化策略：站点→商圈片映射为「可选表」。命中则用钉钉同一套片区名（数据完全一致）；
 // 未命中（换商登录）则回退到接口原生 merchantBusDistrictName，其余口径全部一致。
 /* global ASSESS */
@@ -8,19 +9,23 @@ const ASSESS = (() => {
   // 排班统计表只给「班次名」、不给时间区间，所以「时间戳 → 班次」的映射必须靠这份字典；
   // 但「当天到底有哪些班次」以排班表为准：实测 10-31 只有 7 个工作班次，11-05/11-06 多出
   // 「凌晨1」「早餐1」变成 9 个。硬编码列会丢掉这些班次及其预估单量，因此改为排班驱动。
+  // timeMin / orders = 「有效出勤」判定标准（config.py PERIOD_STANDARDS，KPI PDF 第 9-10 页）：
+  // 骑手在该时段「有效在线时长 ≥ timeMin 分钟」且「完单量 ≥ orders 单」才算有效出勤。
   const PERIOD_DEFS = [
-    { name: "凌晨1",   start: 0,            end: 2 * 60 },
-    { name: "凌晨2",   start: 2 * 60,       end: 4 * 60 },
-    { name: "凌晨3",   start: 4 * 60,       end: 6 * 60 },
-    { name: "早餐1",   start: 6 * 60,       end: 8 * 60 },
-    { name: "早餐2",   start: 8 * 60,       end: 10 * 60 + 30 },
-    { name: "午高峰",  start: 10 * 60 + 30, end: 13 * 60 + 30 },
-    { name: "下午茶1", start: 13 * 60 + 30, end: 15 * 60 + 30 },
-    { name: "下午茶2", start: 15 * 60 + 30, end: 17 * 60 + 30 },
-    { name: "晚高峰",  start: 17 * 60 + 30, end: 20 * 60 },
-    { name: "夜宵1",   start: 20 * 60,      end: 22 * 60 },
-    { name: "夜宵2",   start: 22 * 60,      end: 24 * 60 }
+    { name: "凌晨1",   start: 0,            end: 2 * 60,       timeMin: 90,  orders: 1 },
+    { name: "凌晨2",   start: 2 * 60,       end: 4 * 60,       timeMin: 78,  orders: 1 },
+    { name: "凌晨3",   start: 4 * 60,       end: 6 * 60,       timeMin: 72,  orders: 1 },
+    { name: "早餐1",   start: 6 * 60,       end: 8 * 60,       timeMin: 90,  orders: 1 },
+    { name: "早餐2",   start: 8 * 60,       end: 10 * 60 + 30, timeMin: 120, orders: 1 },
+    { name: "午高峰",  start: 10 * 60 + 30, end: 13 * 60 + 30, timeMin: 150, orders: 5 },
+    { name: "下午茶1", start: 13 * 60 + 30, end: 15 * 60 + 30, timeMin: 90,  orders: 2 },
+    { name: "下午茶2", start: 15 * 60 + 30, end: 17 * 60 + 30, timeMin: 90,  orders: 2 },
+    { name: "晚高峰",  start: 17 * 60 + 30, end: 20 * 60,      timeMin: 120, orders: 3 },
+    { name: "夜宵1",   start: 20 * 60,      end: 22 * 60,      timeMin: 90,  orders: 2 },
+    { name: "夜宵2",   start: 22 * 60,      end: 24 * 60,      timeMin: 90,  orders: 2 }
   ];
+  // 「全天」按运力标准 1 等效：全天有效在线≥6h 且 全天完单≥18（config.py DAY_STANDARD）
+  const DAY_ATTEND_STANDARD = { timeMin: 360, orders: 18 };
   const PERIOD_BY_NAME = new Map(PERIOD_DEFS.map((p) => [p.name, p]));
   // 排班取不到 / 当天排班没有可识别班次时的兜底：与旧版一致的 7 个工作时段
   const DEFAULT_PERIOD_NAMES = ["早餐2", "午高峰", "下午茶1", "下午茶2", "晚高峰", "夜宵1", "夜宵2"];
@@ -51,6 +56,12 @@ const ASSESS = (() => {
     "福州仓山区城门商圈片", "福州台江区台江商圈片", "福州鼓楼区茶亭西湖商圈片",
     "福州福清市老城商圈片", "福州福清市万达宏路商圈片",
     "福州仓山区仓山商圈片", "福州晋安区商圈片"
+  ];
+  // 出勤达成表按「商圈片出勤看板」的顺序（与钉钉考核看板的片区顺序不同），
+  // 未列出的片区（换商 / 新增站点）按考核表顺序排在后面，保证不丢行。
+  const ATT_AREA_ORDER = [
+    "福州鼓楼区茶亭西湖商圈片", "福州福清市老城商圈片", "福州台江区台江商圈片",
+    "福州福清市万达宏路商圈片", "福州仓山区城门商圈片"
   ];
 
   const ONLINE_MIN_HOURS = 6.0;
@@ -107,12 +118,16 @@ const ASSESS = (() => {
       const t = key(r.teamName), d = key(r.merchantBusDistrictName);
       if (t && d && !teamToDistrict.has(t)) teamToDistrict.set(t, d);
     }
+    // 纯解析（不计数）：出勤模块复用同一套商圈片分组，不能把 areaLabel 的映射统计带偏
+    const areaOf = (site) => {
+      const s = key(site);
+      return SITE_TO_AREA[s] || teamToDistrict.get(s) || s || "未识别";
+    };
     let mappedCnt = 0, fallbackCnt = 0;
     const areaOfSite = (site) => {
-      const s = key(site);
-      if (SITE_TO_AREA[s]) { mappedCnt++; return SITE_TO_AREA[s]; }
-      fallbackCnt++;
-      return teamToDistrict.get(s) || s || "未识别";
+      if (SITE_TO_AREA[key(site)]) mappedCnt++;
+      else fallbackCnt++;
+      return areaOf(site);
     };
 
     // ---------------- 排班：先确定「当天有哪些班次」，再累加规划单量 ----------------
@@ -179,6 +194,87 @@ const ASSESS = (() => {
         if (!att.has(rid) || d > att.get(rid)) att.set(rid, d);
       }
     }
+
+    // ---------------- 出勤达成：应排 / 实排 / 有效出勤 ----------------
+    // 口径与 fengshen-data/config.py PERIOD_STANDARDS + review_report.py 一致：
+    //   应排 = 排班统计「应排人数」；实排 = 排班统计「排班人数」（站点×时段按商圈片聚合）
+    //   有效出勤 = 实时考勤「排班状态=排班」且 (时段有效在线时长≥timeMin 且 时段完单量≥orders)
+    //     的去重骑手数；全天用 DAY_ATTEND_STANDARD（6h / 18 单，运力标准1等效）
+    //   实排达成 = 有效出勤 / 实排；应排达成 = 有效出勤 / 应排（可 >100%，多排班不设上限）
+    const attCols = ["全天", ...periods];
+    const attKey = (area, per) => area + "\u0001" + per;
+    const attDue = new Map(), attReal = new Map(), attValid = new Map();
+    // 排班统计表若没有「排班人数」列（旧导出）则单独再找一次，避免整块数据失效
+    const schAtt = (sch && sch.col["排班人数"] !== undefined)
+      ? sch : XLSX.pickSheet(schSheets || [], ["团队名称", "日期", "时段", "应排人数", "排班人数"]);
+    let attScheduleOk = false;
+    if (schAtt) {
+      attScheduleOk = true;
+      const c = schAtt.col;
+      for (const r of schAtt.rows) {
+        if (String(r[c["日期"]] || "").slice(0, 10) !== dateStr) continue;
+        const per = key(r[c["时段"]]);
+        if (!attCols.includes(per)) continue;        // 休息 / 未识别班次不进矩阵
+        const k = attKey(areaOf(key(r[c["团队名称"]])), per);
+        attDue.set(k, (attDue.get(k) || 0) + num(r[c["应排人数"]]));
+        attReal.set(k, (attReal.get(k) || 0) + num(r[c["排班人数"]]));
+      }
+    }
+
+    // 考勤导出列名容错：缺关键列时明确提示，缺「完单量」则退化成只看有效在线时长
+    const colOf = (c, names) => {
+      for (const n of names) if (c[n] !== undefined) return c[n];
+      return -1;
+    };
+    let attOk = false, attMissing = [], attDegraded = false;
+    const validSets = new Map(), periodActivity = new Set();
+    if (ats) {
+      const c = ats.col;
+      const iRider = c["骑手id"];
+      const iSite = colOf(c, ["站点名称", "团队名称", "站点", "团队"]);
+      const iStatus = colOf(c, ["排班状态"]);
+      const iPer = colOf(c, ["时段"]);
+      const iPValid = colOf(c, ["时段有效在线时长", "有效在线时长"]);
+      const iPOrders = colOf(c, ["时段完单量", "完单量"]);
+      const iDValid = colOf(c, ["全天有效在线时长"]);
+      const iDOrders = colOf(c, ["全天完单量"]);
+      const missing = [];
+      if (iSite < 0) missing.push("站点名称");
+      if (iStatus < 0) missing.push("排班状态");
+      if (iPer < 0) missing.push("时段");
+      if (iPValid < 0) missing.push("时段有效在线时长");
+      if (iDValid < 0) missing.push("全天有效在线时长");
+      if (missing.length) attMissing = missing;
+      else {
+        attOk = true;
+        if (iPOrders < 0 || iDOrders < 0) attDegraded = true;
+        for (const r of ats.rows) {
+          const per = key(r[iPer]);
+          const rid = key(r[iRider]);
+          const durP = parseDur(r[iPValid]);
+          const ordP = iPOrders >= 0 ? num(r[iPOrders]) : 0;
+          if (durP > 0 || ordP > 0) periodActivity.add(per);
+          if (!rid || key(r[iStatus]) !== "排班") continue;
+          let valid = false;
+          // parseDur 返回「小时」（标2 的 6h 门槛沿用），时段标准 timeMin 是「分钟」
+          if (per === "全天") {
+            const ordD = iDOrders >= 0 ? num(r[iDOrders]) : 0;
+            valid = parseDur(r[iDValid]) * 60 >= DAY_ATTEND_STANDARD.timeMin &&
+                    (iDOrders < 0 || ordD >= DAY_ATTEND_STANDARD.orders);
+          } else {
+            const p = PERIOD_BY_NAME.get(per);
+            if (p && periodSet.has(per)) {
+              valid = durP * 60 >= p.timeMin && (iPOrders < 0 || ordP >= p.orders);
+            }
+          }
+          if (!valid || !attCols.includes(per)) continue;
+          const k = attKey(areaOf(key(r[iSite])), per);
+          if (!validSets.has(k)) validSets.set(k, new Set());
+          validSets.get(k).add(rid);       // 同一骑手同一时段可能有多行，去重
+        }
+        for (const [k, s] of validSets) attValid.set(k, s.size);
+      }
+    } else attMissing = ["考勤表"];
 
     // ---------------- 运单：实际完单 / 时段完单 / 骑手完单 ----------------
     // 口径（与 assess_image.py / 系统一致）：只有「配送成功」计入实际完单。
@@ -316,14 +412,60 @@ const ASSESS = (() => {
       totalPd[per] = { plan: pl, done: dv, rate: pl ? dv / pl * 100 : 0.0 };
     }
 
+    // ---------------- 出勤达成表组装（与考核表共用同一份商圈片顺序）----------------
+    const attRows = [], attTotals = {};
+    for (const per of attCols) attTotals[per] = { due: 0, real: 0, valid: 0 };
+    const attAreas = [...ATT_AREA_ORDER.filter((x) => areaList.includes(x)),
+                      ...areaList.filter((x) => !ATT_AREA_ORDER.includes(x))];
+    for (const area of attAreas) {
+      const cells = {};
+      let any = false;
+      for (const per of attCols) {
+        const k = attKey(area, per);
+        const due = attDue.get(k) || 0, real = attReal.get(k) || 0, valid = attValid.get(k) || 0;
+        if (due || real || valid) any = true;
+        cells[per] = {
+          due, real, valid,
+          realRate: real > 0 ? valid / real * 100 : null,
+          dueRate: due > 0 ? valid / due * 100 : null
+        };
+        attTotals[per].due += due; attTotals[per].real += real; attTotals[per].valid += valid;
+      }
+      if (any) attRows.push({ area, cells });
+    }
+    for (const per of attCols) {
+      const t = attTotals[per];
+      t.realRate = t.real > 0 ? t.valid / t.real * 100 : null;
+      t.dueRate = t.due > 0 ? t.valid / t.due * 100 : null;
+    }
+    // 考勤是「当日实时快照」：未结束的班次（例如 22:00 后看 22:10 导出的夜宵2）
+    // 有效出勤还没跑满，达成率会随时间补齐，看板上标注「统计中 / 未开始」而不是误显示 0%。
+    const now = new Date();
+    const localDate = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+    const minute = now.getHours() * 60 + now.getMinutes();
+    const ongoing = localDate === dateStr ? attCols.filter((per) => {
+      if (per === "全天") return true;
+      const p = PERIOD_BY_NAME.get(per);
+      return !p || minute < p.end;
+    }) : [];
+    const noData = attCols.filter((per) => per !== "全天" && !periodActivity.has(per));
+    const attendance = {
+      ok: attOk && attScheduleOk, scheduleOk: attScheduleOk, attendanceOk: attOk,
+      degraded: attDegraded, missing: attMissing,
+      periods: attCols, rows: attRows, totals: attTotals,
+      standards: Object.fromEntries(PERIOD_DEFS.map((p) => [p.name, { timeMin: p.timeMin, orders: p.orders }])),
+      dayStandard: DAY_ATTEND_STANDARD, ongoing, noData
+    };
+
     return {
       rows, totals, totalPd, periods, periodSource, unknownPeriods: [...unknownPeriods],
-      orderStats, reassignStats,
+      orderStats, reassignStats, attendance,
       scheduleOk, attendanceOk,
       mapped: mappedCnt > 0, mappingFallback: fallbackCnt > 0,
       areaLabel: mappedCnt > 0 ? "商圈片" : "商圈"
     };
   }
 
-  return { build, PERIOD_NAMES, PERIOD_DEFS, DEFAULT_PERIOD_NAMES, periodOf, scoreComplete, scoreBiao2 };
+  return { build, PERIOD_NAMES, PERIOD_DEFS, DEFAULT_PERIOD_NAMES, DAY_ATTEND_STANDARD,
+           periodOf, scoreComplete, scoreBiao2 };
 })();

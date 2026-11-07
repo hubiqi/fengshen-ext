@@ -1,6 +1,6 @@
 {
-  "version": "3.4.3",
-  "notes": "取消每 30 分钟强制全量校准（自动刷新 5min 导致每半小时必全量一次），改为滚动分片状态校准：每 30 分钟只查 1 片 2 小时历史终态时间窗口，仍是增量；对账放宽，接口入库延迟不再降级全量，保留缓存 + 水位不推进 + 下次自动续补，连续 3 次补不齐才全量；仅撤单立即重建；修复 write() 把 fullAt / calibAt 清零的 bug",
-  "download": "https://github.com/hubiqi/fengshen-ext/releases/download/v3.4.3/fengshen-ext-v3.4.3.zip",
+  "version": "3.5.0",
+  "notes": "新增出勤达成模块：应排/实排/有效出勤 × 时段矩阵，输出实排达成与应排达成两张宽表（口径对齐 config.py KPI 时段标准，全天 6h/18单）；顶部三数概览、悬停明细、未结束班次标注统计中；工具条可显示/隐藏且复制图片同步生效；排班/考勤缺列时明确提示且不渲染空表",
+  "download": "https://github.com/hubiqi/fengshen-ext/releases/download/v3.5.0/fengshen-ext-v3.5.0.zip",
   "published_at": "2026-11-07"
 }
