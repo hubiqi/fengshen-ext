@@ -1,4 +1,4 @@
-// 风神考核看板（插件版 v3.4.0）—— 与 fengshen-data/assess_image.py 生成的钉钉看板同口径、同排版
+// 风神考核看板（插件版 v3.4.1）—— 与 fengshen-data/assess_image.py 生成的钉钉看板同口径、同排版
 // 数据源全部在插件内获取，跟随当前浏览器登录态：
 //   1) queryTracking/2.0      -> 运单明细（实际完单 / 时段完单 / 骑手完单 / 站点商圈）
 //   2) exportSchedule/1.0     -> 排班 xlsx（规划单量 / 应排骑手 / 时段预估单量）
@@ -12,6 +12,8 @@
 //   片区「实际完单 / 订单完成率 / 时段完单」口径不变，仍按全部配送成功单统计。
 // v3.4.0：工具条「复制图片」把 #sheet 渲染成 2 倍高清 PNG 写入剪贴板（capture.js），
 //   剪贴板不可用时自动降级为下载 PNG；Shift+点击直接另存为文件。
+// v3.4.1：时段矩阵改为按当日排班实际班次动态生成（assess.js 两遍扫描排班表），
+//   表 2 随班次数量动态压缩子列宽、保持 1218px 总宽不撑破「复制图片」画布。
 
 const XT = "https://httpizza.ele.me/xtop/";
 const API_QUERY = XT + "xtop.agencyTrackingFs.queryTracking/2.0";
@@ -245,8 +247,18 @@ function renderTable1(a) {
 }
 
 function renderTable2(a) {
-  const P = a.periods;
-  const cols = `<colgroup><col class="first">${P.map(() => '<col class="sub"><col class="sub">').join("")}</colgroup>`;
+  const P = a.periods || ASSESS.DEFAULT_PERIOD_NAMES;
+  // 表 2 总宽固定 1218px（与钉钉看板 PNG 版式、以及「复制图片」的 1240px 画布一致）：
+  // 班次从 7 个变 9/11 个时压缩子列宽，而不是让表格撑到 1506/1794px 溢出被裁。
+  const firstW = 210, totalW = 1218;
+  const subW = Math.max(34, Math.floor((totalW - firstW) / Math.max(1, P.length * 2)));
+  const cols = `<colgroup><col class="first" style="width:${firstW}px">` +
+    P.map(() => `<col class="sub" style="width:${subW}px"><col class="sub" style="width:${subW}px">`).join("") +
+    `</colgroup>`;
+  const t2 = $("table2");
+  t2.style.width = totalW + "px";
+  t2.style.minWidth = totalW + "px";
+  t2.classList.toggle("compact", P.length > 7);   // 班次多时缩小字号，避免表头挤成两行
   const h1 = `<thead><tr><th rowspan="2">${esc(a.areaLabel)}</th>` +
     P.map((p) => `<th colspan="2">${esc(p)}</th>`).join("") + "</tr><tr>" +
     P.map(() => "<th>完单量</th><th>完单率</th>").join("") + "</tr></thead>";
@@ -342,6 +354,14 @@ function render() {
       : "") +
     (a.reassignStats
       ? ` · 标2口径：人工改派成功单 ${fmt(a.reassignStats.excluded)} 单已从骑手达标统计剔除（完单达标 ${fmt(a.reassignStats.dokRaw)}→${fmt(a.reassignStats.dok)}、标2 ${fmt(a.reassignStats.b2Raw)}→${fmt(a.reassignStats.b2)}，${fmt(a.reassignStats.downgraded)} 人因此跌破门槛）；片区实际完单仍含改派单`
+      : "") +
+    (a.periods
+      ? ` · 时段矩阵：按当日排班 ${a.periods.length} 个班次动态生成（${a.periods.join(" / ")}）` +
+        (a.periodSource === "default" ? "，排班未取到故回退默认 7 班次" : "") +
+        `；落在未排班时段的完单不计入矩阵，但仍计入实际完单`
+      : "") +
+    (a.unknownPeriods && a.unknownPeriods.length
+      ? ` · 排班中有未识别班次：${a.unknownPeriods.join("、")}（字典无对应时间区间，未纳入时段矩阵，其预估单量仍计入规划单量）`
       : "") +
     ` · 口径与 assess_image.py 一致 · ${a.mapped ? "已匹配钉钉商圈片分组" : "按接口原生商圈分组"}` +
     ` · pageSize=${PAGE_SIZE} · 页间节流 ${THROTTLE_MS}ms` +

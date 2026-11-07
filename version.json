@@ -1,6 +1,6 @@
 {
-  "version": "3.4.0",
-  "notes": "新增「复制图片」按钮：一键把看板画面导出为 1240px / 2 倍高清 PNG 写入剪贴板，可直接粘贴到钉钉 / 微信；固定桌面排版、纯本地零依赖，剪贴板不可用时自动降级为下载 PNG，Shift+点击直接另存为文件",
-  "download": "https://github.com/hubiqi/fengshen-ext/releases/download/v3.4.0/fengshen-ext-v3.4.0.zip",
+  "version": "3.4.1",
+  "notes": "时段矩阵改为按当日排班实际班次动态生成（先解析排班两遍扫描，内置 KPI 11 时段字典做时间归类，补齐凌晨1/早餐1 等班次）；未排班时段完单不计入矩阵但仍计入实际完单；表 2 动态压缩子列宽保持 1218px 总宽，9/11 班次导出图片不截断",
+  "download": "https://github.com/hubiqi/fengshen-ext/releases/download/v3.4.1/fengshen-ext-v3.4.1.zip",
   "published_at": "2026-11-07"
 }

@@ -63,6 +63,12 @@ table.t2 thead tr:nth-child(2) th { height: 24px; font-size: 11px; }
 table.t2 tbody td { font-size: 12px; }
 table.t2 tbody td:first-child { font-size: 13px; }
 table.t2 tbody td.rate { font-size: 11px; font-weight: 700; }
+/* 排班动态时段：班次多于 7 个时子列被压窄，同步缩小字号避免表头换行 */
+table.t2.compact thead tr:first-child th { font-size: 11px; }
+table.t2.compact thead tr:nth-child(2) th { font-size: 10px; }
+table.t2.compact tbody td { font-size: 11px; }
+table.t2.compact tbody td:first-child { font-size: 12px; }
+table.t2.compact tbody td.rate { font-size: 10px; }
 
 .mat-title { width: 1218px; max-width: 100%; margin: 44px auto 10px; font-size: 20px;
   font-weight: 700; color: #1F2937; line-height: 1.4; }

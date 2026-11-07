@@ -4,17 +4,27 @@
 /* global ASSESS */
 
 const ASSESS = (() => {
-  // ---- 7 个工作时段（config.PERIOD_STANDARDS）----
-  const PERIODS = [
-    { name: "早餐2",   start: 8 * 60,        end: 10 * 60 + 30 },
-    { name: "午高峰",  start: 10 * 60 + 30,  end: 13 * 60 + 30 },
-    { name: "下午茶1", start: 13 * 60 + 30,  end: 15 * 60 + 30 },
-    { name: "下午茶2", start: 15 * 60 + 30,  end: 17 * 60 + 30 },
-    { name: "晚高峰",  start: 17 * 60 + 30,  end: 20 * 60 },
-    { name: "夜宵1",   start: 20 * 60,       end: 22 * 60 },
-    { name: "夜宵2",   start: 22 * 60,       end: 24 * 60 }
+  // ---- 时段字典：与 config.py 的 PERIOD_STANDARDS（KPI PDF 第 9-10 页，11 时段全集）逐行对齐 ----
+  // 排班统计表只给「班次名」、不给时间区间，所以「时间戳 → 班次」的映射必须靠这份字典；
+  // 但「当天到底有哪些班次」以排班表为准：实测 10-31 只有 7 个工作班次，11-05/11-06 多出
+  // 「凌晨1」「早餐1」变成 9 个。硬编码列会丢掉这些班次及其预估单量，因此改为排班驱动。
+  const PERIOD_DEFS = [
+    { name: "凌晨1",   start: 0,            end: 2 * 60 },
+    { name: "凌晨2",   start: 2 * 60,       end: 4 * 60 },
+    { name: "凌晨3",   start: 4 * 60,       end: 6 * 60 },
+    { name: "早餐1",   start: 6 * 60,       end: 8 * 60 },
+    { name: "早餐2",   start: 8 * 60,       end: 10 * 60 + 30 },
+    { name: "午高峰",  start: 10 * 60 + 30, end: 13 * 60 + 30 },
+    { name: "下午茶1", start: 13 * 60 + 30, end: 15 * 60 + 30 },
+    { name: "下午茶2", start: 15 * 60 + 30, end: 17 * 60 + 30 },
+    { name: "晚高峰",  start: 17 * 60 + 30, end: 20 * 60 },
+    { name: "夜宵1",   start: 20 * 60,      end: 22 * 60 },
+    { name: "夜宵2",   start: 22 * 60,      end: 24 * 60 }
   ];
-  const PERIOD_NAMES = PERIODS.map((p) => p.name);
+  const PERIOD_BY_NAME = new Map(PERIOD_DEFS.map((p) => [p.name, p]));
+  // 排班取不到 / 当天排班没有可识别班次时的兜底：与旧版一致的 7 个工作时段
+  const DEFAULT_PERIOD_NAMES = ["早餐2", "午高峰", "下午茶1", "下午茶2", "晚高峰", "夜宵1", "夜宵2"];
+  const PERIOD_NAMES = DEFAULT_PERIOD_NAMES.slice();   // 兼容既有调用方
 
   // 可选映射：仅用于把接口站点名还原成钉钉看板的「商圈片」分组，不命中不影响通用性
   const SITE_TO_AREA = {
@@ -68,12 +78,16 @@ const ASSESS = (() => {
     return (h ? Number(h[1]) : 0) + (m ? Number(m[1]) : 0) / 60.0;
   }
 
-  function periodOf(ts) {
+  /** 按「当天实际排班的班次」把完单时间归类；落在未排班时段返回 null（仍计入实际完单，只是不进矩阵）。 */
+  function periodOf(ts, periods) {
     if (!ts || !isFinite(Number(ts))) return null;
     const d = new Date(Number(ts));
     const t = d.getHours() * 60 + d.getMinutes();
-    const p = PERIODS.find((x) => t >= x.start && t < x.end);
-    return p ? p.name : null;   // 00:00-08:00 凌晨单不计入 7 时段（与钉钉看板一致）
+    for (const name of periods || DEFAULT_PERIOD_NAMES) {
+      const p = PERIOD_BY_NAME.get(name);
+      if (p && t >= p.start && t < p.end) return name;
+    }
+    return null;
   }
 
   const num = (v) => { const n = Number(String(v ?? "").replace(/,/g, "")); return isFinite(n) ? n : 0; };
@@ -101,7 +115,9 @@ const ASSESS = (() => {
       return teamToDistrict.get(s) || s || "未识别";
     };
 
-    // ---------------- 排班：规划单量 / 应排骑手 / 时段预估单量 ----------------
+    // ---------------- 排班：先确定「当天有哪些班次」，再累加规划单量 ----------------
+    // 顺序很关键：时段矩阵列、运单时间归类、时段预估单量必须共用同一份 periods，
+    // 而这份列表只能来自排班统计表（不同日期 / 合作商的班次数并不相同）。
     const areaSet = new Set();   // 排班有量但当日无完单的片区也要出现在看板上
     const plan = new Map(), headcount = new Map(), periodPlan = new Map();
     const bump = (map, k, field, v) => {
@@ -111,9 +127,27 @@ const ASSESS = (() => {
     };
     let scheduleOk = false;
     const sch = XLSX.pickSheet(schSheets || [], ["团队名称", "日期", "时段", "预估单量", "应排人数"]);
+    const scheduledSet = new Set(), unknownPeriods = new Set();
     if (sch) {
       scheduleOk = true;
       const c = sch.col;
+      // 第 1 遍：只读当天排班出现过的班次名（排除「全天」「休息」等非班次行）
+      for (const r of sch.rows) {
+        if (String(r[c["日期"]] || "").slice(0, 10) !== dateStr) continue;
+        const per = key(r[c["时段"]]);
+        if (!per || per === "全天" || per === "休息") continue;
+        if (PERIOD_BY_NAME.has(per)) scheduledSet.add(per);
+        else unknownPeriods.add(per);   // 字典不认识 → 无法做时间归类，底部提示人工核对
+      }
+    }
+    const periods = scheduledSet.size
+      ? PERIOD_DEFS.filter((p) => scheduledSet.has(p.name)).map((p) => p.name)  // 按时间先后排序
+      : DEFAULT_PERIOD_NAMES.slice();
+    const periodSource = scheduledSet.size ? "schedule" : "default";
+    const periodSet = new Set(periods);
+    if (sch) {
+      const c = sch.col;
+      // 第 2 遍：按已确定的班次累加规划单量 / 应排人数 / 时段预估单量
       for (const r of sch.rows) {
         if (String(r[c["日期"]] || "").slice(0, 10) !== dateStr) continue;
         const per = key(r[c["时段"]]);
@@ -126,7 +160,7 @@ const ASSESS = (() => {
           continue;
         } else {
           bump(plan, area, "v", num(r[c["预估单量"]]));
-          if (PERIOD_NAMES.includes(per)) bump(periodPlan, area, per, num(r[c["预估单量"]]));
+          if (periodSet.has(per)) bump(periodPlan, area, per, num(r[c["预估单量"]]));
         }
       }
     }
@@ -197,7 +231,7 @@ const ASSESS = (() => {
       // 片区「实际完单」与时段完单不受改派剔除影响：KPI 只规定标1–标5 剔除，
       // 规划单量完成率仍按考核单位承接的全部配送成功单统计。
       done.set(area, (done.get(area) || 0) + 1);
-      const per = periodOf(r.completeAt || r.trackingFinishAt);
+      const per = periodOf(r.completeAt || r.trackingFinishAt, periods);
       if (per) {
         if (!periodDone.has(area)) periodDone.set(area, new Map());
         const m = periodDone.get(area);
@@ -252,7 +286,7 @@ const ASSESS = (() => {
       const b2r = hc ? b / hc * 100 : 0.0;
       const tot = scoreComplete(comp) * 0.4 + scoreBiao2(b2r) * 0.6;
       const pd = {};
-      for (const per of PERIOD_NAMES) {
+      for (const per of periods) {
         const pl = get(periodPlan, area, per);
         const dv = (periodDone.get(area) || new Map()).get(per) || 0;
         pd[per] = { plan: pl, done: dv, rate: pl ? dv / pl * 100 : 0.0 };
@@ -276,19 +310,20 @@ const ASSESS = (() => {
       dokRaw, b2Raw, dok: tDok, b2: tB2, downgraded
     };
     const totalPd = {};
-    for (const per of PERIOD_NAMES) {
+    for (const per of periods) {
       let pl = 0, dv = 0;
       for (const r of rows) { pl += r.pd[per].plan; dv += r.pd[per].done; }
       totalPd[per] = { plan: pl, done: dv, rate: pl ? dv / pl * 100 : 0.0 };
     }
 
     return {
-      rows, totals, totalPd, periods: PERIOD_NAMES, orderStats, reassignStats,
+      rows, totals, totalPd, periods, periodSource, unknownPeriods: [...unknownPeriods],
+      orderStats, reassignStats,
       scheduleOk, attendanceOk,
       mapped: mappedCnt > 0, mappingFallback: fallbackCnt > 0,
       areaLabel: mappedCnt > 0 ? "商圈片" : "商圈"
     };
   }
 
-  return { build, PERIOD_NAMES, scoreComplete, scoreBiao2 };
+  return { build, PERIOD_NAMES, PERIOD_DEFS, DEFAULT_PERIOD_NAMES, periodOf, scoreComplete, scoreBiao2 };
 })();
