@@ -1,6 +1,6 @@
 {
-  "version": "3.6.0",
-  "notes": "新增功能与原功能入口分开，且两个入口收拢到一颗「看板」总按钮：点击总按钮展开菜单，选「考核看板」或「出勤达成」分别打开 dashboard.html / attendance.html 两个独立页面；面板顶部双页签 + 双 iframe 互不重载，点空白处或 Esc 收起菜单。原考核看板回退为 v3.4.3 纯净版本，标题/画面/复制图片不再包含出勤表；出勤页只拉排班与考勤（复用运单缓存里的站点 ID，缺失时仅查运单首页），自带刷新、通道、纯净模式与独立一键复制图片（风神出勤达成_YYYYMMDD.png）；capture.js 支持传入根节点与文件名，sw.js 支持按页签打开独立标签页",
-  "download": "https://github.com/hubiqi/fengshen-ext/releases/download/v3.6.0/fengshen-ext-v3.6.0.zip",
+  "version": "3.7.0",
+  "notes": "出勤达成支持选择日期（今天 / T-1，最近 90 天）；历史日期改走「出勤统计 → 导出明细数据」的骑手时段明细，全天达成忽略系统错误标记，按有效在线≥6小时且完单≥18单手工判定",
+  "download": "https://github.com/hubiqi/fengshen-ext/releases/download/v3.7.0/fengshen-ext-v3.7.0.zip",
   "published_at": "2026-11-07"
 }

@@ -1,5 +1,7 @@
 // 考核计算：与 fengshen-data/assess_image.py 逐行对齐（规划单量完成率 + 标2骑手占比）
 // v3.5.0 追加「出勤达成」：应排 / 实排 / 有效出勤 × 时段矩阵（口径对齐 config.py + review_report.py）
+// v3.7.0 追加「历史日期」：T-1 及更早日期改用出勤统计的时段明细，标准成实时考勤表结构；
+//   系统「是否达成」列在全天行不可信，一律忽略，由 build() 按 6h / 18 单手工判定。
 // 通用化策略：站点→商圈片映射为「可选表」。命中则用钉钉同一套片区名（数据完全一致）；
 // 未命中（换商登录）则回退到接口原生 merchantBusDistrictName，其余口径全部一致。
 /* global ASSESS */
@@ -105,6 +107,93 @@ const ASSESS = (() => {
   const key = (s) => String(s ?? "").trim();
 
   /**
+   * 把「出勤统计 → 导出明细数据」的 xlsx 标准成实时考勤表的列结构，供 build() 复用同一套口径。
+   *
+   * 为什么需要它：
+   *   exportAttendance/1.0 实测忽略 startDate/endDate，无论传哪天都返回「当前实时快照」，
+   *   所以 T-1 及更早日期必须用 exportStatisticsDetail/1.0 的骑手 × 时段明细。
+   *   该文件每行是 骑手 × 时段，含「是否排班 / 有效在线时长 / 完单量」，另有「全天」汇总行。
+   *
+   * 为什么忽略「是否达成」：
+   *   明细表全天行的 目标完单量 / 目标在线时长 为空，系统给的「达成」标记并非按
+   *   6 小时 / 18 单判定（实测会把不达标的骑手标成达成）。因此这里完全不读该列，
+   *   全天达成统一交给 build() 用 DAY_ATTEND_STANDARD 手工判定；时段达成也由 build()
+   *   按 PERIOD_DEFS 的 timeMin / orders 判定，避免两套口径漂移。
+   *
+   * @returns {{sheets:Array, stats:Object, error?:string}}
+   */
+  function detailToAttendance(detailSheets, dateStr, XLSX) {
+    const candidates = [
+      ["骑手ID", "时段", "有效在线时长", "完单量"],
+      ["骑手id", "时段", "有效在线时长", "完单量"],
+      ["骑手ID", "时段", "时段有效在线时长", "时段完单量"],
+      ["骑手id", "时段", "时段有效在线时长", "时段完单量"]
+    ];
+    let s = null;
+    for (const must of candidates) {
+      s = XLSX.pickSheet(detailSheets || [], must);
+      if (s) break;
+    }
+    if (!s) {
+      return { sheets: [], stats: { rows: 0, riders: 0 },
+        error: "出勤明细表缺少 骑手ID / 时段 / 有效在线时长 / 完单量 列" };
+    }
+    const c = s.col;
+    const colOf = (names) => { for (const n of names) if (c[n] !== undefined) return c[n]; return -1; };
+    const iRider = colOf(["骑手ID", "骑手id"]);
+    const iSite = colOf(["站点名称", "团队名称", "站点"]);
+    const iStatus = colOf(["是否排班", "排班状态"]);
+    const iPer = colOf(["时段"]);
+    const iValid = colOf(["有效在线时长", "时段有效在线时长"]);
+    const iOrders = colOf(["完单量", "时段完单量"]);
+    const iDate = colOf(["考勤日期", "日期"]);
+    const missing = [];
+    if (iSite < 0) missing.push("站点名称");
+    if (iStatus < 0) missing.push("是否排班");
+    if (missing.length) {
+      return { sheets: [], stats: { rows: 0, riders: 0 },
+        error: "出勤明细表缺少 " + missing.join("、") + " 列" };
+    }
+
+    // 先扫「全天」行拿到每个骑手当日的有效在线时长 / 完单量，
+    // 再把它复制到该骑手每一行，凑齐实时考勤表里的「全天…」两列。
+    const dayRows = new Map();
+    const onDate = (r) => iDate < 0 || String(r[iDate] ?? "").slice(0, 10) === dateStr;
+    for (const r of s.rows) {
+      if (!onDate(r) || key(r[iPer]) !== "全天") continue;
+      const rid = key(r[iRider]);
+      if (!rid || dayRows.has(rid)) continue;
+      dayRows.set(rid, {
+        valid: String(r[iValid] ?? "").trim(),
+        orders: String(r[iOrders] ?? "").trim()
+      });
+    }
+    const header = ["站点名称", "骑手id", "排班状态", "时段",
+      "全天有效在线时长", "全天完单量", "时段有效在线时长", "时段完单量"];
+    const rows = [header];
+    let dayRowsMissing = 0;
+    for (const r of s.rows) {
+      if (!onDate(r)) continue;
+      const rid = key(r[iRider]);
+      if (!rid) continue;
+      const d = dayRows.get(rid);
+      if (!d) dayRowsMissing++;
+      rows.push([
+        key(r[iSite]), rid, key(r[iStatus]), key(r[iPer]),
+        d ? d.valid : "", d ? d.orders : "",
+        String(r[iValid] ?? "").trim(), String(r[iOrders] ?? "").trim()
+      ]);
+    }
+    return {
+      sheets: [{ name: "出勤明细(标准化)", rows }],
+      stats: {
+        rows: rows.length - 1, riders: dayRows.size, dayRowsMissing,
+        ignoredDayFlag: true, dayStandard: DAY_ATTEND_STANDARD
+      }
+    };
+  }
+
+  /**
    * @param orders   queryTracking 明细数组（全量分页结果）
    * @param schSheets 排班 xlsx 的 sheets
    * @param attSheets 考勤 xlsx 的 sheets
@@ -198,8 +287,11 @@ const ASSESS = (() => {
     // ---------------- 出勤达成：应排 / 实排 / 有效出勤 ----------------
     // 口径与 fengshen-data/config.py PERIOD_STANDARDS + review_report.py 一致：
     //   应排 = 排班统计「应排人数」；实排 = 排班统计「排班人数」（站点×时段按商圈片聚合）
-    //   有效出勤 = 实时考勤「排班状态=排班」且 (时段有效在线时长≥timeMin 且 时段完单量≥orders)
+    //   有效出勤 = 「排班状态=排班」且 (时段有效在线时长≥timeMin 且 时段完单量≥orders)
     //     的去重骑手数；全天用 DAY_ATTEND_STANDARD（6h / 18 单，运力标准1等效）
+    //   考勤来源：今天用 exportAttendance 实时快照；历史日期用 exportStatisticsDetail
+    //     时段明细经 detailToAttendance() 标准成同样的列。两者都只认原始时长/完单量，
+    //     不采信系统自带的「是否达成」标记（全天标记实测有误）。
     //   实排达成 = 有效出勤 / 实排；应排达成 = 有效出勤 / 应排（可 >100%，多排班不设上限）
     const attCols = ["全天", ...periods];
     const attKey = (area, per) => area + "\u0001" + per;
@@ -466,6 +558,7 @@ const ASSESS = (() => {
     };
   }
 
-  return { build, PERIOD_NAMES, PERIOD_DEFS, DEFAULT_PERIOD_NAMES, DAY_ATTEND_STANDARD,
+  return { build, detailToAttendance,
+           PERIOD_NAMES, PERIOD_DEFS, DEFAULT_PERIOD_NAMES, DAY_ATTEND_STANDARD,
            periodOf, scoreComplete, scoreBiao2 };
 })();
