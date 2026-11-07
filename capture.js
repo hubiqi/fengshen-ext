@@ -14,7 +14,9 @@
 
   const WIDTH = 1240;                 // 与 dashboard.css 中 .sheet 的逻辑宽度一致
   const SCALE = 2;                    // 2 倍图，粘贴到钉钉仍然清晰
-  const FONT = "'PingFang SC','Hiragino Sans GB','Microsoft YaHei','Heiti SC',sans-serif";
+  // 与 dashboard.css 的 html/body 字体栈保持一致，保证导出图与屏幕上的字形一致。
+  // SVG foreignObject 内不会命中 html/body 选择器，所以这里必须显式写在根节点上。
+  const FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Microsoft YaHei','Noto Sans CJK SC',sans-serif";
 
   // @media 规则在「测量 DOM 高度」时会按当前窗口宽度生效，导出的图会跟着变形。
   // 因此导出时统一覆盖回桌面版（>=1260px）的取值，保证任何窗口宽度下出图一致。

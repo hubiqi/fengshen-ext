@@ -1,4 +1,4 @@
-// 风神考核看板（插件版 v3.4.1）—— 与 fengshen-data/assess_image.py 生成的钉钉看板同口径、同排版
+// 风神考核看板（插件版 v3.4.2）—— 与 fengshen-data/assess_image.py 生成的钉钉看板同口径、同排版
 // 数据源全部在插件内获取，跟随当前浏览器登录态：
 //   1) queryTracking/2.0      -> 运单明细（实际完单 / 时段完单 / 骑手完单 / 站点商圈）
 //   2) exportSchedule/1.0     -> 排班 xlsx（规划单量 / 应排骑手 / 时段预估单量）
@@ -14,6 +14,8 @@
 //   剪贴板不可用时自动降级为下载 PNG；Shift+点击直接另存为文件。
 // v3.4.1：时段矩阵改为按当日排班实际班次动态生成（assess.js 两遍扫描排班表），
 //   表 2 随班次数量动态压缩子列宽、保持 1218px 总宽不撑破「复制图片」画布。
+// v3.4.2：字体改用系统默认 UI 字体栈并统一数字等宽；移除 compact 的 10/11px 压缩，
+//   班次变多时只压缩列宽、字号一律保持常规（一级表头 colspan=2 本就足够宽）。
 
 const XT = "https://httpizza.ele.me/xtop/";
 const API_QUERY = XT + "xtop.agencyTrackingFs.queryTracking/2.0";
@@ -258,7 +260,8 @@ function renderTable2(a) {
   const t2 = $("table2");
   t2.style.width = totalW + "px";
   t2.style.minWidth = totalW + "px";
-  t2.classList.toggle("compact", P.length > 7);   // 班次多时缩小字号，避免表头挤成两行
+  // 班次变多只压缩列宽，字号保持常规（一级表头 colspan=2 仍有 90px+，无需缩小）。
+  // 旧版会给表加 compact 把整张表压到 10/11px，小字发虚不好看，已移除。
   const h1 = `<thead><tr><th rowspan="2">${esc(a.areaLabel)}</th>` +
     P.map((p) => `<th colspan="2">${esc(p)}</th>`).join("") + "</tr><tr>" +
     P.map(() => "<th>完单量</th><th>完单率</th>").join("") + "</tr></thead>";

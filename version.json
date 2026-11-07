@@ -1,6 +1,6 @@
 {
-  "version": "3.4.1",
-  "notes": "时段矩阵改为按当日排班实际班次动态生成（先解析排班两遍扫描，内置 KPI 11 时段字典做时间归类，补齐凌晨1/早餐1 等班次）；未排班时段完单不计入矩阵但仍计入实际完单；表 2 动态压缩子列宽保持 1218px 总宽，9/11 班次导出图片不截断",
-  "download": "https://github.com/hubiqi/fengshen-ext/releases/download/v3.4.1/fengshen-ext-v3.4.1.zip",
+  "version": "3.4.2",
+  "notes": "字体统一为系统默认 UI 字体栈（SF Pro / 苹方 / Segoe UI / 微软雅黑）并启用数字等宽对齐；移除时段矩阵 compact 的 10/11px 压缩，班次变多时只压缩列宽、字号一律保持常规；导出 PNG 与屏幕使用同一份字体栈",
+  "download": "https://github.com/hubiqi/fengshen-ext/releases/download/v3.4.2/fengshen-ext-v3.4.2.zip",
   "published_at": "2026-11-07"
 }

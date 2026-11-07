@@ -3,8 +3,12 @@
    C_RED #B91C1C / C_ACCENT #C2410C / C_TITLE #1F2937 / C_TEXT #374151 / C_MUTED #6B7280 */
 
 * { box-sizing: border-box; }
+/* 字体统一用系统默认 UI 字体：macOS = SF Pro（西文/数字）+ 苹方（中文），
+   Windows = Segoe UI + 微软雅黑。不再优先使用老一代黑体，
+   避免中英文数字混排时字形不搭、小字号下发虚。 */
 html, body { margin: 0; padding: 0; background: #FFFFFF; color: #1F2937;
-  font-family: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Heiti SC", sans-serif; }
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+  font-weight: 400; }
 
 /* ---------------- 工具条（非看板画面） ---------------- */
 .toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
@@ -35,10 +39,12 @@ button:disabled { opacity: .55; cursor: default; }
 .doc-title { font-size: 30px; font-weight: 700; text-align: center; color: #1F2937;
   line-height: 1.35; padding-top: 12px; }
 .doc-sub { font-size: 16px; color: #6B7280; text-align: center; margin-top: 12px; line-height: 1.4; }
-.doc-note { font-size: 15px; color: #6B7280; text-align: center; margin-top: 10px; line-height: 1.4; }
+.doc-note { font-size: 15px; color: #6B7280; text-align: center; margin-top: 10px; line-height: 1.5;
+  padding: 0 24px; }
 
 .tbl-scroll { overflow-x: auto; }
-table.tbl { border-collapse: collapse; table-layout: fixed; margin: 0 auto; }
+table.tbl { border-collapse: collapse; table-layout: fixed; margin: 0 auto;
+  font-variant-numeric: tabular-nums; }
 table.tbl th, table.tbl td { border: 1px solid #000000; text-align: center;
   vertical-align: middle; padding: 2px 3px; white-space: nowrap; }
 table.tbl thead th { background: #2F5597; color: #FFFFFF; font-weight: 700; font-size: 13px;
@@ -54,21 +60,19 @@ table.tbl .bold { font-weight: 700; }
 /* 表一：886px 宽，与原图一致 */
 table.t1 { width: 886px; min-width: 886px; margin-top: 22px; }
 table.t1 tbody td:first-child { font-size: 13px; }
-/* 表二：210 + 7*2*72 = 1218px，两级表头 */
+/* 表二：first 210 + 每个班次两个子列，总宽恒定 1218px（子列宽由 renderTable2 动态计算） */
 table.t2 { width: 1218px; min-width: 1218px; }
 table.t2 col.first { width: 210px; }
 table.t2 col.sub { width: 72px; }
-table.t2 thead tr:first-child th { height: 24px; font-size: 12px; }
-table.t2 thead tr:nth-child(2) th { height: 24px; font-size: 11px; }
-table.t2 tbody td { font-size: 12px; }
+table.t2 thead tr:first-child th { height: 24px; font-size: 13px; }
+table.t2 thead tr:nth-child(2) th { height: 24px; font-size: 12px; }
+table.t2 tbody td { font-size: 13px; }
 table.t2 tbody td:first-child { font-size: 13px; }
-table.t2 tbody td.rate { font-size: 11px; font-weight: 700; }
-/* 排班动态时段：班次多于 7 个时子列被压窄，同步缩小字号避免表头换行 */
-table.t2.compact thead tr:first-child th { font-size: 11px; }
-table.t2.compact thead tr:nth-child(2) th { font-size: 10px; }
-table.t2.compact tbody td { font-size: 11px; }
-table.t2.compact tbody td:first-child { font-size: 12px; }
-table.t2.compact tbody td.rate { font-size: 10px; }
+table.t2 tbody td.rate { font-size: 12px; font-weight: 700; }
+/* 班次变多时只压缩列宽，字号一律保持常规：
+   一级表头是 colspan=2，宽度 = 2 个子列（7/9/11 班次分别 144/112/90px），
+   足够放下 4 字班次名；最窄 45px 的子列也放得下「完单量」与百分比。
+   旧版把整张表压到 10/11px 是多余的，小字发虚、观感不像正常看板。 */
 
 .mat-title { width: 1218px; max-width: 100%; margin: 44px auto 10px; font-size: 20px;
   font-weight: 700; color: #1F2937; line-height: 1.4; }
