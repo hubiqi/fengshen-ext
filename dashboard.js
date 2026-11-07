@@ -1,4 +1,4 @@
-// 风神考核看板（插件版 v3.3.6）—— 与 fengshen-data/assess_image.py 生成的钉钉看板同口径、同排版
+// 风神考核看板（插件版 v3.4.0）—— 与 fengshen-data/assess_image.py 生成的钉钉看板同口径、同排版
 // 数据源全部在插件内获取，跟随当前浏览器登录态：
 //   1) queryTracking/2.0      -> 运单明细（实际完单 / 时段完单 / 骑手完单 / 站点商圈）
 //   2) exportSchedule/1.0     -> 排班 xlsx（规划单量 / 应排骑手 / 时段预估单量）
@@ -10,6 +10,8 @@
 //   对账不一致、跨天、换商、缓存异常、手动「全量重拉」时才回退到全量分页。
 // v3.3.6：标2 / 完单达标只认「非人工改派」的配送成功单（isReassign != 1，KPI 第十三条）；
 //   片区「实际完单 / 订单完成率 / 时段完单」口径不变，仍按全部配送成功单统计。
+// v3.4.0：工具条「复制图片」把 #sheet 渲染成 2 倍高清 PNG 写入剪贴板（capture.js），
+//   剪贴板不可用时自动降级为下载 PNG；Shift+点击直接另存为文件。
 
 const XT = "https://httpizza.ele.me/xtop/";
 const API_QUERY = XT + "xtop.agencyTrackingFs.queryTracking/2.0";
@@ -558,6 +560,36 @@ function restart(opts) { state.gen++; state.loading = false; loadAll(opts); }
 
 // ---------------------------------------------------------------- 事件
 $("btn-refresh").addEventListener("click", () => restart());
+// 「复制图片」：把看板画面（#sheet）渲染成 2 倍高清 PNG 写进剪贴板，可直接粘贴到钉钉 / 微信。
+// 剪贴板不可用时自动降级为下载 PNG；按住 Shift 点击则直接另存为文件。
+$("btn-copy-image").addEventListener("click", async (e) => {
+  const btn = $("btn-copy-image");
+  if (btn.disabled) return;
+  if (!window.WB_CAPTURE) {
+    showNotice("图片模块未加载：请在 chrome://extensions 重新加载扩展，或安装新版 zip。");
+    return;
+  }
+  const label = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "正在生成图片…";
+  clearNotice();
+  try {
+    const r = await WB_CAPTURE.capture({ download: e.shiftKey, date: todayStr().replace(/-/g, "") });
+    const size = `${r.width}×${r.height}`;
+    if (r.mode === "clipboard") {
+      showNotice(`已复制看板图片（${size} PNG），可直接 Ctrl/⌘+V 粘贴到钉钉 / 微信。`, "blue");
+    } else if (r.mode === "download") {
+      showNotice(`看板图片已另存为 PNG 文件（${size}）。`, "blue");
+    } else {
+      showNotice(`当前环境不允许写入剪贴板，已自动下载 PNG 图片（${size}），可直接拖进钉钉 / 微信。`, "blue");
+    }
+  } catch (err) {
+    showNotice(`生成图片失败：${String((err && err.message) || err)}。可先点「纯净看板」，再用系统截图工具替代。`);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = label;
+  }
+});
 // 「全量重拉」：忽略本地缓存，重新分页拉当日全部运单并重建缓存（数据校准用）
 $("btn-full").addEventListener("click", () => restart({ forceFull: true }));
 $("auto").addEventListener("change", (e) => localStorage.setItem("wb_auto", e.target.checked ? "1" : "0"));

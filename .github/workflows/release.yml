@@ -45,7 +45,7 @@ jobs:
           zip -r "fengshen-ext-v${VERSION}.zip" \
             manifest.json version.json rules.json \
             sw.js updater.js launcher.js update-ui.js \
-            dashboard.html dashboard.css dashboard.js assess.js sync.js xlsx.js
+            dashboard.html dashboard.css dashboard.js assess.js sync.js capture.js xlsx.js
 
       - name: Create GitHub Release with the zip
         if: steps.exists.outputs.exists == 'false'

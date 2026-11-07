@@ -1,6 +1,6 @@
 {
-  "version": "3.3.6",
-  "notes": "标2 / 完单达标骑手只统计非人工改派完成单（按 isReassign 剔除，KPI 第十三条）；看板底部显示剔除单数、达标人数变化与跌破门槛人数；片区实际完单口径不变",
-  "download": "https://github.com/hubiqi/fengshen-ext/releases/download/v3.3.6/fengshen-ext-v3.3.6.zip",
-  "published_at": "2026-11-06"
+  "version": "3.4.0",
+  "notes": "新增「复制图片」按钮：一键把看板画面导出为 1240px / 2 倍高清 PNG 写入剪贴板，可直接粘贴到钉钉 / 微信；固定桌面排版、纯本地零依赖，剪贴板不可用时自动降级为下载 PNG，Shift+点击直接另存为文件",
+  "download": "https://github.com/hubiqi/fengshen-ext/releases/download/v3.4.0/fengshen-ext-v3.4.0.zip",
+  "published_at": "2026-11-07"
 }

@@ -19,11 +19,16 @@ const previous = manifest.version;
 manifest.version = version;
 writeFileSync("manifest.json", JSON.stringify(manifest, null, 2) + "\n");
 
+// 用本机当地日期，别用 UTC：GMT+8 的凌晨发版会被写成前一天
+const now = new Date();
+const p2 = (n) => String(n).padStart(2, "0");
+const localDate = `${now.getFullYear()}-${p2(now.getMonth() + 1)}-${p2(now.getDate())}`;
+
 const versionFile = {
   version,
   notes,
   download: `https://github.com/${OWNER}/${REPO}/releases/download/v${version}/fengshen-ext-v${version}.zip`,
-  published_at: new Date().toISOString().slice(0, 10)
+  published_at: localDate
 };
 writeFileSync("version.json", JSON.stringify(versionFile, null, 2) + "\n");
 

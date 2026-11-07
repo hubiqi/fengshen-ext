@@ -144,7 +144,8 @@
           <button class="wb-btn" id="wbNewTab" title="在独立标签页打开">↗ 新标签打开</button>
           <button class="wb-btn close" id="wbClose" title="关闭（Esc）">×</button>
         </div>
-        <iframe class="wb-frame" id="wbFrame" title="风神考核看板" allowtransparency="false"></iframe>
+        <!-- clipboard-write：看板 iframe 是扩展页（跨源），需显式授予才能写「复制图片」 -->
+        <iframe class="wb-frame" id="wbFrame" title="风神考核看板" allow="clipboard-write *" allowtransparency="false"></iframe>
       </div>
     </div>`;
   if (root === host) {
