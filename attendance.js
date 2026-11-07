@@ -331,8 +331,19 @@ function render() {
 }
 
 // ---------------------------------------------------------------- 主流程
+// 站点范围与考核看板共用同一份缓存（TEAM_KEY），两页之间不重复查运单
+const TEAM_KEY = "wb_team_ids_v1";
+
 async function resolveTeamIds(gen) {
   const ids = new Set();
+  // ① 两个看板共用的「记住的站点范围」：绝大多数情况走这里，0 请求
+  try {
+    const saved = JSON.parse(localStorage.getItem(TEAM_KEY) || "[]");
+    if (Array.isArray(saved) && saved.length) {
+      for (const id of saved) { const v = String(id || "").trim(); if (v) ids.add(v); }
+      if (ids.size) { state.teamSource = "记住的站点范围"; return [...ids]; }
+    }
+  } catch (e) { /* 解析失败当作没有 */ }
   try {
     // 历史日期先看当天缓存，没有再借今天的缓存：站点范围一般不随日期变化
     const days = [...new Set([state.date, todayStr()])];
@@ -345,7 +356,11 @@ async function resolveTeamIds(gen) {
           if (id) ids.add(id);
         }
       }
-      if (ids.size) { state.teamSource = "复用原看板运单缓存"; return [...ids]; }
+      if (ids.size) {
+        try { localStorage.setItem(TEAM_KEY, JSON.stringify([...ids])); } catch (e) { /* ignore */ }
+        state.teamSource = "旧运单缓存（只读 teamId）";
+        return [...ids];
+      }
     }
   } catch (e) { /* 缓存不可用时继续走接口 */ }
   if (gen !== state.gen) return [];
@@ -357,7 +372,10 @@ async function resolveTeamIds(gen) {
       const id = String((r && r.teamId) || "").trim();
       if (id) ids.add(id);
     }
-    state.teamSource = "当日运单首页";
+    if (ids.size) {
+      try { localStorage.setItem(TEAM_KEY, JSON.stringify([...ids])); } catch (e) { /* ignore */ }
+    }
+    state.teamSource = "首次识别（1 页运单取 teamId）";
   } catch (e) {
     state.teamSource = "账号默认范围";
     state.errors.push("站点范围查询失败：" + (e.message || String(e)));

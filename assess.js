@@ -2,6 +2,10 @@
 // v3.5.0 追加「出勤达成」：应排 / 实排 / 有效出勤 × 时段矩阵（口径对齐 config.py + review_report.py）
 // v3.7.0 追加「历史日期」：T-1 及更早日期改用出勤统计的时段明细，标准成实时考勤表结构；
 //   系统「是否达成」列在全天行不可信，一律忽略，由 build() 按 6h / 18 单手工判定。
+// v3.9.0 完单改由「出勤统计」直接给出（不再需要同步运单）：
+//   出勤统计本身就是 骑手 × 时段 粒度，同时含「有效在线时长」和「完单量」，全天行还带全天合计。
+//   因此 build(orders=[], sch, att) 时，实际完单 / 时段完单 / 骑手完单全部从考勤表读；
+//   只有显式传入运单明细时才走运单口径（保留人工改派剔除，供离线回归与人工核对）。
 // 通用化策略：站点→商圈片映射为「可选表」。命中则用钉钉同一套片区名（数据完全一致）；
 // 未命中（换商登录）则回退到接口原生 merchantBusDistrictName，其余口径全部一致。
 /* global ASSESS */
@@ -381,87 +385,133 @@ const ASSESS = (() => {
       }
     } else attMissing = ["考勤表"];
 
-    // ---------------- 运单：实际完单 / 时段完单 / 骑手完单 ----------------
-    // 口径（与 assess_image.py / 系统一致）：只有「配送成功」计入实际完单。
-    // 接口实测：state=40 / stateDesc=配送成功；state=90 / stateDesc=配送失败。
-    // 接口 total 是「全部运单」，含配送失败，所以进度条里的「拉取 N 单」必然大于完单数，
-    // 两者必须分开标注，否则看起来就像把失败单算进了完单。
-    // 判定顺序：先排除任何明确的失败/取消状态，再认成功；状态缺失或不明一律不计入，
-    // 避免「state=40 但描述是失败」或将来新增状态被误算成完单。
-    const FAIL_WORDS = ["失败", "取消", "关闭", "退款", "拒收", "退回", "未妥投", "异常"];
-    const SUCCESS_WORDS = ["配送成功", "配送完成", "已妥投"];
-    const classify = (r) => {
-      const desc = String(r.stateDesc || r.statusDesc || "").trim();
-      const st = Number(r.state);
-      if (desc && FAIL_WORDS.some((w) => desc.includes(w))) return "failed";
-      if (st === 90) return "failed";
-      if (desc && SUCCESS_WORDS.some((w) => desc.includes(w))) return "success";
-      if (!desc && st === 40) return "success";       // 兼容没有描述字段的旧数据
-      return "unknown";
-    };
-
-    // 「人工改派」判定：queryTracking/2.0 实测字段 isReassign（0/1），
-    // 对应 KPI 第十三条「系统已指派骑手后，站长手动将订单由原骑手分配给新骑手」。
-    // 实测某日首页 90 单里 3 单 isReassign=1，且全部为配送成功单 —— 正是会抬高
-    // 骑手完单达标/标2 的那批单。字段名做兼容，接口若新增更细的「人工改派」标记可直接命中。
-    // 字段缺失 / 为 0 / 为否 一律按「未改派」处理：宁可少剔除，也不误判达标骑手。
-    const REASSIGN_KEYS = ["isManualReassign", "isManualAssign", "isReassign", "reassignFlag", "isChangeAssign"];
-    const truthy = (v) => {
-      if (v == null || v === "") return false;
-      if (typeof v === "number") return v > 0;
-      if (typeof v === "boolean") return v;
-      const s = String(v).trim().toLowerCase();
-      return !["0", "false", "no", "n", "否", "无", "null", "undefined"].includes(s);
-    };
-    const isReassigned = (r) => REASSIGN_KEYS.some((k) => k in r && truthy(r[k]));
-
-    // reassigned 只统计「配送成功」里的改派单，即真正从骑手达标里剔除的数量
-    const orderStats = { total: orders.length, success: 0, failed: 0, unknown: 0, reassigned: 0 };
+    // ---------------- 完单与骑手达标：默认取「出勤统计」，不再同步运单 ----------------
+    // v3.9.0：实际完单 / 时段完单 / 骑手完单改由出勤统计直接给出。
+    //   出勤统计每行就是一个「骑手 × 时段」，本身同时带「有效在线时长」和「完单量」，
+    //   全天行再给出全天合计 —— 它正是考核系统的口径来源。相比之下运单要分页拉上万单、
+    //   还要自己判状态与改派，既慢又容易与系统口径漂移（实测 11-06 整天运单 9345 单、
+    //   其中配送成功约 9100、出勤统计全天完单 9051，差异来自终态时间边界与改派结算，<1%）。
+    //   orders 非空时仍走运单明细：保留「人工改派」剔除能力，供离线回归与人工核对。
+    const useWaybill = Array.isArray(orders) && orders.length > 0;
+    const doneSource = useWaybill ? "waybill" : "attendance";
+    // orderStats 只在运单口径下有意义（「拉取 N 单」是含配送失败的全部运单）
+    const orderStats = useWaybill
+      ? { total: orders.length, success: 0, failed: 0, unknown: 0, reassigned: 0 }
+      : null;
     const done = new Map(), periodDone = new Map();
-    const knightDay = new Map(), knightDayRaw = new Map(), knightSite = new Map();
+    const knightDay = new Map(), knightSite = new Map();
+    let reassignStats = null;
 
-    for (const r of orders) {
-      const site = key(r.teamName);
-      const area = areaOfSite(site);
-      areaSet.add(area);
-      const cls = classify(r);
-      orderStats[cls]++;
-      if (cls !== "success") continue;
-      const reassigned = isReassigned(r);
-      if (reassigned) orderStats.reassigned++;
-      // 片区「实际完单」与时段完单不受改派剔除影响：KPI 只规定标1–标5 剔除，
-      // 规划单量完成率仍按考核单位承接的全部配送成功单统计。
-      done.set(area, (done.get(area) || 0) + 1);
-      const per = periodOf(r.completeAt || r.trackingFinishAt, periods);
-      if (per) {
-        if (!periodDone.has(area)) periodDone.set(area, new Map());
-        const m = periodDone.get(area);
-        m.set(per, (m.get(per) || 0) + 1);
+    if (useWaybill) {
+      // 口径（与 assess_image.py / 系统一致）：只有「配送成功」计入实际完单。
+      // 接口实测：state=40 / stateDesc=配送成功；state=90 / stateDesc=配送失败。
+      // 接口 total 是「全部运单」，含配送失败，所以进度条里的「拉取 N 单」必然大于完单数，
+      // 两者必须分开标注，否则看起来就像把失败单算进了完单。
+      // 判定顺序：先排除任何明确的失败/取消状态，再认成功；状态缺失或不明一律不计入，
+      // 避免「state=40 但描述是失败」或将来新增状态被误算成完单。
+      const FAIL_WORDS = ["失败", "取消", "关闭", "退款", "拒收", "退回", "未妥投", "异常"];
+      const SUCCESS_WORDS = ["配送成功", "配送完成", "已妥投"];
+      const classify = (r) => {
+        const desc = String(r.stateDesc || r.statusDesc || "").trim();
+        const st = Number(r.state);
+        if (desc && FAIL_WORDS.some((w) => desc.includes(w))) return "failed";
+        if (st === 90) return "failed";
+        if (desc && SUCCESS_WORDS.some((w) => desc.includes(w))) return "success";
+        if (!desc && st === 40) return "success";       // 兼容没有描述字段的旧数据
+        return "unknown";
+      };
+
+      // 「人工改派」判定：queryTracking/2.0 实测字段 isReassign（0/1），
+      // 对应 KPI 第十三条「系统已指派骑手后，站长手动将订单由原骑手分配给新骑手」。
+      // 字段名做兼容；字段缺失 / 为 0 / 为否 一律按「未改派」处理，宁可少剔除也不误判。
+      const REASSIGN_KEYS = ["isManualReassign", "isManualAssign", "isReassign", "reassignFlag", "isChangeAssign"];
+      const truthy = (v) => {
+        if (v == null || v === "") return false;
+        if (typeof v === "number") return v > 0;
+        if (typeof v === "boolean") return v;
+        const s = String(v).trim().toLowerCase();
+        return !["0", "false", "no", "n", "否", "无", "null", "undefined"].includes(s);
+      };
+      const isReassigned = (r) => REASSIGN_KEYS.some((k) => k in r && truthy(r[k]));
+
+      // reassigned 只统计「配送成功」里的改派单，即真正从骑手达标里剔除的数量
+      const knightDayRaw = new Map();
+      for (const r of orders) {
+        const site = key(r.teamName);
+        const area = areaOfSite(site);
+        areaSet.add(area);
+        const cls = classify(r);
+        orderStats[cls]++;
+        if (cls !== "success") continue;
+        const reassigned = isReassigned(r);
+        if (reassigned) orderStats.reassigned++;
+        // 片区「实际完单」与时段完单不受改派剔除影响：KPI 只规定标1–标5 剔除，
+        // 规划单量完成率仍按考核单位承接的全部配送成功单统计。
+        done.set(area, (done.get(area) || 0) + 1);
+        const per = periodOf(r.completeAt || r.trackingFinishAt, periods);
+        if (per) {
+          if (!periodDone.has(area)) periodDone.set(area, new Map());
+          const m = periodDone.get(area);
+          m.set(per, (m.get(per) || 0) + 1);
+        }
+        const rid = key(r.knightId);
+        if (rid) {
+          knightSite.set(rid, site);
+          knightDayRaw.set(rid, (knightDayRaw.get(rid) || 0) + 1);   // 对账用：含改派单
+          // 骑手达标只认「非人工改派」的完成单
+          if (!reassigned) knightDay.set(rid, (knightDay.get(rid) || 0) + 1);
+        }
       }
-      const rid = key(r.knightId);
-      if (rid) {
-        knightSite.set(rid, site);
-        knightDayRaw.set(rid, (knightDayRaw.get(rid) || 0) + 1);   // 对账用：含改派单
-        // 骑手达标只认「非人工改派」的完成单
-        if (!reassigned) knightDay.set(rid, (knightDay.get(rid) || 0) + 1);
+
+      // KPI 第十三条：改派完单量在标1–标5 中剔除。
+      // 「完单达标 / 标2」只用 knightDay（非改派成功单）判定；
+      // knightDayRaw 仅用于算出「若不剔除会虚高多少人」，便于核对口径变化。
+      const th0 = (site) => (isUB(site) ? 26 : 24);
+      let dokRaw = 0, b2Raw = 0, downgraded = 0;
+      for (const [rid, cntRaw] of knightDayRaw) {
+        const site = knightSite.get(rid) || "";
+        const th = th0(site);
+        if (cntRaw < th) continue;
+        dokRaw++;
+        if ((att.get(rid) || 0.0) >= ONLINE_MIN_HOURS) b2Raw++;
+        if ((knightDay.get(rid) || 0) < th) downgraded++;   // 原本达标、剔除改派单后跌破门槛
+      }
+      reassignStats = { excluded: orderStats.reassigned, dokRaw, b2Raw, downgraded };
+    } else if (ats) {
+      // 出勤统计口径：全天行 = 片区实际完单 + 骑手全天完单；时段行 = 片区时段完单。
+      // 注意 detailToAttendance() 会把全天值复制到同一骑手的每一行，
+      // 所以实际完单只能认「时段=全天」的行，否则会被重复累加。
+      const c = ats.col;
+      const iSite = colOf(c, ["站点名称", "团队名称", "站点", "团队"]);
+      const iPer = colOf(c, ["时段"]);
+      const iRid = colOf(c, ["骑手id", "骑手ID"]);
+      const iDOrd = colOf(c, ["全天完单量", "完单量"]);
+      const iPOrd = colOf(c, ["时段完单量", "完单量"]);
+      for (const r of ats.rows) {
+        const per = key(r[iPer]);
+        const site = iSite >= 0 ? key(r[iSite]) : "";
+        const area = areaOfSite(site);
+        const rid = key(r[iRid]);
+        if (per === "全天") {
+          const dOrd = iDOrd >= 0 ? num(r[iDOrd]) : 0;
+          if (dOrd > 0) { done.set(area, (done.get(area) || 0) + dOrd); areaSet.add(area); }
+          if (rid) { knightSite.set(rid, site); knightDay.set(rid, dOrd); }
+        } else if (periodSet.has(per)) {
+          const pOrd = iPOrd >= 0 ? num(r[iPOrd]) : 0;
+          if (pOrd > 0) {
+            if (!periodDone.has(area)) periodDone.set(area, new Map());
+            const m = periodDone.get(area);
+            m.set(per, (m.get(per) || 0) + pOrd);
+            areaSet.add(area);
+          }
+        }
       }
     }
 
-    // ---------------- 标2 / 完单达标 ----------------
-    // KPI 第十三条「人工改派结算限制」：改派完单量在标1–标5 中剔除。
-    // 因此「完单达标人数 / 标2 骑手数」只用 knightDay（非改派成功单）判定；
-    // knightDayRaw 仅用于算出「若不剔除会虚高多少人」，方便核对口径变化。
+    // ---------------- 完单达标 / 标2（与完单来源无关） ----------------
+    // 一样按「完单 ≥ 门槛(UB26 / 其他24)」判达标，再叠加「全天有效在线时长 ≥ 6h」得标2。
     const thresholdOf = (site) => (isUB(site) ? 26 : 24);
     const doneOk = new Map(), b2 = new Map();
-    let dokRaw = 0, b2Raw = 0, downgraded = 0;
-    for (const [rid, cntRaw] of knightDayRaw) {
-      const site = knightSite.get(rid) || "";
-      const th = thresholdOf(site);
-      if (cntRaw < th) continue;
-      dokRaw++;
-      if ((att.get(rid) || 0.0) >= ONLINE_MIN_HOURS) b2Raw++;
-      if ((knightDay.get(rid) || 0) < th) downgraded++;   // 原本达标、剔除改派单后跌破门槛
-    }
     for (const [rid, cnt] of knightDay) {
       const site = knightSite.get(rid) || "";
       const area = areaOfSite(site);
@@ -506,10 +556,11 @@ const ASSESS = (() => {
     };
     // 改派口径对账：excluded=被剔除的改派成功单；dokRaw/b2Raw=不剔除时的人数；
     // downgraded=因剔除改派单从达标变不达标的骑手数。看板底部据此展示，便于人工核对。
-    const reassignStats = {
-      excluded: orderStats.reassigned,
-      dokRaw, b2Raw, dok: tDok, b2: tB2, downgraded
-    };
+    // 出勤统计口径下拿不到改派标记（明细表没有该字段），reassignStats 为 null。
+    if (reassignStats) {
+      reassignStats.dok = tDok;
+      reassignStats.b2 = tB2;
+    }
     const totalPd = {};
     for (const per of periods) {
       let pl = 0, dv = 0;
@@ -564,7 +615,7 @@ const ASSESS = (() => {
 
     return {
       rows, totals, totalPd, periods, periodSource, unknownPeriods: [...unknownPeriods],
-      orderStats, reassignStats, attendance,
+      orderStats, reassignStats, doneSource, attendance,
       scheduleOk, attendanceOk,
       mapped: mappedCnt > 0, mappingFallback: fallbackCnt > 0,
       areaLabel: mappedCnt > 0 ? "商圈片" : "商圈"

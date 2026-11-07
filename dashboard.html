@@ -22,15 +22,15 @@
       <input type="date" id="date-picker" aria-label="考核日期">
       <button id="btn-next-day" class="date-step" type="button" title="往后一天（更近）" aria-label="往后一天"></button>
     </div>
-    <button id="btn-today" class="ghost" title="切回今天（当日实时快照 + 增量同步）">今天</button>
-    <button id="btn-t1" class="ghost" title="切到 T-1（历史定稿：整天运单 + 出勤统计时段明细）">T-1</button>
+    <button id="btn-today" class="ghost" title="切回今天（实时考勤快照）">今天</button>
+    <button id="btn-t1" class="ghost" title="切到 T-1（出勤统计定稿明细）">T-1</button>
     <span class="mode-tag" id="mode-tag">实时快照</span>
     <label class="chk"><input type="checkbox" id="auto" checked> 自动刷新 5 分钟</label>
     <button id="btn-refresh" class="primary">立即刷新</button>
     <button id="btn-copy-image" class="primary" title="把看板画面复制为高清 PNG，可直接粘贴到钉钉 / 微信；按住 Shift 点击则另存为 PNG 文件">复制图片</button>
     <button id="btn-channel" class="ghost">通道：直连</button>
     <button id="btn-clean" class="ghost">纯净看板</button>
-    <button id="btn-full" class="ghost" title="忽略本地缓存，重新拉取当日全部运单（用于数据校准）">全量重拉</button>
+    <button id="btn-full" class="ghost" title="清掉记住的站点范围并重新拉取（换账号 / 站点增减后用它重置）">重识站点</button>
     <button id="btn-update" class="ghost" title="检查 GitHub 上是否有新版本">检查更新</button>
   </div>
 </div>
@@ -69,7 +69,7 @@
 <main class="sheet" id="sheet">
   <div class="doc-title">指定日考核看板 · 规划单量完成率 &amp; 标2骑手占比</div>
   <div class="doc-sub" id="doc-sub">考核日期 —&nbsp;&nbsp;&nbsp;&nbsp;生成时间 —</div>
-  <div class="doc-note" id="doc-note">标2骑手 = 当日「非人工改派」完单≥门槛(UB26 / 其他24) 且 考勤「全天有效在线时长」≥6h（实际达成时长判定）；人工改派完单按 KPI 第十三条不计入运力达标，片区「实际完单」仍按全部配送成功单统计</div>
+  <div class="doc-note" id="doc-note">标2骑手 = 当日 完单≥门槛(UB26 / 其他24) 且 全天有效在线时长≥6h（实时考勤快照）；完单量取自考勤导出，片区「实际完单」= 该片区骑手全天完单合计</div>
 
   <div class="tbl-scroll">
     <table class="tbl t1" id="table1">

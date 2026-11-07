@@ -1,6 +1,6 @@
 {
-  "version": "3.8.0",
-  "notes": "考核看板新增日期选择（今天 / T-1，日期框左右箭头逐日快切，最近 90 天）；T-1 与 T0 取数链路分开：运单改走所选日整天终态时间窗口全量、排班按该日导出、考勤改用出勤统计历史骑手时段明细并标准化；历史结果不写当天增量缓存，凌晨空明细明确提示不误算 0 分",
-  "download": "https://github.com/hubiqi/fengshen-ext/releases/download/v3.8.0/fengshen-ext-v3.8.0.zip",
+  "version": "3.9.0",
+  "notes": "考核看板不再同步运单：完单量直接取「出勤统计」的骑手全天/时段完单，与考核系统同源；刷新从上百页运单降到「排班 + 考勤」两个导出请求（历史日期由 1-3 分钟降到秒级）。站点范围识别一次长期复用，只在首次/换商时查 1 页运单拿 teamId，新增「重识站点」按钮。运单口径（含人工改派剔除）保留为可选分支。",
+  "download": "https://github.com/hubiqi/fengshen-ext/releases/download/v3.9.0/fengshen-ext-v3.9.0.zip",
   "published_at": "2026-11-08"
 }
