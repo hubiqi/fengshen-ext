@@ -1,9 +1,10 @@
-// 出勤达成看板（独立页面 v3.7.0）—— 与「指定日考核看板」完全分开的入口与画面
+// 出勤达成看板（独立页面 v3.7.1）—— 与「指定日考核看板」完全分开的入口与画面
 //
 // 本页只做一件事：算「应排 / 实排 / 有效出勤」并输出实排达成、应排达成两张宽表。
 // 不拉运单明细、不写运单缓存、不改动原考核看板的任何画面或导出图。
 //
-// 日期可选择（默认今天，可回看最近 90 天）。两条取数链路：
+// 日期可选择（默认今天，可回看最近 90 天；日期框两侧有 ‹ › 箭头逐日快切，
+// 到「今天」或「90 天前」边界自动置灰）。两条取数链路：
 //   今天：exportSchedule/1.0 排班统计 + exportAttendance/1.0 实时考勤（当日快照）
 //   T-1 及更早：exportSchedule/1.0 排班统计（支持历史日期）
 //              + exportStatisticsDetail/1.0（出勤统计 → 导出明细数据，骑手 × 时段）
@@ -267,6 +268,7 @@ function render() {
   $("btn-today").classList.toggle("date-active", !history);
   $("btn-t1").classList.toggle("date-active", state.date === shiftDate(todayStr(), -1));
   if ($("date-picker").value !== state.date) $("date-picker").value = state.date;
+  syncDateNav();
   $("doc-note").textContent = history
     ? "数据源：排班统计（应排人数 / 排班人数）+ 出勤统计历史时段明细（有效在线时长 / 完单量）；全天达成按有效在线≥6小时且完单≥18单手工判定，不采用系统的全天达成标记"
     : "数据源：排班统计（应排人数 / 排班人数）+ 实时考勤（排班状态 / 时段有效在线 / 时段完单）；有效出勤按 KPI 时段标准双达标去重，全天按 6h / 18 单";
@@ -454,6 +456,16 @@ async function loadAll(opts) {
 function restart(force) { state.gen++; state.loading = false; loadAll({ force: !!force }); }
 
 // ---------------------------------------------------------------- 日期选择
+/** 到边界就把箭头置灰：最左 = 90 天前，最右 = 今天，避免点了没反应 */
+function syncDateNav() {
+  const today = todayStr();
+  $("btn-prev-day").disabled = state.date <= shiftDate(today, -HISTORY_DAYS);
+  $("btn-next-day").disabled = state.date >= today;
+  $("btn-prev-day").title = $("btn-prev-day").disabled
+    ? `已到可查范围最早日期（最近 ${HISTORY_DAYS} 天）` : "往前一天（更早）";
+  $("btn-next-day").title = $("btn-next-day").disabled
+    ? "已是今天，不能查看未来日期" : "往后一天（更近）";
+}
 function setDate(date) {
   const today = todayStr();
   if (!validDate(date) || date > today || date < shiftDate(today, -HISTORY_DAYS)) {
@@ -466,11 +478,14 @@ function setDate(date) {
   state.mode = isToday(date) ? "live" : "history";
   localStorage.setItem("wb_att_date", date);
   $("date-picker").value = date;
+  syncDateNav();   // 数据还在拉取时也立即更新箭头状态
   restart(false);
 }
 $("date-picker").addEventListener("change", (e) => setDate(e.target.value));
 $("btn-today").addEventListener("click", () => setDate(todayStr()));
 $("btn-t1").addEventListener("click", () => setDate(shiftDate(todayStr(), -1)));
+$("btn-prev-day").addEventListener("click", () => setDate(shiftDate(state.date, -1)));
+$("btn-next-day").addEventListener("click", () => setDate(shiftDate(state.date, 1)));
 
 // ---------------------------------------------------------------- 事件
 $("btn-refresh").addEventListener("click", () => restart(true));
@@ -567,6 +582,7 @@ window.__SET_DATA__ = (sch, att, date, mode) => {
   $("date-picker").value = state.date;
   $("date-picker").max = today;
   $("date-picker").min = shiftDate(today, -HISTORY_DAYS);
+  syncDateNav();
   $("btn-channel").textContent = "通道：" + (state.via === "bridge" ? "静默桥接" : "直连");
   try {
     const m = chrome.runtime.getManifest && chrome.runtime.getManifest();

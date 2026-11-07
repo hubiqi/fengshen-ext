@@ -17,7 +17,12 @@
     <span class="tb-sub" id="sub">正在读取当前浏览器登录态…</span>
   </div>
   <div class="tb-right">
-    <label class="date-pick">日期 <input type="date" id="date-picker" aria-label="考核日期"></label>
+    <div class="date-pick">
+      <span>日期</span>
+      <button id="btn-prev-day" class="date-step" type="button" title="往前一天（更早）" aria-label="往前一天"></button>
+      <input type="date" id="date-picker" aria-label="考核日期">
+      <button id="btn-next-day" class="date-step" type="button" title="往后一天（更近）" aria-label="往后一天"></button>
+    </div>
     <button id="btn-today" class="ghost" title="切回今天（实时考勤快照）">今天</button>
     <button id="btn-t1" class="ghost" title="切到 T-1（出勤统计历史时段明细）">T-1</button>
     <span class="mode-tag" id="mode-tag">实时快照</span>

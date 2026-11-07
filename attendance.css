@@ -1,14 +1,25 @@
-/* 出勤达成（独立页面 v3.7.0）
+/* 出勤达成（独立页面 v3.7.1）
    基础排版复用 dashboard.css（工具条 / .sheet / table.tbl / 纯净模式），
    本文件只放「实排达成 / 应排达成」两张宽表、概览区与日期选择器的样式。
    配色对齐用户提供的截图：浅色表头、细灰线、百分比绿/橙/红、下方灰字分子分母。
    总宽锁 1218px，班次变多只压缩列宽，不撑破「复制图片」的 1240px 画布。 */
-/* 工具条：日期选择 + 数据源标签（不属于导出画面） */
+/* 工具条：日期选择（左右箭头步进）+ 数据源标签（不属于导出画面） */
 .date-pick { font-size: 12px; color: #374151; display: inline-flex; align-items: center;
-  gap: 5px; white-space: nowrap; }
+  gap: 4px; white-space: nowrap; }
 .date-pick input[type="date"] { font-family: inherit; font-size: 12px; height: 28px;
   padding: 4px 7px; border: 1px solid #D1D5DB; border-radius: 5px;
   background: #FFFFFF; color: #1F2937; }
+/* 箭头用 CSS chevron 画，避免不同系统字体下的 ‹ › 字形差异 */
+.date-pick .date-step { width: 26px; height: 28px; flex: 0 0 26px; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 1px solid #D1D5DB; border-radius: 5px; background: #FFFFFF; color: #374151; }
+.date-pick .date-step::before { content: ""; display: block; width: 7px; height: 7px;
+  border-left: 2px solid currentColor; border-bottom: 2px solid currentColor; }
+#btn-prev-day::before { transform: rotate(45deg); }
+#btn-next-day::before { transform: rotate(-135deg); }
+.date-pick .date-step:hover:not(:disabled) { background: #E8F1FD;
+  border-color: #93C5FD; color: #1D4ED8; }
+.date-pick .date-step:disabled { opacity: .4; }
 .mode-tag { font-size: 11.5px; line-height: 1; padding: 5px 9px; border-radius: 10px;
   background: #E8F1FD; color: #1D4ED8; white-space: nowrap; }
 .mode-tag.history { background: #ECFDF5; color: #047857; }

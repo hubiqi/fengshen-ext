@@ -1,6 +1,6 @@
 {
-  "version": "3.7.0",
-  "notes": "出勤达成支持选择日期（今天 / T-1，最近 90 天）；历史日期改走「出勤统计 → 导出明细数据」的骑手时段明细，全天达成忽略系统错误标记，按有效在线≥6小时且完单≥18单手工判定",
-  "download": "https://github.com/hubiqi/fengshen-ext/releases/download/v3.7.0/fengshen-ext-v3.7.0.zip",
-  "published_at": "2026-11-07"
+  "version": "3.7.1",
+  "notes": "出勤达成日期选择器新增左右箭头，可逐日快速切换（连点即可翻到任意历史日期）；到今天或 90 天前边界自动置灰并给出悬停说明，不会误点未来或越界日期",
+  "download": "https://github.com/hubiqi/fengshen-ext/releases/download/v3.7.1/fengshen-ext-v3.7.1.zip",
+  "published_at": "2026-11-08"
 }
