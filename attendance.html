@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>出勤达成 · 应排 / 实排 / 有效出勤</title>
+  <link rel="stylesheet" href="dashboard.css">
+  <link rel="stylesheet" href="attendance.css">
+</head>
+<body class="att-page">
+
+<!-- 工具条：不属于导出画面，可一键隐藏为「纯净看板」 -->
+<div class="toolbar" id="toolbar">
+  <div class="tb-left">
+    <strong>出勤达成</strong>
+    <span class="tb-ver" id="tb-ver"></span>
+    <span class="tb-sub" id="sub">正在读取当前浏览器登录态…</span>
+  </div>
+  <div class="tb-right">
+    <label class="chk"><input type="checkbox" id="auto" checked> 自动刷新 5 分钟</label>
+    <button id="btn-refresh" class="primary">立即刷新</button>
+    <button id="btn-copy-image" class="primary" title="把出勤达成画面复制为高清 PNG，可直接粘贴到钉钉 / 微信；按住 Shift 点击则另存为 PNG 文件">复制图片</button>
+    <button id="btn-goto-assess" class="ghost" title="切回原来的考核看板（独立页面，互不干扰）">考核看板 ↗</button>
+    <button id="btn-channel" class="ghost">通道：直连</button>
+    <button id="btn-clean" class="ghost">纯净看板</button>
+  </div>
+</div>
+
+<div class="notice" id="notice" hidden></div>
+
+<div class="progress-wrap" id="progress-wrap">
+  <div class="progress"><div class="bar" id="bar"></div></div>
+  <span class="progress-text" id="progress-text">准备中…</span>
+</div>
+
+<!-- ============ 出勤达成看板画面（独立 PNG） ============ -->
+<main class="sheet" id="sheet">
+  <div class="doc-title">出勤达成 · 应排 / 实排 / 有效出勤</div>
+  <div class="doc-sub" id="doc-sub">考核日期 —&nbsp;&nbsp;&nbsp;&nbsp;生成时间 —</div>
+  <div class="doc-note">数据源：排班统计（应排人数 / 排班人数）+ 实时考勤（排班状态 / 时段有效在线 / 时段完单）；有效出勤按 KPI 时段标准双达标去重，全天按 6h / 18 单</div>
+
+  <div class="att-kpi" id="att-kpi"></div>
+  <div class="att-note" id="att-note"></div>
+
+  <div id="att-blocks">
+    <div class="att-block-title" id="att-title-real">实排达成</div>
+    <div class="tbl-scroll"><table class="tbl att" id="table3"></table></div>
+    <div class="att-block-title" id="att-title-due">应排达成</div>
+    <div class="tbl-scroll"><table class="tbl att" id="table4"></table></div>
+  </div>
+
+  <div class="doc-foot">实排达成 = 有效出勤 ÷ 实排；应排达成 = 有效出勤 ÷ 应排（多排班可 &gt;100%，不封顶）</div>
+  <div class="doc-foot small">注：考勤为当日实时快照，未结束班次的有效出勤会随时间补齐；两张表按当日排班实际班次动态生成列，宽表可左右滑动查看全部时段</div>
+</main>
+
+<footer id="foot-meta" class="foot-meta"></footer>
+
+<script src="xlsx.js"></script>
+<script src="assess.js"></script>
+<script src="sync.js"></script>
+<script src="capture.js"></script>
+<script src="attendance.js"></script>
+</body>
+</html>

@@ -51,10 +51,14 @@
   const escXml = (s) => String(s)
     .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
-  /** 把看板主画面渲染为 PNG Blob。返回 {blob,width,height}（width/height 为实际像素）。 */
-  async function toBlob() {
-    const src = document.getElementById("sheet");
-    if (!src) throw new Error("未找到看板画面（#sheet）");
+  /**
+   * 把看板主画面渲染为 PNG Blob。返回 {blob,width,height}（width/height 为实际像素）。
+   * rootId 默认 "sheet"；v3.6.0 起「出勤达成」是独立页面，可传自己的根节点 id，
+   * 两个入口各自导出自己的画面，互不混入。
+   */
+  async function toBlob(rootId) {
+    const src = document.getElementById(rootId || "sheet");
+    if (!src) throw new Error("未找到看板画面（#" + (rootId || "sheet") + "）");
 
     const holder = document.createElement("div");
     holder.style.cssText =
@@ -143,13 +147,14 @@
 
   /**
    * 一键复制入口。
-   * @param {{download?:boolean, date?:string}} opts download=true 时直接另存为 PNG
+   * @param {{download?:boolean, date?:string, rootId?:string, filename?:string}} opts
+   *        download=true 时直接另存为 PNG；rootId/filename 供独立页面指定自己的画面与文件名
    * @returns {Promise<{mode:"clipboard"|"download"|"fallback", width:number, height:number}>}
    */
   async function capture(opts) {
     const o = opts || {};
-    const rendering = toBlob();                  // 立即开工，不先 await
-    const name = `风神考核看板_${o.date || today()}.png`;
+    const rendering = toBlob(o.rootId);          // 立即开工，不先 await
+    const name = o.filename || `风神考核看板_${o.date || today()}.png`;
     if (o.download) {
       const { blob, width, height } = await rendering;
       download(blob, name);

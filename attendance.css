@@ -1,0 +1,32 @@
+/* 出勤达成（独立页面 v3.6.0）
+   基础排版复用 dashboard.css（工具条 / .sheet / table.tbl / 纯净模式），
+   本文件只放「实排达成 / 应排达成」两张宽表与概览区自己的样式。
+   配色对齐用户提供的截图：浅色表头、细灰线、百分比绿/橙/红、下方灰字分子分母。
+   总宽锁 1218px，班次变多只压缩列宽，不撑破「复制图片」的 1240px 画布。 */
+.att-kpi { width: 1218px; max-width: 100%; margin: 20px auto 0; text-align: center;
+  font-size: 15px; color: #374151; line-height: 1.7; }
+.att-kpi b { color: #1F2937; font-size: 17px; }
+.att-note { width: 1218px; max-width: 100%; margin: 8px auto 0; text-align: center;
+  font-size: 12.5px; color: #6B7280; line-height: 1.7; padding: 0 16px; }
+.att-note .warn-text { color: #B45309; }
+#att-blocks[hidden] { display: none !important; }
+.att-block-title { width: 1218px; max-width: 100%; margin: 30px auto 10px;
+  font-size: 20px; font-weight: 700; color: #1F2937; text-align: center; line-height: 1.4; }
+table.tbl.att { width: 1218px; min-width: 1218px; border: 1px solid #E5E7EB; }
+table.tbl.att th, table.tbl.att td { border: 1px solid #E5E7EB; padding: 4px 2px; }
+table.tbl.att thead th { height: 40px; background: #F2F5FA; color: #374151;
+  font-size: 14px; font-weight: 700; }
+table.tbl.att tbody td { height: 52px; font-size: 13px; color: #374151; }
+table.tbl.att tbody td.name { font-size: 13px; color: #374151; }
+table.tbl.att tbody tr.total td { background: #FEF7E8; color: #1F2937; font-weight: 700; }
+table.tbl.att td.att-cell b { display: block; font-size: 15px; font-weight: 700; line-height: 1.35; }
+table.tbl.att td.att-cell span { display: block; font-size: 11.5px; color: #9CA3AF;
+  line-height: 1.35; font-weight: 400; }
+table.tbl.att td.att-cell.good b { color: #15803D; }
+table.tbl.att td.att-cell.warn b { color: #EA580C; }
+table.tbl.att td.att-cell.bad b { color: #B91C1C; }
+table.tbl.att td.att-cell.pending b { color: #9CA3AF; font-size: 12.5px; }
+table.tbl.att td.att-cell.zero { color: #9CA3AF; }
+/* 纯净模式：出勤页没有播报区，隐藏概览以外的工具性质区块 */
+body.clean.att-page .notice, body.clean.att-page .progress-wrap,
+body.clean.att-page .foot-meta { display: none !important; }

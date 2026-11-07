@@ -18,6 +18,9 @@ const REF = "https://a.ele.me/app/fnjp-gfe/pikipek-apps/aeolus/index.html?platfo
 const RULE_ID = 91001;
 const CORS_RULE_ID = 91002;
 const DASHBOARD = chrome.runtime.getURL("dashboard.html");
+// v3.6.0：出勤达成是独立页面，两个入口可以各自在独立标签页打开，互不覆盖
+const ATTENDANCE = chrome.runtime.getURL("attendance.html");
+const PAGE_URL = { assess: DASHBOARD, attendance: ATTENDANCE };
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -69,14 +72,15 @@ chrome.runtime.onStartup.addListener(() => { ensureRules().catch(() => {}); });
 ensureRules().catch(() => {}); // SW 每次被唤醒都幂等确认一次
 
 // ---------------------------------------------------------------- 看板标签页 / 悬浮面板
-async function openDashboardTab() {
+async function openDashboardTab(page) {
+  const url = PAGE_URL[page] || DASHBOARD;
   const all = await chrome.tabs.query({});
-  const exist = all.find((t) => (t.url || "").startsWith(DASHBOARD));
+  const exist = all.find((t) => (t.url || "").startsWith(url));
   if (exist) {
     await chrome.tabs.update(exist.id, { active: true });
     if (exist.windowId != null) await chrome.windows.update(exist.windowId, { focused: true });
   } else {
-    await chrome.tabs.create({ url: DASHBOARD });
+    await chrome.tabs.create({ url });
   }
 }
 
@@ -191,9 +195,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
-  // 悬浮面板标题栏的「新标签打开」
+  // 悬浮面板标题栏的「新标签打开」：按当前页签打开对应的独立页面
   if (msg.type === "WB_OPEN_TAB") {
-    openDashboardTab().then(() => sendResponse({ ok: true }))
+    openDashboardTab(msg.page).then(() => sendResponse({ ok: true }))
                       .catch((e) => sendResponse({ ok: false, error: String(e) }));
     return true;
   }

@@ -83,37 +83,6 @@ table.t2 tbody td.rate { font-size: 12px; font-weight: 700; }
   font-size: 13px; color: #6B7280; line-height: 1.5; padding: 0 16px; }
 .doc-foot.small { margin-top: 8px; font-size: 12px; }
 
-/* ---------------- 出勤达成模块（v3.5.0，两张宽表 + 三数概览） ----------------
-   样式对齐用户提供的「实排达成 / 应排达成」截图：浅色表头、细灰线、
-   百分比配色（≥100% 绿 / 80–99.9% 橙 / <80% 红）、下方灰字分子分母。
-   总宽同样锁 1218px，班次变多只压缩列宽，不撑破「复制图片」的 1240px 画布。 */
-.att-section[hidden] { display: none !important; }
-.att-section { margin-top: 46px; }
-.att-title { font-size: 22px; font-weight: 700; color: #1F2937; text-align: center; line-height: 1.4; }
-.att-kpi { width: 1218px; max-width: 100%; margin: 12px auto 0; text-align: center;
-  font-size: 15px; color: #374151; line-height: 1.7; }
-.att-kpi b { color: #1F2937; font-size: 17px; }
-.att-note { width: 1218px; max-width: 100%; margin: 8px auto 0; text-align: center;
-  font-size: 12.5px; color: #6B7280; line-height: 1.7; padding: 0 16px; }
-.att-note .warn-text { color: #B45309; }
-.att-block-title { width: 1218px; max-width: 100%; margin: 30px auto 10px;
-  font-size: 20px; font-weight: 700; color: #1F2937; text-align: center; line-height: 1.4; }
-table.tbl.att { width: 1218px; min-width: 1218px; border: 1px solid #E5E7EB; }
-table.tbl.att th, table.tbl.att td { border: 1px solid #E5E7EB; padding: 4px 2px; }
-table.tbl.att thead th { height: 40px; background: #F2F5FA; color: #374151;
-  font-size: 14px; font-weight: 700; }
-table.tbl.att tbody td { height: 52px; font-size: 13px; color: #374151; }
-table.tbl.att tbody td.name { font-size: 13px; color: #374151; }
-table.tbl.att tbody tr.total td { background: #FEF7E8; color: #1F2937; font-weight: 700; }
-table.tbl.att td.att-cell b { display: block; font-size: 15px; font-weight: 700; line-height: 1.35; }
-table.tbl.att td.att-cell span { display: block; font-size: 11.5px; color: #9CA3AF;
-  line-height: 1.35; font-weight: 400; }
-table.tbl.att td.att-cell.good b { color: #15803D; }
-table.tbl.att td.att-cell.warn b { color: #EA580C; }
-table.tbl.att td.att-cell.bad b { color: #B91C1C; }
-table.tbl.att td.att-cell.pending b { color: #9CA3AF; font-size: 12.5px; }
-table.tbl.att td.att-cell.zero { color: #9CA3AF; }
-
 /* ---------------- 附加区（不属于 PNG 画面） ---------------- */
 .extra { width: 1240px; max-width: 100%; margin: 28px auto 0; padding: 14px 18px;
   border: 1px solid #E5E7EB; border-radius: 6px; background: #FCFCFD; }
