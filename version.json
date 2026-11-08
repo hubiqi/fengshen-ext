@@ -1,6 +1,6 @@
 {
-  "version": "3.10.0",
-  "notes": "考核看板补回人工改派剔除：只查改派单（isReassign=1，通常两三页），完单仍取自考勤统计，不再同步运单",
-  "download": "https://github.com/hubiqi/fengshen-ext/releases/download/v3.10.0/fengshen-ext-v3.10.0.zip",
+  "version": "3.11.0",
+  "notes": "出勤达成点单元格看炸班明细：排了班但没达标的骑手，逐个给出姓名、有效在线、完单与原因",
+  "download": "https://github.com/hubiqi/fengshen-ext/releases/download/v3.11.0/fengshen-ext-v3.11.0.zip",
   "published_at": "2026-11-08"
 }

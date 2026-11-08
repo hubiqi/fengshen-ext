@@ -64,6 +64,22 @@
 
 <footer id="foot-meta" class="foot-meta"></footer>
 
+<!-- 炸班明细弹窗：点击实排 / 应排表里的单元格打开。放在 #sheet 之外，不会被「复制图片」截进去 -->
+<div class="fail-modal" id="fail-modal" hidden>
+  <div class="fail-mask" data-close></div>
+  <div class="fail-panel" role="dialog" aria-modal="true" aria-labelledby="fail-title">
+    <div class="fail-head">
+      <div class="fail-head-text">
+        <div class="fail-title" id="fail-title">炸班明细</div>
+        <div class="fail-sub" id="fail-sub"></div>
+      </div>
+      <button class="fail-x" id="fail-x" type="button" title="关闭（Esc）" aria-label="关闭">×</button>
+    </div>
+    <div class="fail-tip" id="fail-tip"></div>
+    <div class="fail-body"><table class="fail-tbl" id="fail-tbl"></table></div>
+  </div>
+</div>
+
 <script src="xlsx.js"></script>
 <script src="assess.js"></script>
 <script src="sync.js"></script>

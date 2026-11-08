@@ -210,18 +210,26 @@ const isToday = (d) => d === todayStr();
 
 // 两张表共用同一份「有效出勤」分子：实排达成 = 有效出勤/实排，应排达成 = 有效出勤/应排。
 // 分母为 0 显示「—」；未结束班次且暂无达标骑手时显示「统计中 / 未开始」。
-function attCell(c, per, mode, att) {
+// 炸班明细的 key 必须与 assess.js 的 attKey 一致（area + \u0001 + 时段）
+const failKey = (area, per) => area + "\u0001" + per;
+const failListOf = (att, area, per) => (att.fails && att.fails[failKey(area, per)]) || [];
+
+/** 排了班但没达标的骑手数：点击单元格就展开这批人（片区行才可点，总计行不展开） */
+function attCell(c, per, mode, att, area) {
   const den = mode === "real" ? c.real : c.due;
   const rate = mode === "real" ? c.realRate : c.dueRate;
-  const tip = `应排 ${fmt(c.due)} · 实排 ${fmt(c.real)} · 有效出勤 ${fmt(c.valid)}`;
-  if (!(den > 0) || rate == null) return `<td class="att-cell zero" title="${esc(tip)}">—</td>`;
+  const fails = area ? failListOf(att, area, per) : [];
+  const attr = area ? ` data-area="${esc(area)}" data-per="${esc(per)}"` : "";
+  const tip = `应排 ${fmt(c.due)} · 实排 ${fmt(c.real)} · 有效出勤 ${fmt(c.valid)}` +
+    (fails.length ? ` · 炸班 ${fails.length} 人（点击查看明细）` : "");
+  if (!(den > 0) || rate == null) return `<td class="att-cell zero"${attr} title="${esc(tip)}">—</td>`;
   if (c.valid === 0 && att.ongoing.includes(per)) {
     const label = att.noData.includes(per) ? "未开始" : "统计中";
-    return `<td class="att-cell pending" title="${esc(tip)}"><b>${label}</b>` +
+    return `<td class="att-cell pending"${attr} title="${esc(tip)}"><b>${label}</b>` +
            `<span>${fmt(c.valid)}/${fmt(den)}</span></td>`;
   }
   const cls = rate >= 100 ? "good" : (rate >= 80 ? "warn" : "bad");
-  return `<td class="att-cell ${cls}" title="${esc(tip + " · 达成 " + attPct(rate))}">` +
+  return `<td class="att-cell ${cls}"${attr} title="${esc(tip + " · 达成 " + attPct(rate))}">` +
          `<b>${attPct(rate)}</b><span>${fmt(c.valid)}/${fmt(den)}</span></td>`;
 }
 
@@ -242,10 +250,10 @@ function renderAttTable(id, att, mode) {
   const body = ["<tbody>"];
   for (const r of att.rows) {
     body.push(`<tr><td class="name" title="${esc(r.area)}">${esc(shortArea(r.area))}</td>` +
-      P.map((p) => attCell(r.cells[p], p, mode, att)).join("") + `</tr>`);
+      P.map((p) => attCell(r.cells[p], p, mode, att, r.area)).join("") + `</tr>`);
   }
   body.push(`<tr class="total"><td>总计</td>` +
-    P.map((p) => attCell(att.totals[p], p, mode, att)).join("") + `</tr></tbody>`);
+    P.map((p) => attCell(att.totals[p], p, mode, att, "")).join("") + `</tr></tbody>`);
   const t = $(id);
   t.style.width = totalW + "px";
   t.style.minWidth = totalW + "px";
@@ -327,7 +335,92 @@ function render() {
     ` · 口径与 config.py / review_report.py 一致 · ${a.mapped ? "已匹配钉钉商圈片分组" : "按接口原生商圈分组"}` +
     (state.dataNote ? ` · ${state.dataNote}` : "") +
     (state.detailStats ? ` · 历史明细 ${state.detailStats.rows} 行 / ${state.detailStats.riders} 名骑手` : "") +
+    (att && att.ok
+      ? ` · 炸班 ${fmt(att.failTotal)} 人次（点击表格任一单元格可展开该班次骑手明细，不进入导出图）` : "") +
     (state.startedAt && state.finishedAt ? ` · 本次耗时 ${((state.finishedAt - state.startedAt) / 1000).toFixed(0)}s` : "");
+}
+
+// ---------------------------------------------------------------- 炸班明细弹窗
+// 「炸班」= 排了班（排班状态=排班）但当班次没达到有效出勤标准的骑手：
+//   要么没上线 / 有效在线为 0，要么有效在线不足，要么完单不够。
+// 点击实排 / 应排表里的任一单元格，展开该片区 × 该班次的这批人，直接看有效时长与完单。
+const minsText = (n) => {
+  const v = Math.max(0, Math.round(Number(n) || 0));
+  if (v < 60) return v + " 分";
+  const h = Math.floor(v / 60), m = v % 60;
+  return m ? `${h} 小时 ${m} 分` : `${h} 小时`;
+};
+
+function openFailModal(area, per) {
+  const a = state.assess && state.assess.attendance;
+  if (!a || !a.ok) return;
+  const list = failListOf(a, area, per);
+  const row = (a.rows || []).find((r) => r.area === area);
+  const c = (row && row.cells[per]) || { due: 0, real: 0, valid: 0, realRate: null };
+  const std = per === "全天"
+    ? (a.dayStandard || { timeMin: 0, orders: 0 })
+    : ((a.standards && a.standards[per]) || { timeMin: 0, orders: 0 });
+
+  $("fail-title").textContent = `${shortArea(area)} · ${per} · 炸班 ${list.length} 人`;
+  $("fail-sub").textContent =
+    `应排 ${fmt(c.due)} · 实排 ${fmt(c.real)} · 有效出勤 ${fmt(c.valid)}` +
+    ` · 实排达成 ${c.realRate == null ? "—" : attPct(c.realRate)}` +
+    `　｜　标准：有效在线 ≥${minsText(std.timeMin)} 且 完单 ≥${std.orders} 单`;
+
+  const ongoing = (a.ongoing || []).includes(per);
+  const tips = [];
+  if (ongoing) {
+    tips.push("该班次尚未结束（实时快照），下面这些骑手可能还在补齐有效时长 / 完单，稍后会自动刷新。");
+  }
+  tips.push("明细取自考勤「排班状态 = 排班」的骑手记录，与排班统计的「排班人数」可能相差 1–2 人（两套表口径不同）。");
+  if (!list.length) tips.unshift("该班次排班的骑手全部达到有效出勤标准，没有炸班。");
+  $("fail-tip").textContent = tips.join(" ");
+
+  if (!list.length) {
+    $("fail-tbl").innerHTML = `<tbody><tr><td class="fail-empty">— 无炸班骑手 —</td></tr></tbody>`;
+  } else {
+    const head = `<thead><tr><th>骑手</th><th>站点</th><th>有效在线</th><th>完单</th><th>未达标原因</th></tr></thead>`;
+    const body = list.map((x) => {
+      const bad = x.reason === "未出勤";
+      return `<tr class="${bad ? "off" : ""}">` +
+        `<td class="who"><b>${esc(x.name || "—")}</b><span>${esc(x.rid || "")}</span></td>` +
+        `<td class="site" title="${esc(x.site)}">${esc(String(x.site || "").replace(/^福州/, ""))}</td>` +
+        `<td>${minsText(x.min)}</td>` +
+        `<td>${fmt(x.orders)}</td>` +
+        `<td class="why">${esc(x.reason)}</td></tr>`;
+    }).join("");
+    $("fail-tbl").innerHTML = head + `<tbody>${body}</tbody>`;
+  }
+  $("fail-modal").hidden = false;
+  document.body.classList.add("fail-open");
+  const x = $("fail-x");
+  if (x && x.focus) x.focus();
+}
+
+function closeFailModal() {
+  const m = $("fail-modal");
+  if (!m || m.hidden) return false;
+  m.hidden = true;
+  document.body.classList.remove("fail-open");
+  return true;
+}
+
+function bindFailModal() {
+  for (const id of ["table3", "table4"]) {
+    const t = $(id);
+    if (!t) continue;
+    t.addEventListener("click", (e) => {
+      const td = e.target.closest && e.target.closest("td.att-cell[data-area]");
+      if (!td) return;
+      openFailModal(td.dataset.area, td.dataset.per);
+    });
+  }
+  const m = $("fail-modal");
+  if (m) m.addEventListener("click", (e) => {
+    if (e.target === m || (e.target.dataset && e.target.dataset.close !== undefined)) closeFailModal();
+  });
+  const x = $("fail-x");
+  if (x) x.addEventListener("click", closeFailModal);
 }
 
 // ---------------------------------------------------------------- 主流程
@@ -572,7 +665,10 @@ setInterval(() => {
 }, REFRESH_MS);
 
 window.addEventListener("keydown", (e) => {
-  if (e.key === "Escape" && window.parent !== window) {
+  if (e.key !== "Escape") return;
+  // 弹窗打开时 Esc 只关弹窗，不要把整个看板面板也关掉
+  if (closeFailModal()) return;
+  if (window.parent !== window) {
     window.parent.postMessage({ __wbAssess: true, type: "CLOSE" }, "*");
   }
 });
@@ -592,6 +688,7 @@ window.__SET_DATA__ = (sch, att, date, mode) => {
 };
 
 (async function init() {
+  bindFailModal();
   const a = localStorage.getItem("wb_att_auto"); if (a != null) $("auto").checked = a === "1";
   const saved = localStorage.getItem("wb_att_date");
   const today = todayStr();

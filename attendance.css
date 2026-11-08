@@ -52,3 +52,49 @@ table.tbl.att td.att-cell.zero { color: #9CA3AF; }
 /* 纯净模式：出勤页没有播报区，隐藏概览以外的工具性质区块 */
 body.clean.att-page .notice, body.clean.att-page .progress-wrap,
 body.clean.att-page .foot-meta { display: none !important; }
+
+/* ---------- 炸班明细弹窗（点击实排 / 应排表里的单元格） ----------
+   放在 #sheet 之外，所以「复制图片」不会把它截进导出图；
+   单元格只加 hover 底色与手型光标，不改变静态版式（title 里提示炸班人数）。 */
+table.tbl.att td.att-cell[data-area] { cursor: pointer; }
+table.tbl.att td.att-cell[data-area]:hover { background: #EEF4FE; }
+
+.fail-modal[hidden] { display: none !important; }
+.fail-modal { position: fixed; inset: 0; z-index: 200; display: flex;
+  align-items: center; justify-content: center; }
+.fail-mask { position: absolute; inset: 0; background: rgba(17, 24, 39, .42); }
+.fail-panel { position: relative; width: 780px; max-width: calc(100vw - 40px);
+  max-height: 78vh; display: flex; flex-direction: column;
+  background: #FFFFFF; border-radius: 10px;
+  box-shadow: 0 18px 48px rgba(15, 23, 42, .25); overflow: hidden; }
+.fail-head { display: flex; align-items: flex-start; gap: 12px;
+  padding: 16px 18px 10px; border-bottom: 1px solid #EEF0F4; }
+.fail-head-text { flex: 1 1 auto; min-width: 0; }
+.fail-title { font-size: 16px; font-weight: 700; color: #1F2937; line-height: 1.4; }
+.fail-sub { margin-top: 4px; font-size: 12.5px; color: #6B7280; line-height: 1.6; }
+.fail-x { flex: 0 0 auto; width: 28px; height: 28px; padding: 0; font-size: 18px;
+  line-height: 1; color: #6B7280; background: #F3F4F6; border: 1px solid #E5E7EB;
+  border-radius: 6px; cursor: pointer; }
+.fail-x:hover { background: #E5E7EB; color: #111827; }
+.fail-tip { padding: 9px 18px; font-size: 12px; color: #6B7280;
+  background: #F9FAFB; border-bottom: 1px solid #EEF0F4; line-height: 1.6; }
+.fail-body { overflow: auto; padding: 0 18px 14px; }
+table.fail-tbl { width: 100%; border-collapse: collapse; font-size: 13px; color: #374151; }
+table.fail-tbl th { position: sticky; top: 0; background: #FFFFFF; text-align: left;
+  font-size: 12px; font-weight: 700; color: #6B7280; padding: 10px 8px 8px;
+  border-bottom: 1px solid #E5E7EB; white-space: nowrap; }
+table.fail-tbl td { padding: 7px 8px; border-bottom: 1px solid #F3F4F6; vertical-align: middle; }
+table.fail-tbl tbody tr:hover td { background: #F8FAFF; }
+table.fail-tbl td.who b { font-weight: 600; color: #1F2937; }
+table.fail-tbl td.who span { display: block; font-size: 11px; color: #9CA3AF; }
+table.fail-tbl td.site { color: #4B5563; }
+/* 数值列右对齐，长列表扫读更快 */
+table.fail-tbl th:nth-child(3), table.fail-tbl td:nth-child(3),
+table.fail-tbl th:nth-child(4), table.fail-tbl td:nth-child(4) { text-align: right; width: 88px; }
+table.fail-tbl th:nth-child(5), table.fail-tbl td:nth-child(5) { width: 112px; }
+table.fail-tbl td.who { width: 150px; }
+table.fail-tbl td.why { white-space: nowrap; color: #B45309; }
+table.fail-tbl tr.off td { background: #FFF7F7; }
+table.fail-tbl tr.off td.why { color: #B91C1C; }
+table.fail-tbl td.fail-empty { padding: 26px 8px; text-align: center; color: #9CA3AF; }
+body.fail-open { overflow: hidden; }

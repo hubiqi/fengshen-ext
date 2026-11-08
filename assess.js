@@ -149,6 +149,7 @@ const ASSESS = (() => {
     const c = s.col;
     const colOf = (names) => { for (const n of names) if (c[n] !== undefined) return c[n]; return -1; };
     const iRider = colOf(["骑手ID", "骑手id"]);
+    const iName = colOf(["骑手姓名", "姓名", "骑手名称"]);
     const iSite = colOf(["站点名称", "团队名称", "站点"]);
     const iStatus = colOf(["是否排班", "排班状态"]);
     const iPer = colOf(["时段"]);
@@ -176,8 +177,11 @@ const ASSESS = (() => {
         orders: String(r[iOrders] ?? "").trim()
       });
     }
+    // 前 8 列是既有调用方依赖的标准列，顺序不可动；「骑手姓名」追加在末尾，
+    // 只用于出勤页点开炸班明细时显示人名（pickSheet 按列名取，多一列不影响任何人）。
     const header = ["站点名称", "骑手id", "排班状态", "时段",
-      "全天有效在线时长", "全天完单量", "时段有效在线时长", "时段完单量"];
+      "全天有效在线时长", "全天完单量", "时段有效在线时长", "时段完单量",
+      "骑手姓名"];
     const rows = [header];
     let dayRowsMissing = 0;
     for (const r of s.rows) {
@@ -189,7 +193,8 @@ const ASSESS = (() => {
       rows.push([
         key(r[iSite]), rid, key(r[iStatus]), key(r[iPer]),
         d ? d.valid : "", d ? d.orders : "",
-        String(r[iValid] ?? "").trim(), String(r[iOrders] ?? "").trim()
+        String(r[iValid] ?? "").trim(), String(r[iOrders] ?? "").trim(),
+        iName >= 0 ? key(r[iName]) : ""
       ]);
     }
     // 刚过零点查 T-1 时常遇到：导出文件只有表头、0 行明细（出勤统计要次日才生成）。
@@ -351,6 +356,10 @@ const ASSESS = (() => {
     };
     let attOk = false, attMissing = [], attDegraded = false;
     const validSets = new Map(), periodActivity = new Set();
+    // 「炸班」明细：排了班、但该时段没达到有效出勤标准的骑手。
+    // 结构 key(片区\u0001时段) -> Map(骑手id -> { name, site, min, orders, ... })，
+    // 出勤页点单元格时展开，用来回答「这个班次到底谁没来 / 谁时长不够 / 谁单量不够」。
+    const failSets = new Map();
     if (ats) {
       const c = ats.col;
       const iRider = c["骑手id"];
@@ -371,6 +380,7 @@ const ASSESS = (() => {
       else {
         attOk = true;
         if (iPOrders < 0 || iDOrders < 0) attDegraded = true;
+        const iName = colOf(c, ["姓名", "骑手姓名", "骑手名称", "骑手"]);
         for (const r of ats.rows) {
           const per = key(r[iPer]);
           const rid = key(r[iRider]);
@@ -378,22 +388,39 @@ const ASSESS = (() => {
           const ordP = iPOrders >= 0 ? num(r[iPOrders]) : 0;
           if (durP > 0 || ordP > 0) periodActivity.add(per);
           if (!rid || key(r[iStatus]) !== "排班") continue;
-          let valid = false;
-          // parseDur 返回「小时」（标2 的 6h 门槛沿用），时段标准 timeMin 是「分钟」
-          if (per === "全天") {
-            const ordD = iDOrders >= 0 ? num(r[iDOrders]) : 0;
-            valid = parseDur(r[iDValid]) * 60 >= DAY_ATTEND_STANDARD.timeMin &&
-                    (iDOrders < 0 || ordD >= DAY_ATTEND_STANDARD.orders);
-          } else {
-            const p = PERIOD_BY_NAME.get(per);
-            if (p && periodSet.has(per)) {
-              valid = durP * 60 >= p.timeMin && (iPOrders < 0 || ordP >= p.orders);
-            }
+          if (!attCols.includes(per)) continue;
+          // 全天取「全天有效在线时长 / 全天完单量」，其余时段取「时段…」两列。
+          // parseDur 返回「小时」，判定标准 timeMin 是「分钟」，这里统一换成分钟。
+          const isDay = per === "全天";
+          const std = isDay ? DAY_ATTEND_STANDARD : PERIOD_BY_NAME.get(per);
+          if (!std || (!isDay && !periodSet.has(per))) continue;
+          const min = Math.round((isDay ? parseDur(r[iDValid]) : durP) * 60);
+          const ord = isDay ? (iDOrders >= 0 ? num(r[iDOrders]) : 0) : ordP;
+          const timeOk = min >= std.timeMin;
+          const ordOk = isDay ? (iDOrders < 0 || ord >= std.orders)
+                              : (iPOrders < 0 || ord >= std.orders);
+          const area = areaOf(key(r[iSite]));
+          const k = attKey(area, per);
+          if (timeOk && ordOk) {
+            if (!validSets.has(k)) validSets.set(k, new Set());
+            validSets.get(k).add(rid);       // 同一骑手同一时段可能有多行，去重
+            continue;
           }
-          if (!valid || !attCols.includes(per)) continue;
-          const k = attKey(areaOf(key(r[iSite])), per);
-          if (!validSets.has(k)) validSets.set(k, new Set());
-          validSets.get(k).add(rid);       // 同一骑手同一时段可能有多行，去重
+          // 炸班：同一骑手同片区同时段若有多行，保留「更好」的那次，避免重复计数
+          if (!failSets.has(k)) failSets.set(k, new Map());
+          const bag = failSets.get(k);
+          const old = bag.get(rid);
+          if (old && old.min >= min && old.orders >= ord) continue;
+          bag.set(rid, {
+            rid,
+            name: iName >= 0 ? key(r[iName]) : "",
+            site: key(r[iSite]),
+            min, orders: ord,
+            timeMin: std.timeMin, needOrders: std.orders,
+            reason: min <= 0 && ord <= 0 ? "未出勤"
+              : (!timeOk && !ordOk) ? "时长·完单均不足"
+              : (!timeOk ? "有效在线不足" : "完单不足")
+          });
         }
         for (const [k, s] of validSets) attValid.set(k, s.size);
       }
@@ -652,12 +679,23 @@ const ASSESS = (() => {
       return !p || minute < p.end;
     }) : [];
     const noData = attCols.filter((per) => per !== "全天" && !periodActivity.has(per));
+    // 炸班明细排序：有效在线少的在前（未出勤自然排最前），同档再按完单少的在前
+    const fails = {};
+    let failTotal = 0;
+    for (const [k, bag] of failSets) {
+      const list = [...bag.values()].sort((a, b) =>
+        a.min - b.min || a.orders - b.orders ||
+        String(a.name).localeCompare(String(b.name), "zh-CN"));
+      fails[k] = list;
+      failTotal += list.length;
+    }
     const attendance = {
       ok: attOk && attScheduleOk, scheduleOk: attScheduleOk, attendanceOk: attOk,
       degraded: attDegraded, missing: attMissing,
       periods: attCols, rows: attRows, totals: attTotals,
       standards: Object.fromEntries(PERIOD_DEFS.map((p) => [p.name, { timeMin: p.timeMin, orders: p.orders }])),
-      dayStandard: DAY_ATTEND_STANDARD, ongoing, noData
+      dayStandard: DAY_ATTEND_STANDARD, ongoing, noData,
+      fails, failTotal
     };
 
     return {
