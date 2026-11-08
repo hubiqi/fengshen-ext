@@ -1,6 +1,8 @@
-/* 运力模块（v3.15.0）：骑手账单 × 人资成员管理 × 线索结果明细，一行一条账单、17 列。
-   通用骨架（工具条 / .sheet / .doc-title / .tbl-scroll / table.tbl）沿用 dashboard.css，
-   本文件只补本页专有样式。表格宽度按内容自适应，导出图由 capture.js 跟着放宽。 */
+/* 运力模块（v3.15.0 建页，v3.16.0 增补 6 列）：
+   骑手账单 × 人资成员管理 × 线索结果明细 × 本月出勤明细 × 考核运单明细，
+   一行一条账单、页面 22 列 / CSV 23 列（账单ID 只在 CSV）。
+   通用骨架（工具条 / .sheet / .doc-title / .tbl-scroll / table.tbl）沿用 dashboard.css。
+   表格宽度按内容自适应，导出图由 capture.js 跟着放宽，不会裁掉右侧列。 */
 
 /* ---------------------------------------------------------------- 工具条控件 */
 .wf-input, .wf-select {
@@ -40,7 +42,7 @@ table.tbl.wf tbody td { height: 34px; font-size: 11.5px; padding: 3px 7px;
 table.tbl.wf tbody tr:nth-child(even) td { background: #FAFBFE; }
 table.tbl.wf tbody tr:hover td { background: #EFF6FF; }
 
-/* 账单ID 较长：小字号等宽，完整展示不省略 */
+/* 账单ID 较长：小字号等宽，仅在导出 CSV 时出现，页面不渲染这一列 */
 table.tbl.wf td.c-bill { font-size: 10px; color: #6B7280; letter-spacing: -.2px;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 /* 站点 / 薪资方案名称允许换行，避免把整张表撑得过宽 */
@@ -54,6 +56,15 @@ table.tbl.wf td.c-total { font-weight: 700; color: #1F2937; }
 table.tbl.wf td.c-prepay, table.tbl.wf td.c-bind { color: #B45309; font-weight: 700; }
 table.tbl.wf td.c-ts { font-size: 10.5px; color: #4B5563; }
 table.tbl.wf td.c-empty { color: #9CA3AF; }
+
+/* v3.16.0 新增 6 列：异常 / 违规计数只在 > 0 时标红，0 保持素色便于扫读 */
+table.tbl.wf td.c-bad { color: #6B7280; font-weight: 700; }
+table.tbl.wf td.c-flag { color: #6B7280; }
+table.tbl.wf td.c-run { color: #1D4ED8; font-weight: 600; }
+table.tbl.wf td.c-bad.hot, table.tbl.wf td.c-flag.hot {
+  color: #B91C1C; background: #FEF2F2; font-weight: 700; }
+table.tbl.wf td.c-run.c-empty { color: #9CA3AF; font-weight: 400; }
+
 /* 在职 / 三方人资标记 */
 table.tbl.wf i.mk { font-style: normal; font-weight: 700; }
 table.tbl.wf i.mk.yes { color: #15803D; }

@@ -1,6 +1,6 @@
-/* 运力模块（独立页面 v3.15.0）
+/* 运力模块（独立页面 v3.15.0，v3.16.0 增补出勤 / 考核运单明细）
  * ---------------------------------------------------------------------------
- * 三个数据源，按「骑手 id」合并成一行一条账单的 17 列明细表：
+ * 五个数据源，按「骑手 id」合并成一行一条账单的明细表：
  *   1) 骑手账单管家 → 账单查询（targetId=58484 / salary-bill-ub）
  *      POST xtop.lpd.price.mng.zsSalaryBillQueryFs.pageQuerySalaryBill/1.0
  *      → 账单ID / 站点 / 骑手 / 基础薪资方案 / 排班内外单量 / 一口价单量明细
@@ -12,19 +12,45 @@
  *   3) 招募缺口管理 → 线索结果明细（targetId=61364 / tab=station）
  *      POST xtop.knight.task.mng.growth.knightRecruitResultRead.queryAgencyKnightRecruitResult/1.0
  *      → 是否三方人资（命中带 headHunterCompanyName 的线索）
+ *   4) 出勤统计 → 导出明细数据（骑手 × 日期 × 时段），单次最多 7 天、按 7 天分段拉整月
+ *      POST xtop.fs.special.examine.exportStatisticsDetail/1.0 → OSS xlsx
+ *      → 「本月班次异常数（除全天）」= 是否达成 = 未达成 且 时段 ≠ 全天 的行数
+ *      → 「首跑时间」= 本月入职骑手，入职日期起第一次「全天」行完单量 > 0 的日期
+ *   5) KPI管理 → 考核数据明细 · UB考核运单明细（targetId=56740 / kpi/detail）
+ *      POST xtop.performance.fs.opp.perfDetail.queryDetailList/1.0，tabCode=TRACK_UB
+ *      4 个 Radio 筛选各查一次（物流责未完成单 / 不满意单_投诉单 / 不满意单_差评单 /
+ *      不满意单_索赔单），按运单ID去重后读 4 个「是否XX单」列，按骑手 id 计数
+ *      → 物流责 / 投诉 / 差评 / 提前点
  *
  * 与另两个页面一样：直连优先、失败自动切「静默桥接」；跟随当前登录态，不依赖本地服务。
- * 三个源并行取数、任一失败不影响其余两源，缺失字段显示「—」。
+ * 前三源并行取数先出主表，后两源异步补齐（失败只让对应列显示「—」，不阻断出表）。
+ * v3.16.0：账单ID 默认不在页面/导出图里显示，只在「导出 CSV」时带上。
  */
 
 const XT = "https://httpizza.ele.me/xtop/";
 const API_BILL = XT + "xtop.lpd.price.mng.zsSalaryBillQueryFs.pageQuerySalaryBill/1.0";
 const API_CLUE = XT + "xtop.knight.task.mng.growth.knightRecruitResultRead.queryAgencyKnightRecruitResult/1.0";
 const API_STAFF = "https://app2-edu.ele.me/kunkka-svr/ehr/staff/knight/list";
+const API_ATT_DETAIL = XT + "xtop.fs.special.examine.exportStatisticsDetail/1.0";
+const API_KPI_DETAIL = XT + "xtop.performance.fs.opp.perfDetail.queryDetailList/1.0";
 const PAGE_SIZE = 500;
+const KPI_PAGE_SIZE = 100;       // 实测 pageSize > 100 接口返回空数据
+const KPI_MAX_PAGES = 10;       // 每类问题订单最多 10 页 = 1000 单，防止异常情况下退化成全量翻页
+const ATT_SEG_DAYS = 7;          // 出勤明细接口硬限制：单次最多导出 7 天
 const MONTHS_BACK = 11;          // 当前月 + 往前 11 个月 = 最近 12 个月
 const MAX_PAGES = 20;
-const SRC_LABEL = { bill: "薪资账单", staff: "人资名单", clue: "线索结果明细" };
+const SRC_LABEL = { bill: "薪资账单", staff: "人资名单", clue: "线索结果明细",
+  att: "本月出勤明细", kpi: "考核运单明细" };
+
+// 考核运单明细的 4 个筛选：分别把命中的少量订单拉回来，按运单ID去重后读列值聚合。
+// 三个 is_early_delivery_* 是「提前点送达不满意单」的下属分类，合并后正好覆盖提前点列。
+const KPI_FILTERS = [
+  { is_lgt_duty_incompleted_order: "1" },
+  { is_early_delivery_complain_order: "1" },
+  { is_early_delivery_negative_rating_order: "1" },
+  { is_early_delivery_claim_order: "1" }
+];
+const KPI_COLS = ["是否物流责取消单", "是否投诉单", "是否差评单", "是否提前点送达不满意单"];
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g,
@@ -45,26 +71,35 @@ const shiftMonth = (m, delta) => {
 };
 const validMonth = (s) => /^\d{4}-\d{2}$/.test(String(s || ""));
 
-// 17 列：表头 / 字段 / 单元格 class。CSV 用 *Text 后缀的纯文本值，不带 ¥ 和 HTML。
+// 23 列：h 表头 / k 页面字段 / cls 单元格 class / csv 导出字段 / page:false = 只在 CSV 里出现。
+// v3.16.0：账单ID 默认不显示（页面与「复制图片」都不含），只有「导出 CSV」才带。
+// 页面金额 / 单量用 *Text（带 ¥ 与千分位），CSV 用原始数值，Excel 才能直接求和。
 const COLS = [
-  ["账单ID", "billId", "c-bill"],
-  ["站点id", "teamId", "c-id"],
-  ["站点", "team", "c-site"],
-  ["骑手id", "riderId", "c-id"],
-  ["骑手姓名", "riderName", "c-name"],
-  ["基础薪资方案名称", "scheme", "c-scheme"],
-  ["排班内单量", "inOrdersText", "num"],
-  ["排班外单量", "outOrdersText", "num"],
-  ["取分离单量", "takeSepText", "num"],
-  ["送分离", "giveSepText", "num"],
-  ["账单总金额", "totalText", "num c-total"],
-  ["预支", "prepayText", "num c-prepay"],
-  ["绑定扣款（住宿费用+车辆租金）", "bindText", "num c-bind"],
-  ["是否在职", "onJobHtml", ""],
-  ["入职时间", "entry", "c-ts"],
-  ["离职时间", "leave", "c-ts"],
-  ["是否三方人资", "thirdHtml", ""]
+  { h: "账单ID", k: "billId", cls: "c-bill", csv: "billId", page: false },
+  { h: "站点id", k: "teamId", cls: "c-id", csv: "teamId" },
+  { h: "站点", k: "team", cls: "c-site", csv: "team" },
+  { h: "骑手id", k: "riderId", cls: "c-id", csv: "riderId" },
+  { h: "骑手姓名", k: "riderName", cls: "c-name", csv: "riderName" },
+  { h: "基础薪资方案名称", k: "scheme", cls: "c-scheme", csv: "scheme" },
+  { h: "排班内单量", k: "inOrdersText", cls: "num", csv: "inOrders" },
+  { h: "排班外单量", k: "outOrdersText", cls: "num", csv: "outOrders" },
+  { h: "取分离单量", k: "takeSepText", cls: "num", csv: "takeSep" },
+  { h: "送分离", k: "giveSepText", cls: "num", csv: "giveSep" },
+  { h: "账单总金额", k: "totalText", cls: "num c-total", csv: "total" },
+  { h: "预支", k: "prepayText", cls: "num c-prepay", csv: "prepay" },
+  { h: "绑定扣款", k: "bindText", cls: "num c-bind", csv: "bind" },
+  { h: "是否在职", k: "onJobHtml", cls: "", csv: "onJob" },
+  { h: "入职时间", k: "entry", cls: "c-ts", csv: "entry" },
+  { h: "离职时间", k: "leave", cls: "c-ts", csv: "leave" },
+  { h: "是否三方人资", k: "thirdHtml", cls: "", csv: "thirdYesRaw" },
+  { h: "本月班次异常数（除全天）", k: "badText", cls: "num c-bad", csv: "bad" },
+  { h: "首跑时间", k: "firstRunText", cls: "c-ts c-run", csv: "firstRun" },
+  { h: "物流责", k: "lgtText", cls: "num c-flag", csv: "lgt" },
+  { h: "投诉", k: "complainText", cls: "num c-flag", csv: "complain" },
+  { h: "差评", k: "negativeText", cls: "num c-flag", csv: "negative" },
+  { h: "提前点", k: "earlyText", cls: "num c-flag", csv: "early" }
 ];
+const PAGE_COLS = COLS.filter((c) => c.page !== false);
 
 const state = {
   via: localStorage.getItem("wb_via") || "direct",
@@ -72,7 +107,13 @@ const state = {
   query: "", site: "", third: "",
   loading: false, gen: 0,
   bills: [], staff: new Map(), clues: new Map(),
-  errors: {}, rows: [], loadedAt: null
+  errors: {}, rows: [], loadedAt: null,
+  // 主表先出图，这两组明细异步补：失败只让对应列显示「—」，不阻断出表
+  attBad: new Map(),        // 骑手id -> 本月除「全天」外「未达成」班次数
+  attRun: new Map(),        // 骑手id -> Set(全天行完单量 > 0 的日期)
+  kpi: new Map(),           // 骑手id -> { lgt, complain, negative, early }
+  attReady: false, kpiReady: false,
+  pendingAtt: false, pendingKpi: false, detailLoading: false
 };
 
 // ---------------------------------------------------------------- 请求通道
@@ -127,6 +168,38 @@ async function request(url, method, payload) {
   return await bridge(url, method, payload);
 }
 
+// ---------------------------------------------------------------- 月份 / 二进制
+function monthBounds(month) {
+  const [y, m] = String(month).split("-").map(Number);
+  const lastDay = new Date(y, m, 0).getDate();
+  const maxDay = month === curMonth() ? Math.min(lastDay, new Date().getDate()) : lastDay;
+  return {
+    y, m, maxDay,
+    start: new Date(y, m - 1, 1, 0, 0, 0).getTime(),
+    end: new Date(y, m - 1, maxDay, 23, 59, 59).getTime()
+  };
+}
+const padDay = (d) => String(d).padStart(2, "0");
+function monthSegments(month) {
+  const b = monthBounds(month);
+  const out = [];
+  for (let d = 1; d <= b.maxDay; d += ATT_SEG_DAYS) {
+    out.push([`${month}-${padDay(d)}`, `${month}-${padDay(Math.min(d + ATT_SEG_DAYS - 1, b.maxDay))}`]);
+  }
+  return out;
+}
+async function fetchBinary(url) {
+  try {
+    const r = await fetch(url, { credentials: "omit" });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    return await r.arrayBuffer();
+  } catch (e) {
+    const resp = await extMsg({ type: "FETCH_BINARY", url });
+    if (!resp || !resp.ok) throw new Error("xlsx 下载失败：" + ((resp && resp.error) || e.message));
+    return resp.buffer;
+  }
+}
+
 // ---------------------------------------------------------------- 分页取数
 async function loadBills(month) {
   const out = [];
@@ -165,6 +238,113 @@ async function loadClues() {
     out.push(...list);
     const count = num(d.count);
     if (!list.length || list.length < PAGE_SIZE || (count && out.length >= count)) break;
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------- 本月出勤明细
+// 接口单次最多 7 天，按 7 天分段导出 xlsx（OSS 文件，不是全量 JSON 列表）。
+async function loadAttendance(month, teamIds) {
+  // 串行逐段请求：导出接口对并发敏感，5 段一起发容易触发「请求过于频繁」限流
+  const segs = monthSegments(month);
+  const bufs = [];
+  for (const [s, e] of segs) {
+    const j = await request(API_ATT_DETAIL, "POST", {
+      params: { request: { teamIds, startDate: s, endDate: e } }
+    });
+    const d = (j && j.result && j.result.data) || {};
+    const url = d.url || d.downloadUrl;
+    if (!url || !/^https?:/.test(String(url))) throw new Error(`出勤明细 ${s}~${e} 未返回下载链接`);
+    bufs.push(await fetchBinary(String(url)));
+    if (segs.length > 1) await new Promise((r) => setTimeout(r, 180));
+  }
+  const sheets = [];
+  for (const buf of bufs) sheets.push(...(await XLSX_READER.read(buf)));
+  return attStatsFromSheets(sheets);
+}
+function attStatsFromSheets(sheets) {
+  const bad = new Map(), run = new Map();
+  for (const sh of sheets || []) {
+    const rows = sh && sh.rows;
+    if (!rows || !rows.length) continue;
+    const col = Object.create(null);
+    rows[0].forEach((h, i) => {
+      const k = String(h == null ? "" : h).trim();
+      if (k && col[k] === undefined) col[k] = i;
+    });
+    const iR = col["骑手ID"] != null ? col["骑手ID"] : col["骑手id"];
+    const iD = col["考勤日期"] != null ? col["考勤日期"] : col["日期"];
+    const iP = col["时段"], iOk = col["是否达成"];
+    const iO = col["完单量"] != null ? col["完单量"] : col["时段完单量"];
+    if ([iR, iD, iP, iOk, iO].some((i) => i === undefined)) continue;
+    for (const r of rows.slice(1)) {
+      const rid = String(r[iR] == null ? "" : r[iR]).trim();
+      if (!rid) continue;
+      const per = String(r[iP] == null ? "" : r[iP]).trim();
+      const day = String(r[iD] == null ? "" : r[iD]).slice(0, 10);
+      // 口径按用户确认：直接采信系统「是否达成」标记，排除「全天」
+      if (per && per !== "全天" && String(r[iOk] == null ? "" : r[iOk]).trim() === "未达成")
+        bad.set(rid, (bad.get(rid) || 0) + 1);
+      // 首跑：全天行完单量 > 0 的日期集合，后面按入职日期过滤取最早一天
+      if (per === "全天" && num(r[iO]) > 0 && /^\d{4}-\d{2}-\d{2}$/.test(day)) {
+        if (!run.has(rid)) run.set(rid, new Set());
+        run.get(rid).add(day);
+      }
+    }
+  }
+  return { bad, run };
+}
+
+// ---------------------------------------------------------------- 考核运单明细
+// 只按 4 个 Radio 筛选拉「有问题」的订单，绝不发起不带筛选的全量运单查询
+// （本月约 6 万单、整月可达 20 万单）。multiHeaders + data 逐行读 4 个「是否XX单」列，
+// 按运单ID 去重后按骑手汇总；每类筛选最多翻 KPI_MAX_PAGES 页。
+// 「提前点送达不满意单」没有独立筛选项，实测 3 个 is_early_delivery_* 子筛选的并集
+// 完整覆盖该列（10 月并集 17 单全部命中，日指标汇总 16 单）。
+async function loadKpiFlags(month) {
+  const b = monthBounds(month);
+  const seen = new Map();
+  for (const filter of KPI_FILTERS) {
+    for (let p = 1; p <= KPI_MAX_PAGES; p++) {
+      const j = await request(API_KPI_DETAIL, "POST", {
+        params: { request: {
+          queryParam: Object.assign({ ds: [b.start, b.end] }, filter),
+          planType: "UPLUS_AGENCY", tabCode: "TRACK_UB",
+          pageIndex: p, pageSize: KPI_PAGE_SIZE
+        } }
+      });
+      const d = (j && j.result && j.result.data) || {};
+      const heads = (d.multiHeaders || [])[0] || [];
+      const rows = Array.isArray(d.data) ? d.data : [];
+      const ix = (n) => heads.indexOf(n);
+      const iT = ix("运单ID"), iR = ix("骑手ID");
+      const iF = KPI_COLS.map(ix);
+      if (iR < 0 || iF.some((i) => i < 0)) break;
+      for (const row of rows) {
+        const cells = Array.isArray(row) ? row : [];
+        const val = (i) => (i >= 0 && cells[i] && cells[i].content != null)
+          ? String(cells[i].content).trim() : "";
+        const tid = val(iT);
+        if (tid && seen.has(tid)) continue;
+        seen.set(tid || ("__" + seen.size), {
+          rid: val(iR),
+          lgt: val(iF[0]) === "是" ? 1 : 0,
+          complain: val(iF[1]) === "是" ? 1 : 0,
+          negative: val(iF[2]) === "是" ? 1 : 0,
+          early: val(iF[3]) === "是" ? 1 : 0
+        });
+      }
+      const total = num(d.total);
+      if (rows.length < KPI_PAGE_SIZE || (total && p * KPI_PAGE_SIZE >= total)) break;
+    }
+  }
+  const out = new Map();
+  for (const v of seen.values()) {
+    if (!v.rid) continue;
+    const cur = out.get(v.rid) || { lgt: 0, complain: 0, negative: 0, early: 0 };
+    cur.lgt += v.lgt; cur.complain += v.complain;
+    cur.negative += v.negative; cur.early += v.early;
+    out.set(v.rid, cur);
   }
   return out;
 }
@@ -231,9 +411,35 @@ function buildRows(bills, staff, clues) {
       thirdHtml: hh
         ? `<i class="mk third" title="${esc(hh)}">是</i>`
         : '<i class="mk na">否</i>',
-      bindTip, staffFound: !!st
+      bindTip, staffFound: !!st,
+      thirdYesRaw: hh ? "是" : "否",
+      bad: 0, firstRun: "", lgt: 0, complain: 0, negative: 0, early: 0
     };
   });
+}
+
+// ---------------------------------------------------------------- 异步补列
+// 没取到数据时显示「—」而不是 0，避免被误读成「确实没有异常」。
+function attachDetail(rows) {
+  for (const r of rows) {
+    const rid = r.riderId;
+    r.bad = state.attBad.get(rid) || 0;
+    r.badText = state.pendingAtt ? "…" : (state.attReady ? int(r.bad) : "—");
+    // 首跑时间只给本月入职骑手：入职日期起第一个「全天」完单 > 0 的日期
+    const isNew = /^\d{4}-\d{2}-\d{2}/.test(r.entry) && r.entry.slice(0, 7) === state.month;
+    const days = state.attRun.get(rid);
+    const first = isNew && days
+      ? ([...days].filter((d) => d >= r.entry.slice(0, 10)).sort()[0] || "") : "";
+    r.firstRun = first;
+    r.firstRunText = state.pendingAtt ? "…" : (isNew ? (first || "—") : "—");
+    const f = state.kpi.get(rid) || {};
+    r.lgt = f.lgt || 0; r.complain = f.complain || 0;
+    r.negative = f.negative || 0; r.early = f.early || 0;
+    const kt = (n) => state.pendingKpi ? "…" : (state.kpiReady ? int(n) : "—");
+    r.lgtText = kt(r.lgt); r.complainText = kt(r.complain);
+    r.negativeText = kt(r.negative); r.earlyText = kt(r.early);
+  }
+  return rows;
 }
 
 // ---------------------------------------------------------------- 筛选 / 排序
@@ -281,20 +487,25 @@ function renderSummary(rows) {
 
 function renderTable(rows) {
   const t = $("wf-table");
-  const head = "<thead><tr>" + COLS.map(([h]) => `<th>${esc(h)}</th>`).join("") + "</tr></thead>";
+  const head = "<thead><tr>" + PAGE_COLS.map((c) => `<th>${esc(c.h)}</th>`).join("") + "</tr></thead>";
   const body = ["<tbody>"];
   if (!rows.length) {
-    body.push(`<tr class="wf-empty"><td colspan="${COLS.length}">没有符合条件的账单${state.rows.length ? "（试试清空搜索或筛选）" : "（可切换月份或点「立即刷新」）"}</td></tr>`);
+    body.push(`<tr class="wf-empty"><td colspan="${PAGE_COLS.length}">没有符合条件的账单${state.rows.length ? "（试试清空搜索或筛选）" : "（可切换月份或点「立即刷新」）"}</td></tr>`);
   }
   for (const r of rows) {
-    body.push("<tr>" + COLS.map(([, key, cls], i) => {
+    body.push("<tr>" + PAGE_COLS.map((c) => {
+      const key = c.k;
       const raw = r[key] == null ? "" : r[key];
       const isHtml = key === "onJobHtml" || key === "thirdHtml";
       const txt = isHtml ? raw : esc(raw);
       const title = key === "bindText" ? ` title="${esc(r.bindTip)}"`
-        : key === "thirdHtml" && r.thirdName ? ` title="${esc(r.thirdName)}"` : "";
+        : key === "thirdHtml" && r.thirdName ? ` title="${esc(r.thirdName)}"`
+        : key === "badText" ? ' title="出勤明细中除全天外「是否达成 = 未达成」的班次数"'
+        : key === "firstRunText" && r.firstRun ? ` title="入职 ${esc(r.entry)} 起首个全天有单日"` : "";
       const na = !isHtml && (raw === "—" || raw === "") ? " c-empty" : "";
-      return `<td class="${cls}${na}"${title}>${txt}</td>`;
+      const hot = !isHtml && /^(badText|lgtText|complainText|negativeText|earlyText)$/.test(key)
+        && Number(raw) > 0 ? " hot" : "";
+      return `<td class="${c.cls || ""}${na}${hot}"${title}>${txt}</td>`;
     }).join("") + "</tr>");
   }
   body.push("</tbody>");
@@ -320,15 +531,21 @@ function renderMeta() {
     `数据源：账单查询 ${state.month}（${state.bills.length} 条）`,
     `成员管理·全部（${state.staff.size} 人）`,
     `线索结果明细（${state.clues.size} 人带三方人资公司）`,
+    `本月出勤明细（${monthSegments(state.month).length} 段 × 最多 7 天）`,
+    "考核运单明细（4 类异常订单筛选，不拉全量运单）",
     state.loadedAt ? `取数完成 ${state.loadedAt}` : ""
   ].filter(Boolean);
   $("foot-meta").textContent = parts.join("　·　") + "　·　跟随当前浏览器登录态，换账号自动换商";
   $("doc-foot-small").textContent =
-    "「是否三方人资」按线索结果明细是否命中带猎头（人资）公司的记录判定；人资名单取全部状态（含离职）；绑定扣款 = 住宿费用 + 车辆租金；金额单位人民币元。";
+    "账单ID 仅在「导出 CSV」时带出；「是否三方人资」按线索结果明细是否命中带猎头（人资）公司的记录判定；" +
+    "人资名单取全部状态（含离职）；绑定扣款 = 住宿费用 + 车辆租金；" +
+    "本月班次异常数 = 出勤明细里除「全天」外「是否达成 = 未达成」的班次数；" +
+    "首跑时间只给本月入职骑手，取入职日起首个「全天」完单 > 0 的日期；" +
+    "物流责 / 投诉 / 差评 / 提前点 = 考核运单明细里 4 类异常订单按骑手计数；金额单位人民币元。";
 }
 
 function applyData() {
-  state.rows = buildRows(state.bills, state.staff, state.clues);
+  state.rows = attachDetail(buildRows(state.bills, state.staff, state.clues));
   renderSiteOptions();
   const rows = visibleRows();
   renderSummary(rows);
@@ -391,16 +608,49 @@ async function loadAll() {
   if (c.ok) state.clues = clueMap(c.v);
   state.loadedAt = new Date().toTimeString().slice(0, 5);
   applyData();
+  const teamIds = [...new Set(state.bills.map((b) => num(b.teamId)).filter((n) => n > 0))];
   const fails = Object.entries(state.errors).filter(([, v]) => v);
   setProgress(100, "");
   if (fails.length) {
-    showNotice("部分数据源未取到：" + fails.map(([k, v]) => `${label[k]}（${v}）`).join("；") +
+    showNotice("部分数据源未取到：" + fails.map(([k, v]) => `${label[k] || k}（${v}）`).join("；") +
       "。已用其余数据出表，可点「立即刷新」重试。");
   } else if (!state.bills.length) {
     showNotice(`${state.month} 没有查到账单，可切换月份再试。`, "blue");
   }
   state.loading = false;
   $("btn-refresh").disabled = false;
+  loadDetailData(gen, teamIds);      // 后台补 6 列，不阻塞主表
+}
+
+// 主表先出图，再异步补「本月出勤明细 + 考核运单明细」两组数据。
+// 任一组失败只让对应列显示「—」；切月用 gen 丢弃过期结果。
+async function loadDetailData(gen, teamIds) {
+  if (state.detailLoading) return;
+  state.detailLoading = true;
+  state.pendingAtt = true; state.pendingKpi = true;
+  state.attReady = false; state.kpiReady = false;
+  state.errors.att = ""; state.errors.kpi = "";
+  applyData();                       // 先把「…」摆出来，别让格子像忘了做
+  const [a, k] = await Promise.allSettled([
+    loadAttendance(state.month, teamIds),
+    loadKpiFlags(state.month)
+  ]);
+  if (gen !== state.gen) { state.detailLoading = false; return; }
+  if (a.status === "fulfilled") {
+    state.attBad = a.value.bad; state.attRun = a.value.run; state.attReady = true;
+  } else {
+    state.attBad = new Map(); state.attRun = new Map();
+    state.errors.att = String((a.reason && a.reason.message) || a.reason);
+  }
+  if (k.status === "fulfilled") {
+    state.kpi = k.value; state.kpiReady = true;
+  } else {
+    state.kpi = new Map();
+    state.errors.kpi = String((k.reason && k.reason.message) || k.reason);
+  }
+  state.pendingAtt = false; state.pendingKpi = false;
+  state.detailLoading = false;
+  applyData();
 }
 
 function setMonth(m) {
@@ -422,12 +672,9 @@ function csvCell(v) {
 }
 function exportCsv() {
   const rows = visibleRows();
-  // CSV 里金额 / 单量用原始数值，不带 ¥ 和千分位，Excel 才能直接求和
-  const keys = ["billId", "teamId", "team", "riderId", "riderName", "scheme",
-    "inOrders", "outOrders", "takeSep", "giveSep",
-    "total", "prepay", "bind", "onJob", "entry", "leave"];
-  const head = COLS.map(([h]) => h);
-  const line = (r) => keys.map((k) => csvCell(r[k])).concat(csvCell(r.thirdYes ? "是" : "否")).join(",");
+  // 账单ID 只在 CSV 里出现；金额 / 单量用原始数值，不带 ¥ 和千分位
+  const head = COLS.map((c) => c.h);
+  const line = (r) => COLS.map((c) => csvCell(r[c.csv])).join(",");
   const text = [head.map(csvCell).join(","), ...rows.map(line)].join("\r\n");
   const blob = new Blob(["\ufeff" + text], { type: "text/csv;charset=utf-8" });
   const url = URL.createObjectURL(blob);
@@ -492,12 +739,28 @@ window.__SET_WORKFORCE__ = (obj) => {
   if (Array.isArray(obj.clues)) state.clues = clueMap(obj.clues);
   else if (obj.clues instanceof Map) state.clues = obj.clues;
   if (obj.month && validMonth(obj.month)) { state.month = obj.month; $("month-picker").value = obj.month; }
+  // 真机测试注入出勤 / 考核运单明细，不发网络请求
+  if (obj.att) {
+    state.attBad = new Map(Object.entries(obj.att.bad || {}));
+    state.attRun = new Map(Object.entries(obj.att.run || {}).map(([k, v]) => [k, new Set(v || [])]));
+    state.attReady = true;
+  }
+  if (obj.kpi) {
+    state.kpi = new Map(Object.entries(obj.kpi).map(([k, v]) =>
+      [k, Object.assign({ lgt: 0, complain: 0, negative: 0, early: 0 }, v)]));
+    state.kpiReady = true;
+  }
+  if (obj.attReady === false) { state.attReady = false; state.attBad = new Map(); state.attRun = new Map(); }
+  if (obj.kpiReady === false) { state.kpiReady = false; state.kpi = new Map(); }
+  state.pendingAtt = false; state.pendingKpi = false;
   state.loadedAt = new Date().toTimeString().slice(0, 5);
   applyData();
   setProgress(100, "");
   return state.rows.length;
 };
-window.__WF__ = { state, COLS, buildRows, visibleRows, splitSep, staffMap, clueMap, money };
+window.__WF__ = { state, COLS, PAGE_COLS, buildRows, attachDetail, visibleRows, splitSep,
+  staffMap, clueMap, money, attStatsFromSheets, monthSegments, monthBounds, exportCsv,
+  applyData, loadKpiFlags, loadAttendance, KPI_FILTERS };
 
 // ---------------------------------------------------------------- 初始化
 (async function init() {
