@@ -1,6 +1,6 @@
 {
-  "version": "3.12.0",
-  "notes": "出勤达成把「实排达成 / 应排达成」收成一组页签，默认看实排，点一下换分母（有效出勤 ÷ 应排），不用再竖着滚两张几乎一样的表",
-  "download": "https://github.com/hubiqi/fengshen-ext/releases/download/v3.12.0/fengshen-ext-v3.12.0.zip",
+  "version": "3.13.0",
+  "notes": "出勤达成下方新增「炸班明细」清单：按班次分行列出所有排了班但没达标的人（姓名/站点/有效在线/完单/原因，带绿✓红✗）；今天只显示已结束的班次",
+  "download": "https://github.com/hubiqi/fengshen-ext/releases/download/v3.13.0/fengshen-ext-v3.13.0.zip",
   "published_at": "2026-11-08"
 }

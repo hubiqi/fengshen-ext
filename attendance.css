@@ -69,6 +69,44 @@ table.tbl.att td.att-cell.zero { color: #9CA3AF; }
 body.clean.att-page .notice, body.clean.att-page .progress-wrap,
 body.clean.att-page .foot-meta { display: none !important; }
 
+/* ---------- 炸班明细清单（v3.13.0） ----------
+   达成表只给百分比，看不出到底是谁；这里把「排了班但没达标」的人按班次全部列平：
+   姓名 / 站点 / 班次 / 有效在线 / 完单 / 原因，两项指标各自带绿 ✓ 或红 ✗。
+   与弹窗分工：清单用于整篇贴图，弹窗用于只看某一个格子。
+   放在 #sheet 内 → 跟着「复制图片」一起导出。 */
+.fail-roster[hidden] { display: none !important; }
+.fr-title { width: 1218px; max-width: 100%; margin: 34px auto 6px; text-align: center;
+  font-size: 20px; font-weight: 700; color: #1F2937; line-height: 1.4; }
+.fr-note { width: 1218px; max-width: 100%; margin: 0 auto 10px; text-align: center;
+  font-size: 12.5px; color: #6B7280; line-height: 1.6; padding: 0 16px; }
+table.tbl.fr { width: 1218px; min-width: 1218px; border: 1px solid #E5E7EB; }
+table.tbl.fr th, table.tbl.fr td { border: 1px solid #E5E7EB; padding: 5px 8px; }
+table.tbl.fr thead th { height: 34px; background: #F2F5FA; color: #374151;
+  font-size: 12.5px; font-weight: 700; white-space: nowrap; }
+table.tbl.fr thead th.num { text-align: right; }
+table.tbl.fr tbody td { height: 32px; font-size: 12.5px; color: #374151; }
+table.tbl.fr td.who b { font-weight: 600; color: #1F2937; }
+table.tbl.fr td.who span { margin-left: 6px; font-size: 11px; color: #9CA3AF; }
+table.tbl.fr td.site { color: #4B5563; }
+table.tbl.fr td.per { color: #374151; white-space: nowrap; }
+table.tbl.fr td.num { text-align: right; white-space: nowrap; }
+table.tbl.fr i.mk { font-style: normal; font-weight: 700; font-size: 13px; margin-left: 5px; }
+table.tbl.fr i.mk.ok { color: #15803D; }
+table.tbl.fr i.mk.no { color: #B91C1C; }
+table.tbl.fr td.why { color: #B45309; white-space: nowrap; }
+/* 以班次分行：每个班次一条横幅（班次名 + 人数 + 判定标准 + 片区分布），下面挂这个班次的人。
+   横幅底色比表头浅一档、上加粗线，长名单里一眼能分出段；相邻班次交替极浅底色。 */
+table.tbl.fr tr.fr-band td { background: #EDF2FA; border-top: 2px solid #D3DCEA;
+  padding: 7px 10px; line-height: 1.5; }
+table.tbl.fr tr.fr-band b { font-size: 13.5px; color: #1F2937; }
+table.tbl.fr tr.fr-band .fr-cnt { margin-left: 10px; font-size: 12.5px; font-weight: 700; color: #B45309; }
+table.tbl.fr tr.fr-band .fr-std { margin-left: 14px; font-size: 11.5px; color: #6B7280; }
+table.tbl.fr tr.fr-band .fr-dist { margin-left: 14px; font-size: 11.5px; color: #9CA3AF; }
+table.tbl.fr tr.alt td { background: #FAFBFD; }
+table.tbl.fr tr.off td { background: #FFF7F7; }
+table.tbl.fr tr.off td.why { color: #B91C1C; }
+table.tbl.fr td.fr-empty { padding: 22px 8px; text-align: center; color: #9CA3AF; }
+
 /* ---------- 炸班明细弹窗（点击实排 / 应排表里的单元格） ----------
    放在 #sheet 之外，所以「复制图片」不会把它截进导出图；
    单元格只加 hover 底色与手型光标，不改变静态版式（title 里提示炸班人数）。 */

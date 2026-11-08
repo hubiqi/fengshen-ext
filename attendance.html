@@ -62,6 +62,13 @@
     </div>
     <div class="tbl-scroll" id="wrap-real"><table class="tbl att" id="table3"></table></div>
     <div class="tbl-scroll" id="wrap-due" hidden><table class="tbl att" id="table4"></table></div>
+
+    <!-- 炸班明细：把两张表里所有「排了班但没达标」的人一次性列平，不用一个个格子点开 -->
+    <div class="fail-roster" id="fail-roster" hidden>
+      <div class="fr-title" id="fr-title">炸班明细</div>
+      <div class="fr-note" id="fr-note"></div>
+      <table class="tbl fr" id="table5"></table>
+    </div>
   </div>
 
   <div class="doc-foot">实排达成 = 有效出勤 ÷ 实排；应排达成 = 有效出勤 ÷ 应排（多排班可 &gt;100%，不封顶）　·　上方页签切换两张表</div>

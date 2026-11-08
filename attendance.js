@@ -279,8 +279,18 @@ function attCell(c, per, mode, att, area) {
          `<b>${attPct(rate)}</b><span>${fmt(c.valid)}/${fmt(den)}</span></td>`;
 }
 
-function renderAttTable(id, att, mode) {
-  const P = att.periods;
+// T0（今天）只展示**已经结束的班次**：还没跑完的班次，人还在陆续上线、单还在攒，
+// 这个时点把它算成「炸班」既不公平也没意义（11-06 快照里夜宵2 有 84 人才刚上线 10 分钟）。
+// 历史日期是定稿数据，所有班次都算已结束，原样展示。
+// 「全天」不是班次，任何时点都保留（顶部概览也用它）。
+function periodsFor(att) {
+  if (!isToday(state.date)) return att.periods.slice();
+  const ongoing = att.ongoing || [];
+  return att.periods.filter((p) => p === "全天" || !ongoing.includes(p));
+}
+
+function renderAttTable(id, att, mode, periods) {
+  const P = periods && periods.length ? periods : att.periods;
   // 与考核看板表 2 一样锁 1218px 总宽：班次从 7 变 9/11 时只压缩列宽，字号保持常规
   const firstW = 210, totalW = 1218;
   const subW = ((totalW - firstW) / Math.max(1, P.length)).toFixed(2);
@@ -306,6 +316,101 @@ function renderAttTable(id, att, mode) {
   t.innerHTML = cols + head + body.join("");
 }
 
+// ---------------------------------------------------------------- 炸班明细清单（v3.13.0）
+// 两张达成表只给百分比，看不出具体是谁；把 att.fails（片区 × 班次）摊平后**按班次分行**：
+// 每个班次一条横幅（班次名 + 人数 + 判定标准 + 片区分布），下面挂该班次的人，
+// 两项指标各自带 ✓ / ✗。与弹窗同一份数据，只是视角不同：弹窗看一格，清单看全量。
+function failRowsOf(att, periods) {
+  const areaIdx = new Map((att.rows || []).map((r, i) => [r.area, i]));
+  const allow = new Set(periods && periods.length ? periods : att.periods);
+  const out = [];
+  for (const [k, list] of Object.entries(att.fails || {})) {
+    const cut = k.indexOf("\u0001");
+    const area = k.slice(0, cut), per = k.slice(cut + 1);
+    if (!allow.has(per)) continue;          // T0 未结束的班次不进清单
+    for (const x of list) {
+      out.push({ ...x, area, per,
+        ai: areaIdx.has(area) ? areaIdx.get(area) : 99 });
+    }
+  }
+  out.sort((a, b) => (a.ai - b.ai) || (a.min - b.min) ||
+    (a.orders - b.orders) || String(a.name || a.rid).localeCompare(String(b.name || b.rid), "zh"));
+  return out;
+}
+
+function renderFailRoster(att, periods) {
+  const box = $("fail-roster"), tbl = $("table5");
+  const P = periods && periods.length ? periods : att.periods;
+  const rows = failRowsOf(att, P);
+  if (!rows.length) { box.hidden = true; tbl.innerHTML = ""; return 0; }
+  box.hidden = false;
+
+  const riders = new Set(rows.map((x) => x.rid)).size;
+  const live = isToday(state.date);
+  $("fr-title").textContent =
+    `炸班明细 · 共 ${rows.length} 人次 / ${riders} 人（排了班但没达到有效出勤）`;
+
+  const tips = [
+    `按班次分行：每行先给该班次的人数与判定标准，下面挂这个班次里的人；` +
+    `数值后的 <i class="mk ok">✓</i> 为达标、<i class="mk no">✗</i> 为未达标。`
+  ];
+  if (live) {
+    const skipped = att.periods.filter((p) => p !== "全天" && (att.ongoing || []).includes(p));
+    tips.push(skipped.length
+      ? `今天只列 <b>已结束</b> 的班次，${skipped.join("、")} 还没跑完（人还在陆续上线），结束后会自动出现在这里。`
+      : "今天所有班次都已结束，下面是完整名单。");
+  }
+  if (rows.some((x) => x.per === "全天")) {
+    tips.push("「全天」行是整天口径，同一个人可能也在某个时段炸班，所以按人次统计。");
+  }
+  tips.push("名单取自考勤「排班状态 = 排班」的记录，与排班统计的「排班人数」可能差 1–2 人。");
+  $("fr-note").innerHTML = tips.join(" ");
+
+  const cols = `<colgroup><col style="width:262px"><col style="width:376px">` +
+    `<col style="width:186px"><col style="width:128px"><col style="width:266px"></colgroup>`;
+  const head = `<thead><tr><th>姓名</th><th>站点</th>` +
+    `<th class="num">有效在线</th><th class="num">完单</th><th>未达标原因</th></tr></thead>`;
+
+  // 先按班次分桶（顺序 = 矩阵列顺序），每个班次一条横幅，再挂人
+  const buckets = new Map();
+  for (const x of rows) {
+    if (!buckets.has(x.per)) buckets.set(x.per, []);
+    buckets.get(x.per).push(x);
+  }
+  const body = ["<tbody>"];
+  let alt = false;
+  for (const per of P) {
+    const list = buckets.get(per);
+    if (!list) continue;
+    alt = !alt;
+    const std = per === "全天"
+      ? (att.dayStandard || { timeMin: 360, orders: 18 })
+      : ((att.standards && att.standards[per]) || { timeMin: 0, orders: 0 });
+    // 片区分布：矩阵那一格的人数，压成一行小字，不占列
+    const byArea = new Map();
+    for (const x of list) byArea.set(x.area, (byArea.get(x.area) || 0) + 1);
+    const dist = [...byArea.entries()].map(([a, n]) => `${shortArea(a)} ${n}`).join(" · ");
+    body.push(`<tr class="fr-band${alt ? " alt" : ""}"><td colspan="5">` +
+      `<b>${esc(per)}</b><span class="fr-cnt">${list.length} 人</span>` +
+      `<span class="fr-std">标准 有效在线 ≥${minsText(std.timeMin)} 且 完单 ≥${std.orders} 单</span>` +
+      `<span class="fr-dist">${esc(dist)}</span></td></tr>`);
+    for (const x of list) {
+      const timeOk = x.min >= (x.timeMin || 0);
+      const ordOk = x.orders >= (x.needOrders || 0);
+      const cls = [alt ? "alt" : "", x.reason === "未出勤" ? "off" : ""].filter(Boolean).join(" ");
+      body.push(`<tr class="${cls}">` +
+        `<td class="who"><b>${esc(x.name || "—")}</b><span>${esc(x.rid || "")}</span></td>` +
+        `<td class="site" title="${esc(x.site)}">${esc(String(x.site || "").replace(/^福州/, ""))}</td>` +
+        `<td class="num">${minsText(x.min)}<i class="mk ${timeOk ? "ok" : "no"}">${timeOk ? "✓" : "✗"}</i></td>` +
+        `<td class="num">${fmt(x.orders)}<i class="mk ${ordOk ? "ok" : "no"}">${ordOk ? "✓" : "✗"}</i></td>` +
+        `<td class="why">${esc(x.reason)}</td></tr>`);
+    }
+  }
+  body.push("</tbody>");
+  tbl.innerHTML = cols + head + body.join("");
+  return rows.length;
+}
+
 function render() {
   const a = state.assess;
   if (!a) return;
@@ -314,6 +419,7 @@ function render() {
   const blocks = $("att-blocks");
   const history = state.mode === "history";
   const modeLabel = history ? "历史明细" : "实时快照";
+  let failShown = 0, skippedPeriods = [], shownCount = 0;
 
   $("mode-tag").textContent = modeLabel;
   $("mode-tag").className = "mode-tag" + (history ? " history" : "");
@@ -328,11 +434,12 @@ function render() {
     : "数据源：排班统计（应排人数 / 排班人数）+ 实时考勤（排班状态 / 时段有效在线 / 时段完单）；有效出勤按 KPI 时段标准双达标去重，全天按 6h / 18 单";
   $("doc-foot-small").textContent = history
     ? `注：${state.date} 为历史日期，取次日定稿的时段明细，不再显示「统计中」；全天达成忽略系统的「是否达成」标记，按 6h / 18 单手工计算；两张表按当日排班实际班次动态生成列`
-    : "注：考勤为当日实时快照，未结束班次的有效出勤会随时间补齐；两张表按当日排班实际班次动态生成列，宽表可左右滑动查看全部时段";
+    : "注：考勤为当日实时快照，只列已结束的班次（未跑完的班次结束后自动出现）；两张表按当日排班实际班次动态生成列，宽表可左右滑动查看全部时段";
 
   if (!att || !att.ok) {
     // 排班 / 考勤任一侧取不到时，别把两张空表塞进「复制图片」的画面
     blocks.hidden = true;
+    $("fail-roster").hidden = true;
     const why = att && att.missing.length ? att.missing.join("、") + " 未取到" : "排班 / 考勤未取到";
     $("att-kpi").innerHTML = `<span class="muted">出勤达成暂不可用：${esc(why)}</span>`;
     $("att-note").textContent = history
@@ -350,15 +457,23 @@ function render() {
       `实排达成 = 有效出勤÷实排；应排达成 = 有效出勤÷应排（多排班可 >100%，不封顶）。`;
     note += history
       ? ` 历史日期取「出勤统计 → 导出明细数据」的骑手时段明细；系统全天行「是否达成」标记有误，本页忽略它，按有效在线≥6小时且完单≥18单手工判定。`
-      : ` 考勤为当日实时快照，未结束班次会随时间补齐。`;
+      : ` 今天只显示 <b>已结束</b> 的班次：未跑完的班次人还在陆续上线、单还在攒，算成不达标没意义，结束后会自动出现。`;
     if (att.degraded) {
       note += ` <span class="warn-text">考勤导出缺少「完单量」列，有效出勤已降级为只看有效在线时长。</span>`;
+    }
+    const P = periodsFor(att);
+    const skipped = history ? [] : att.periods.filter((p) => p !== "全天" && (att.ongoing || []).includes(p));
+    if (skipped.length && P.length <= 1) {
+      note += ` <span class="warn-text">今天还没有已结束的班次（${skipped.join("、")} 进行中），先只看全天。</span>`;
     }
     $("att-note").innerHTML = note;
     $("att-title-real").textContent = `${state.date} · 实排达成（有效出勤 / 实排）`;
     $("att-title-due").textContent = `${state.date} · 应排达成（有效出勤 / 应排）`;
-    renderAttTable("table3", att, "real");
-    renderAttTable("table4", att, "due");
+    renderAttTable("table3", att, "real", P);
+    renderAttTable("table4", att, "due", P);
+    failShown = renderFailRoster(att, P);
+    skippedPeriods = skipped;
+    shownCount = P.length - 1;
   }
 
   $("doc-sub").innerHTML = `考核日期 ${state.date} · ${modeLabel}&nbsp;&nbsp;&nbsp;&nbsp;生成时间 ${hhmm(now)}`;
@@ -374,7 +489,8 @@ function render() {
       ? "exportSchedule/1.0 + exportStatisticsDetail/1.0（历史时段明细，全天按 6h / 18 单手工判定）"
       : "exportSchedule/1.0 + exportAttendance/1.0（实时快照）"}（跟随当前登录账号，不拉运单明细）` +
     ` · 站点范围：${esc(state.teamSource || "待确定")}${state.teamCount ? `（${state.teamCount} 个站点）` : ""}` +
-    (att ? ` · 时段矩阵：按当日排班 ${att.periods.length - 1} 个班次动态生成（${att.periods.join(" / ")}）` : "") +
+    (att ? ` · 时段矩阵：按当日排班 ${att.periods.length - 1} 个班次动态生成（${att.periods.join(" / ")}）` +
+      (skippedPeriods.length ? `，今天只显示已结束的 ${shownCount} 个（${skippedPeriods.join("、")} 进行中）` : "") : "") +
     (a.unknownPeriods && a.unknownPeriods.length
       ? ` · 排班中有未识别班次：${a.unknownPeriods.join("、")}（字典无对应时间区间，未纳入矩阵）` : "") +
     (att && !att.ok && att.missing.length ? ` · 缺少列：${att.missing.join("、")}` : "") +
@@ -382,7 +498,9 @@ function render() {
     (state.dataNote ? ` · ${state.dataNote}` : "") +
     (state.detailStats ? ` · 历史明细 ${state.detailStats.rows} 行 / ${state.detailStats.riders} 名骑手` : "") +
     (att && att.ok
-      ? ` · 炸班 ${fmt(att.failTotal)} 人次（点击表格任一单元格可展开该班次骑手明细，不进入导出图）` : "") +
+      ? ` · 炸班 ${fmt(failShown)} 人次已按班次分行列在下方清单里` +
+        (failShown < att.failTotal ? `（另有 ${fmt(att.failTotal - failShown)} 人次属于未结束班次，暂不计入）` : "") +
+        `；点表格任一单元格可只看该格，弹窗不进入导出图` : "") +
     (state.startedAt && state.finishedAt ? ` · 本次耗时 ${((state.finishedAt - state.startedAt) / 1000).toFixed(0)}s` : "");
 
   // 两张表都已渲染，最后按当前页签决定显示哪一张（数据缺失时整块隐藏，这里只切内部状态）
