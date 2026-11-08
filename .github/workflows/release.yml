@@ -47,6 +47,7 @@ jobs:
             sw.js updater.js launcher.js update-ui.js \
             dashboard.html dashboard.css dashboard.js \
             attendance.html attendance.css attendance.js \
+            workforce.html workforce.css workforce.js \
             assess.js sync.js capture.js xlsx.js
 
       - name: Create GitHub Release with the zip

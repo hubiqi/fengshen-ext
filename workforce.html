@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>运力模块 · 骑手账单 / 人资 / 三方人资</title>
+  <link rel="stylesheet" href="dashboard.css">
+  <link rel="stylesheet" href="workforce.css">
+</head>
+<body class="wf-page">
+
+<!-- 工具条：不属于导出画面，可一键隐藏为「纯净看板」 -->
+<div class="toolbar" id="toolbar">
+  <div class="tb-left">
+    <strong>运力模块</strong>
+    <span class="tb-ver" id="tb-ver"></span>
+    <span class="tb-sub" id="sub">正在读取当前浏览器登录态…</span>
+  </div>
+  <div class="tb-right">
+    <div class="date-pick">
+      <span>账单月份</span>
+      <button id="btn-prev-month" class="date-step" type="button" title="上一个月" aria-label="上一个月"></button>
+      <input type="month" id="month-picker" aria-label="账单月份">
+      <button id="btn-next-month" class="date-step" type="button" title="下一个月" aria-label="下一个月"></button>
+    </div>
+    <button id="btn-this-month" class="ghost" title="切回当前月份">本月</button>
+    <input type="search" id="wf-search" class="wf-input" placeholder="搜姓名 / 骑手id / 站点 / 账单ID" aria-label="搜索">
+    <select id="wf-site" class="wf-select" aria-label="按站点筛选"><option value="">全部站点</option></select>
+    <select id="wf-third" class="wf-select" aria-label="按三方人资筛选">
+      <option value="">三方人资：全部</option>
+      <option value="yes">只看三方人资</option>
+      <option value="no">只看非三方</option>
+    </select>
+    <button id="btn-refresh" class="primary">立即刷新</button>
+    <button id="btn-export-csv" class="ghost" title="把当前筛选结果导出为 CSV（Excel 可直接打开）">导出 CSV</button>
+    <button id="btn-copy-image" class="primary" title="把运力模块画面复制为高清 PNG，可直接粘贴到钉钉 / 微信；按住 Shift 点击则另存为 PNG 文件">复制图片</button>
+    <button id="btn-clean" class="ghost">纯净看板</button>
+  </div>
+</div>
+
+<div class="notice" id="notice" hidden></div>
+
+<div class="progress-wrap" id="progress-wrap">
+  <div class="progress"><div class="bar" id="bar"></div></div>
+  <span class="progress-text" id="progress-text">准备中…</span>
+</div>
+
+<!-- ============ 运力模块画面（独立 PNG） ============ -->
+<main class="sheet" id="sheet">
+  <div class="doc-title">运力模块 · 骑手账单 × 人资 × 三方人资</div>
+  <div class="doc-sub" id="doc-sub">账单月份 —&nbsp;&nbsp;&nbsp;&nbsp;生成时间 —</div>
+  <div class="doc-note" id="doc-note">数据源：骑手账单管家 → 账单查询（薪资账单）＋ 人资综合服务 → 成员管理（全部状态）＋ 招募缺口管理 → 线索结果明细；按骑手 id 合并，一行一条账单</div>
+
+  <div class="wf-summary" id="wf-summary"></div>
+  <div class="wf-note" id="wf-note"></div>
+
+  <div class="tbl-scroll wf-scroll" id="wf-scroll">
+    <table class="tbl wf" id="wf-table"></table>
+  </div>
+
+  <div class="doc-foot">一行 = 一条账单；同一骑手跨站会产生多条账单。绑定扣款 = 住宿费用 ＋ 车辆租金；取分离 / 送分离单量取自账单的「一口价单量明细」。</div>
+  <div class="doc-foot small" id="doc-foot-small">「是否三方人资」按线索结果明细里是否命中带猎头（人资）公司的记录判定；人资名单取全部状态，含离职骑手。</div>
+</main>
+
+<footer id="foot-meta" class="foot-meta"></footer>
+
+<script src="capture.js"></script>
+<script src="workforce.js"></script>
+</body>
+</html>

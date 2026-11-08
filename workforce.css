@@ -1,0 +1,67 @@
+/* 运力模块（v3.15.0）：骑手账单 × 人资成员管理 × 线索结果明细，一行一条账单、17 列。
+   通用骨架（工具条 / .sheet / .doc-title / .tbl-scroll / table.tbl）沿用 dashboard.css，
+   本文件只补本页专有样式。表格宽度按内容自适应，导出图由 capture.js 跟着放宽。 */
+
+/* ---------------------------------------------------------------- 工具条控件 */
+.wf-input, .wf-select {
+  font-family: inherit; font-size: 12px; height: 28px; color: #374151;
+  background: #FFFFFF; border: 1px solid #D1D5DB; border-radius: 5px; padding: 0 8px;
+}
+.wf-input { width: 210px; }
+.wf-select { max-width: 150px; }
+.wf-input:focus, .wf-select:focus { outline: 2px solid #BFDBFE; border-color: #3B82F6; }
+.date-pick input[type="month"] {
+  font-family: inherit; font-size: 12px; height: 28px; color: #374151;
+  background: #FFFFFF; border: 1px solid #D1D5DB; border-radius: 5px; padding: 0 6px;
+}
+
+/* ---------------------------------------------------------------- 顶部概览 */
+.wf-summary { width: 1240px; max-width: 100%; margin: 26px auto 0; padding: 0 8px;
+  display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; }
+.wf-card { min-width: 132px; flex: 0 1 150px; padding: 10px 12px; border-radius: 8px;
+  background: #F8FAFF; border: 1px solid #DCE6F7; text-align: center; }
+.wf-card .k { display: block; font-size: 11.5px; color: #6B7280; line-height: 1.5; }
+.wf-card .v { display: block; margin-top: 3px; font-size: 20px; font-weight: 700;
+  color: #1F2937; font-variant-numeric: tabular-nums; line-height: 1.25; }
+.wf-card.money .v { color: #B45309; font-size: 18px; }
+.wf-card.third .v { color: #7C3AED; }
+.wf-note { width: 1240px; max-width: 100%; margin: 12px auto 0; padding: 0 16px;
+  text-align: center; font-size: 12px; color: #6B7280; line-height: 1.7; }
+.wf-note b { color: #1F2937; }
+
+/* ---------------------------------------------------------------- 明细表 */
+.tbl-scroll.wf-scroll { overflow-x: auto; margin-top: 18px; }
+table.tbl.wf { table-layout: auto; width: max-content; min-width: 1240px;
+  margin: 0 auto; font-size: 11.5px; }
+table.tbl.wf thead th { height: 42px; font-size: 11.5px; line-height: 1.35;
+  padding: 3px 7px; white-space: normal; }
+table.tbl.wf tbody td { height: 34px; font-size: 11.5px; padding: 3px 7px;
+  white-space: nowrap; }
+table.tbl.wf tbody tr:nth-child(even) td { background: #FAFBFE; }
+table.tbl.wf tbody tr:hover td { background: #EFF6FF; }
+
+/* 账单ID 较长：小字号等宽，完整展示不省略 */
+table.tbl.wf td.c-bill { font-size: 10px; color: #6B7280; letter-spacing: -.2px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+/* 站点 / 薪资方案名称允许换行，避免把整张表撑得过宽 */
+table.tbl.wf td.c-site, table.tbl.wf td.c-scheme { white-space: normal; word-break: break-all; }
+table.tbl.wf td.c-site { min-width: 132px; max-width: 176px; font-size: 11px; }
+table.tbl.wf td.c-scheme { min-width: 160px; max-width: 220px; font-size: 11px; color: #4B5563; }
+table.tbl.wf td.c-name { font-weight: 700; color: #1F2937; }
+table.tbl.wf td.c-id { color: #6B7280; font-size: 11px; }
+table.tbl.wf td.num { text-align: right; font-variant-numeric: tabular-nums; }
+table.tbl.wf td.c-total { font-weight: 700; color: #1F2937; }
+table.tbl.wf td.c-prepay, table.tbl.wf td.c-bind { color: #B45309; font-weight: 700; }
+table.tbl.wf td.c-ts { font-size: 10.5px; color: #4B5563; }
+table.tbl.wf td.c-empty { color: #9CA3AF; }
+/* 在职 / 三方人资标记 */
+table.tbl.wf i.mk { font-style: normal; font-weight: 700; }
+table.tbl.wf i.mk.yes { color: #15803D; }
+table.tbl.wf i.mk.no { color: #B91C1C; }
+table.tbl.wf i.mk.third { color: #7C3AED; }
+table.tbl.wf i.mk.na { color: #9CA3AF; font-weight: 400; }
+table.tbl.wf tr.wf-empty td { height: 90px; color: #6B7280; font-size: 13px; }
+
+@media (max-width: 1260px) {
+  .wf-summary, .wf-note { padding-left: 12px; padding-right: 12px; }
+}

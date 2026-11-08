@@ -20,7 +20,9 @@ const CORS_RULE_ID = 91002;
 const DASHBOARD = chrome.runtime.getURL("dashboard.html");
 // v3.6.0：出勤达成是独立页面，两个入口可以各自在独立标签页打开，互不覆盖
 const ATTENDANCE = chrome.runtime.getURL("attendance.html");
-const PAGE_URL = { assess: DASHBOARD, attendance: ATTENDANCE };
+// v3.15.0：运力模块是第三个独立页面
+const WORKFORCE = chrome.runtime.getURL("workforce.html");
+const PAGE_URL = { assess: DASHBOARD, attendance: ATTENDANCE, workforce: WORKFORCE };
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -137,17 +139,26 @@ async function apiInPage(api, payload) {
   return { status: r.status, json: await r.json() };
 }
 
+// v3.15.0：人资成员管理是 GET 接口（app2-edu.ele.me），同样借桥接标签的 Cookie / Referer 发请求
+async function getInPage(url) {
+  const r = await fetch(url, { credentials: "include", referrerPolicy: "unsafe-url" });
+  return { status: r.status, json: await r.json() };
+}
+
 const QUERY_API = "https://httpizza.ele.me/xtop/xtop.agencyTrackingFs.queryTracking/2.0";
 
-async function bridgeApi(api, payload) {
+async function bridgeApi(api, payload, method) {
+  const isGet = String(method || "POST").toUpperCase() === "GET";
+  const func = isGet ? getInPage : apiInPage;
+  const args = isGet ? [api] : [api, payload];
   let lastErr = null;
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
       const tabId = await getBridgeTab();
       const out = await chrome.scripting.executeScript({
         target: { tabId },
-        func: apiInPage,
-        args: [api, payload]
+        func,
+        args
       });
       const val = out && out[0] && out[0].result;
       if (!val) throw new Error("桥接标签未返回结果（可能尚未登录风神）");
@@ -202,8 +213,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
-  if (msg.type === "BRIDGE_API" || msg.type === "BRIDGE_QUERY") {
-    bridgeApi(msg.api || QUERY_API, msg.payload).then(sendResponse);
+  if (msg.type === "BRIDGE_API" || msg.type === "BRIDGE_QUERY" || msg.type === "BRIDGE_GET") {
+    const isGet = msg.type === "BRIDGE_GET";
+    bridgeApi(msg.api || msg.url || QUERY_API, msg.payload, isGet ? "GET" : (msg.method || "POST"))
+      .then(sendResponse);
     return true;
   }
 

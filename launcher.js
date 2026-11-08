@@ -1,10 +1,10 @@
-/* 风神看板 · 一颗总按钮 + 两个独立功能入口（content script）
+/* 风神看板 · 一颗总按钮 + 三个独立功能入口（content script）
  *
  * v3.6.0：新功能「出勤达成」不再挂在原考核看板里，改为独立页面：
  *   总按钮（可拖动） -> 展开小菜单 -> 「考核看板」/「出勤达成」两个子入口
  *   子入口分别打开 dashboard.html / attendance.html，各自独立刷新与复制图片。
- * 面板顶部另有「考核看板 / 出勤达成」两个页签，双 iframe 各自保留状态，
- * 切回来不会重新拉数、也不会互相污染。两个功能分开，但入口归到同一颗总按钮里。
+ * v3.15.0：新增第三个独立入口「运力模块」（workforce.html）—— 骑手账单 × 人资 × 三方人资。
+ * 面板顶部三页签、三 iframe 各自保留状态，切回来不会重新拉数、也不会互相污染。
  */
 (function () {
   "use strict";
@@ -18,13 +18,15 @@
   const DEFAULT_TOP = 236;   // 避开 FengshenMonitor 那颗默认 top:150px 的悬浮球
   const PAGES = {
     assess: HAS_EXT ? chrome.runtime.getURL("dashboard.html") : "dashboard.html",
-    attendance: HAS_EXT ? chrome.runtime.getURL("attendance.html") : "attendance.html"
+    attendance: HAS_EXT ? chrome.runtime.getURL("attendance.html") : "attendance.html",
+    workforce: HAS_EXT ? chrome.runtime.getURL("workforce.html") : "workforce.html"
   };
   const POS_KEY = "wb_assess_launcher_pos";   // 只有一颗总按钮，位置只记一份
   const DEF_TOP = DEFAULT_TOP;
   const HEAD = {
     assess: { title: "指定日考核看板", sub: "规划单量完成率 · 标2骑手占比 · 时段达成矩阵" },
-    attendance: { title: "出勤达成", sub: "应排 / 实排 / 有效出勤 · 实排达成 / 应排达成" }
+    attendance: { title: "出勤达成", sub: "应排 / 实排 / 有效出勤 · 实排达成 / 应排达成" },
+    workforce: { title: "运力模块", sub: "骑手账单 · 人资在职 · 三方人资" }
   };
 
   // ---------------------------------------------------------------- 样式（Shadow DOM 隔离）
@@ -65,7 +67,7 @@
   }
   .wb-tip.show { opacity: 1; }
 
-  /* 总按钮展开的功能菜单：两个独立入口放在一起，不再散落两颗球 */
+  /* 总按钮展开的功能菜单：三个独立入口放在一起，不再散落多颗球 */
   .wb-menu {
     position: fixed; z-index: 2147483602; width: 204px; padding: 6px;
     border-radius: 12px; background: #FFFFFF; border: 1px solid #E5E7EB;
@@ -87,6 +89,7 @@
   .wb-menu-item .mi-ico svg { width: 16px; height: 16px; }
   .wb-menu-item.assess .mi-ico { background: #2F5597; }
   .wb-menu-item.attendance .mi-ico { background: #0B7C60; }
+  .wb-menu-item.workforce .mi-ico { background: #7C3AED; }
   .wb-menu-item .mi-sub { display: block; font-size: 10px; font-weight: 400; color: #6B7280;
     margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
@@ -143,6 +146,10 @@
       <circle cx="8" cy="8" r="3"/><path d="M2.5 20a5.5 5.5 0 0 1 11 0"/>
       <path d="M16 8v5l3 2"/><circle cx="16" cy="13" r="7"/>
     </svg>`;
+  const ICON_WF = `<svg class="wb-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M3 20h18M5 16v-5M12 16V6M19 16v-8"/>
+      <path d="M3 8l6-4 6 4 6-4"/>
+    </svg>`;
 
   // ---------------------------------------------------------------- 存储（每个入口各记各的位置）
   function savePos(p, key) {
@@ -182,7 +189,7 @@
     <div class="wb-launcher" id="wbBall" title="风神看板（点击展开功能菜单 / 可拖动）">
       ${ICON_ASSESS}<span class="wb-txt">看板</span><span class="wb-dot"></span><span class="wb-upd">NEW</span>
     </div>
-    <div class="wb-tip" id="wbTip">风神看板 · 点击展开（考核 / 出勤）</div>
+    <div class="wb-tip" id="wbTip">风神看板 · 点击展开（考核 / 出勤 / 运力）</div>
     <div class="wb-menu" id="wbMenu">
       <div class="wb-menu-head">选择要打开的功能</div>
       <button class="wb-menu-item assess" id="wbMenuAssess">
@@ -192,6 +199,10 @@
       <button class="wb-menu-item attendance" id="wbMenuAtt">
         <span class="mi-ico">${ICON_ATT}</span>
         <span>出勤达成<span class="mi-sub">应排 / 实排 / 有效出勤</span></span>
+      </button>
+      <button class="wb-menu-item workforce" id="wbMenuWf">
+        <span class="mi-ico">${ICON_WF}</span>
+        <span>运力模块<span class="mi-sub">账单 · 人资 · 三方人资</span></span>
       </button>
     </div>
     <div class="wb-mask" id="wbMask">
@@ -203,6 +214,7 @@
           <div class="wb-tabs">
             <button class="wb-tab active" id="wbTabAssess" title="切回原考核看板（独立页面）">考核看板</button>
             <button class="wb-tab" id="wbTabAtt" title="切到出勤达成（独立页面）">出勤达成</button>
+            <button class="wb-tab" id="wbTabWf" title="切到运力模块（独立页面）">运力模块</button>
           </div>
           <button class="wb-btn" id="wbReload" title="重新拉取当前看板的数据">↻ 刷新</button>
           <button class="wb-btn" id="wbNewTab" title="把当前看板在独立标签页打开">↗ 新标签打开</button>
@@ -211,6 +223,7 @@
         <!-- clipboard-write：iframe 是扩展页（跨源），需显式授予才能写「复制图片」 -->
         <iframe class="wb-frame" id="wbFrame" title="风神考核看板" allow="clipboard-write *" allowtransparency="false"></iframe>
         <iframe class="wb-frame" id="wbFrameAtt" title="风神出勤达成看板" allow="clipboard-write *" allowtransparency="false" hidden></iframe>
+        <iframe class="wb-frame" id="wbFrameWf" title="风神运力模块" allow="clipboard-write *" allowtransparency="false" hidden></iframe>
       </div>
     </div>`;
   if (root === host) {
@@ -221,15 +234,15 @@
   }
   const q = (id) => root.getElementById ? root.getElementById(id) : document.getElementById(id);
   const ball = q("wbBall"), tip = q("wbTip"), mask = q("wbMask"), menu = q("wbMenu");
-  const frames = { assess: q("wbFrame"), attendance: q("wbFrameAtt") };
-  const tabs = { assess: q("wbTabAssess"), attendance: q("wbTabAtt") };
-  const MODES = ["assess", "attendance"];
+  const frames = { assess: q("wbFrame"), attendance: q("wbFrameAtt"), workforce: q("wbFrameWf") };
+  const tabs = { assess: q("wbTabAssess"), attendance: q("wbTabAtt"), workforce: q("wbTabWf") };
+  const MODES = ["assess", "attendance", "workforce"];
 
   // ---------------------------------------------------------------- 自动更新角标（挂在总按钮上）
   let updateState = null;
   function tipFor() {
     if (updateState && updateState.on) return "发现新版本 v" + updateState.latest + " · 打开看板可一键更新";
-    return "风神看板 · 点击展开（考核 / 出勤）";
+    return "风神看板 · 点击展开（考核 / 出勤 / 运力）";
   }
   function applyUpdateState(s) {
     const on = !!(s && s.available && s.latest !== s.skipped);
@@ -362,9 +375,10 @@
   }
   bindBall(ball);
 
-  // 菜单里的两个子入口：各自打开自己的独立页面
+  // 菜单里的三个子入口：各自打开自己的独立页面
   q("wbMenuAssess").addEventListener("click", () => { setMenu(false); setOpen(true, "assess"); });
   q("wbMenuAtt").addEventListener("click", () => { setMenu(false); setOpen(true, "attendance"); });
+  q("wbMenuWf").addEventListener("click", () => { setMenu(false); setOpen(true, "workforce"); });
   // 点页面其他地方 / 按 Esc：先收起菜单，再收起面板
   document.addEventListener("pointerdown", (e) => {
     if (!menuOpen) return;
@@ -378,6 +392,7 @@
   mask.addEventListener("click", (e) => { if (e.target === mask) setOpen(false); });
   tabs.assess.addEventListener("click", () => setOpen(true, "assess"));
   tabs.attendance.addEventListener("click", () => setOpen(true, "attendance"));
+  tabs.workforce.addEventListener("click", () => setOpen(true, "workforce"));
   q("wbReload").addEventListener("click", () => {
     frames[mode].src = PAGES[mode] + "?_t=" + Date.now();
   });
@@ -393,7 +408,8 @@
 
   // iframe 内按 Esc / 点「考核看板 ↗」/ 关闭时通过 postMessage 通知父页面
   window.addEventListener("message", (e) => {
-    if (e.source !== frames.assess.contentWindow && e.source !== frames.attendance.contentWindow) return;
+    if (e.source !== frames.assess.contentWindow && e.source !== frames.attendance.contentWindow &&
+        e.source !== frames.workforce.contentWindow) return;
     const d = e.data;
     if (!d || d.__wbAssess !== true) return;
     if (d.type === "CLOSE") setOpen(false);
