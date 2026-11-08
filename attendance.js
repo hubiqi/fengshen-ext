@@ -56,6 +56,8 @@ const hhmm = (d) => d.toTimeString().slice(0, 5);
 const state = {
   via: localStorage.getItem("wb_via") || "direct",
   date: todayStr(), mode: "live",
+  // 「实排达成 / 应排达成」页签：一次只看一张表，切过的选择记在本机
+  view: localStorage.getItem("wb_att_view") === "due" ? "due" : "real",
   loading: false, gen: 0, errors: [], fallbackTried: false,
   schSheets: [], attSheets: [], assess: null, detailStats: null,
   startedAt: null, finishedAt: null, dataNote: "", teamSource: "", teamCount: 0,
@@ -208,6 +210,50 @@ function recompute() {
 }
 const isToday = (d) => d === todayStr();
 
+// ---------------------------------------------------------------- 实排 / 应排 页签切换
+// 两张表只是分母不同（实排 = 排班人数，应排 = 应排人数），分子同为「有效出勤」。
+// 并排竖着放要滚两遍几乎一样的数字，所以收成一组页签：默认看实排达成，点另一个换分母。
+// 切换只动显示，不重新取数、不重算口径；两张表在切换前都已渲染好，点了即刻生效。
+const VIEW_KEY = "wb_att_view";
+function applyView() {
+  const due = state.view === "due";
+  $("att-title-real").hidden = due;
+  $("att-title-due").hidden = !due;
+  $("wrap-real").hidden = due;
+  $("wrap-due").hidden = !due;
+  for (const [id, on] of [["btn-view-real", !due], ["btn-view-due", due]]) {
+    const b = $(id);
+    if (!b) continue;
+    b.classList.toggle("on", on);
+    b.setAttribute("aria-selected", on ? "true" : "false");
+  }
+}
+function setView(view) {
+  const v = view === "due" ? "due" : "real";
+  if (v === state.view) return;
+  state.view = v;
+  try { localStorage.setItem(VIEW_KEY, v); } catch (e) { /* 无痕模式忽略 */ }
+  applyView();
+}
+function bindViewSwitch() {
+  const box = $("att-switch");
+  if (!box) return;
+  box.addEventListener("click", (e) => {
+    const b = e.target.closest && e.target.closest("button[data-view]");
+    if (!b) return;
+    setView(b.dataset.view);
+  });
+  // 页签按 ← → 也能翻，键盘操作不用去点
+  box.addEventListener("keydown", (e) => {
+    if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+    e.preventDefault();
+    const next = state.view === "real" ? "due" : "real";
+    setView(next);
+    const b = $(next === "due" ? "btn-view-due" : "btn-view-real");
+    if (b && b.focus) b.focus();
+  });
+}
+
 // 两张表共用同一份「有效出勤」分子：实排达成 = 有效出勤/实排，应排达成 = 有效出勤/应排。
 // 分母为 0 显示「—」；未结束班次且暂无达标骑手时显示「统计中 / 未开始」。
 // 炸班明细的 key 必须与 assess.js 的 attKey 一致（area + \u0001 + 时段）
@@ -338,6 +384,9 @@ function render() {
     (att && att.ok
       ? ` · 炸班 ${fmt(att.failTotal)} 人次（点击表格任一单元格可展开该班次骑手明细，不进入导出图）` : "") +
     (state.startedAt && state.finishedAt ? ` · 本次耗时 ${((state.finishedAt - state.startedAt) / 1000).toFixed(0)}s` : "");
+
+  // 两张表都已渲染，最后按当前页签决定显示哪一张（数据缺失时整块隐藏，这里只切内部状态）
+  applyView();
 }
 
 // ---------------------------------------------------------------- 炸班明细弹窗
@@ -689,6 +738,8 @@ window.__SET_DATA__ = (sch, att, date, mode) => {
 
 (async function init() {
   bindFailModal();
+  bindViewSwitch();
+  applyView();   // 按上次选的页签先把显示摆好，数据到了再渲染表格
   const a = localStorage.getItem("wb_att_auto"); if (a != null) $("auto").checked = a === "1";
   const saved = localStorage.getItem("wb_att_date");
   const today = todayStr();

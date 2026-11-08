@@ -34,6 +34,22 @@ button.date-active:hover { background: #24457c; }
 #att-blocks[hidden] { display: none !important; }
 .att-block-title { width: 1218px; max-width: 100%; margin: 30px auto 10px;
   font-size: 20px; font-weight: 700; color: #1F2937; text-align: center; line-height: 1.4; }
+.att-block-title[hidden], .tbl-scroll[hidden] { display: none !important; }
+
+/* 实排达成 / 应排达成 页签
+   两张表的分子是同一份「有效出勤」，只换分母；竖着排两遍同样的数字太费眼睛，
+   收成一组页签一次只看一张。页签放在 #sheet 内，导出的 PNG 里也能看出当前看的是哪个口径。 */
+.att-switch { width: 1218px; max-width: 100%; margin: 0 auto 12px;
+  display: flex; justify-content: center; }
+.att-switch button { font-family: inherit; font-size: 13px; line-height: 1; font-weight: 500;
+  padding: 8px 18px; border: 1px solid #D1D5DB; background: #FFFFFF; color: #4B5563;
+  cursor: pointer; white-space: nowrap; transition: background .12s, color .12s, border-color .12s; }
+.att-switch button:first-child { border-radius: 6px 0 0 6px; }
+.att-switch button:last-child { border-radius: 0 6px 6px 0; }
+.att-switch button + button { border-left: none; }
+.att-switch button:hover:not(.on) { background: #F3F6FC; color: #1D4ED8; }
+.att-switch button.on { background: #2F5597; border-color: #2F5597; color: #FFFFFF; font-weight: 600; }
+.att-switch button:focus-visible { outline: 2px solid #93C5FD; outline-offset: 2px; }
 table.tbl.att { width: 1218px; min-width: 1218px; border: 1px solid #E5E7EB; }
 table.tbl.att th, table.tbl.att td { border: 1px solid #E5E7EB; padding: 4px 2px; }
 table.tbl.att thead th { height: 40px; background: #F2F5FA; color: #374151;

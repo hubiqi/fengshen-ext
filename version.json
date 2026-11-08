@@ -1,6 +1,6 @@
 {
-  "version": "3.11.0",
-  "notes": "出勤达成点单元格看炸班明细：排了班但没达标的骑手，逐个给出姓名、有效在线、完单与原因",
-  "download": "https://github.com/hubiqi/fengshen-ext/releases/download/v3.11.0/fengshen-ext-v3.11.0.zip",
+  "version": "3.12.0",
+  "notes": "出勤达成把「实排达成 / 应排达成」收成一组页签，默认看实排，点一下换分母（有效出勤 ÷ 应排），不用再竖着滚两张几乎一样的表",
+  "download": "https://github.com/hubiqi/fengshen-ext/releases/download/v3.12.0/fengshen-ext-v3.12.0.zip",
   "published_at": "2026-11-08"
 }

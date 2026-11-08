@@ -53,12 +53,18 @@
 
   <div id="att-blocks">
     <div class="att-block-title" id="att-title-real">实排达成</div>
-    <div class="tbl-scroll"><table class="tbl att" id="table3"></table></div>
-    <div class="att-block-title" id="att-title-due">应排达成</div>
-    <div class="tbl-scroll"><table class="tbl att" id="table4"></table></div>
+    <div class="att-block-title" id="att-title-due" hidden>应排达成</div>
+    <div class="att-switch" id="att-switch" role="tablist" aria-label="切换达成口径">
+      <button type="button" class="asw on" id="btn-view-real" data-view="real" role="tab"
+        aria-selected="true" title="有效出勤 ÷ 实排（排班人数）">实排达成</button>
+      <button type="button" class="asw" id="btn-view-due" data-view="due" role="tab"
+        aria-selected="false" title="有效出勤 ÷ 应排（应排人数）">应排达成</button>
+    </div>
+    <div class="tbl-scroll" id="wrap-real"><table class="tbl att" id="table3"></table></div>
+    <div class="tbl-scroll" id="wrap-due" hidden><table class="tbl att" id="table4"></table></div>
   </div>
 
-  <div class="doc-foot">实排达成 = 有效出勤 ÷ 实排；应排达成 = 有效出勤 ÷ 应排（多排班可 &gt;100%，不封顶）</div>
+  <div class="doc-foot">实排达成 = 有效出勤 ÷ 实排；应排达成 = 有效出勤 ÷ 应排（多排班可 &gt;100%，不封顶）　·　上方页签切换两张表</div>
   <div class="doc-foot small" id="doc-foot-small">注：考勤为当日实时快照，未结束班次的有效出勤会随时间补齐；两张表按当日排班实际班次动态生成列，宽表可左右滑动查看全部时段</div>
 </main>
 
