@@ -5,14 +5,17 @@
  *
  * 实现方式：SVG foreignObject 内嵌 XHTML + 内联样式 → Image → Canvas → PNG Blob。
  *   - 纯本地、零依赖、零网络请求，不引入 html2canvas 之类的第三方库；
- *   - 固定按 1240px 逻辑宽度、2 倍像素密度导出，不受当前窗口宽窄影响；
+ *   - 默认按 1240px 逻辑宽度、2 倍像素密度导出，不受当前窗口宽窄影响；
+ *     v3.14.0 起画布宽度自适应：若 #sheet 里的内容（如炸班明细的「明日排班明细」列）
+ *     实际比基准宽，就把画布放宽到内容宽，绝不裁掉右侧列；
  *   - 剥离响应式 @media 规则并显式还原桌面版字号，避免窄屏窗口导出「手机排版」；
  *   - 不含工具条、更新提示、播报区与底部元信息，只截看板画面本身。
  */
 (function (global) {
   "use strict";
 
-  const WIDTH = 1240;                 // 与 dashboard.css 中 .sheet 的逻辑宽度一致
+  const BASE_WIDTH = 1240;           // 基准逻辑宽度，与 dashboard.css 中 .sheet 一致
+  let WIDTH = BASE_WIDTH;            // 本次出图的实际宽度，toBlob 时按内容重算（只放宽）
   const SCALE = 2;                    // 2 倍图，粘贴到钉钉仍然清晰
   // 与 dashboard.css 的 html/body 字体栈保持一致，保证导出图与屏幕上的字形一致。
   // SVG foreignObject 内不会命中 html/body 选择器，所以这里必须显式写在根节点上。
@@ -32,6 +35,23 @@
     [".doc-foot.small", "font-size:12px;"]
   ];
 
+  /** 画布宽度自适应：默认 1240；#sheet 里有内容比它更宽时放宽，避免右侧列被裁掉。
+   *  只放宽不缩窄，常规画面仍导出原来的 2480px 宽 PNG，老习惯不变。 */
+  function measureWidth(src) {
+    let w = 0;
+    const sels = "table.tbl.fr,.fail-roster,table.tbl.att,.fr-note,.att-note,.att-kpi";
+    for (const el of Array.from(src.querySelectorAll(sels) || [])) {
+      if (el.closest && el.closest("[hidden]")) continue;
+      try { if (global.getComputedStyle(el).display === "none") continue; } catch (e) { /* ignore */ }
+      const r = el.getBoundingClientRect();
+      w = Math.max(w, r.width || 0, el.scrollWidth || 0);
+    }
+    // 没超过基准就保持原来的 1240（导出图仍是 2480px 宽，老习惯不变）；
+    // 只有内容确实更宽才放宽，并留 24px 白边，避免表格边框贴着画布边缘。
+    if (w <= BASE_WIDTH) return BASE_WIDTH;
+    return Math.min(Math.ceil(w) + 24, 3200);
+  }
+
   /** 收集当前页面的 CSS 文本；跳过媒体查询（导出固定按桌面宽度），并补上强制布局。 */
   function collectCss() {
     const rules = [];
@@ -45,6 +65,12 @@
     }
     rules.push(`.sheet { width:${WIDTH}px !important;max-width:none !important;margin:0 !important; }`);
     rules.push(`.tbl-scroll { overflow:visible !important;width:${WIDTH}px !important; }`);
+    if (WIDTH > BASE_WIDTH) {
+      // 画布加宽时，标题 / 说明等原本锁 1218px 的块跟着铺满，固定宽的达成矩阵居中
+      rules.push(`.att-kpi,.att-note,.att-switch,.att-block-title,.fr-head,.fr-title,.fr-note` +
+        ` { width:${WIDTH}px !important;max-width:none !important; }`);
+      rules.push(`table.tbl.att { margin-left:auto !important;margin-right:auto !important; }`);
+    }
     return rules.join("\n");
   }
 
@@ -59,6 +85,7 @@
   async function toBlob(rootId) {
     const src = document.getElementById(rootId || "sheet");
     if (!src) throw new Error("未找到看板画面（#" + (rootId || "sheet") + "）");
+    WIDTH = measureWidth(src);
 
     const holder = document.createElement("div");
     holder.style.cssText =
@@ -174,5 +201,9 @@
     return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}`;
   }
 
-  global.WB_CAPTURE = { WIDTH, SCALE, toBlob, writeClipboard, download, capture };
+  global.WB_CAPTURE = {
+    BASE_WIDTH, SCALE,
+    get WIDTH() { return WIDTH; },   // 本次出图实际采用的逻辑宽度（自适应后）
+    toBlob, writeClipboard, download, capture
+  };
 })(typeof window !== "undefined" ? window : globalThis);

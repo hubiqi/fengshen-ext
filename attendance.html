@@ -63,7 +63,7 @@
     <div class="tbl-scroll" id="wrap-real"><table class="tbl att" id="table3"></table></div>
     <div class="tbl-scroll" id="wrap-due" hidden><table class="tbl att" id="table4"></table></div>
 
-    <!-- 炸班明细：把两张表里所有「排了班但没达标」的人一次性列平，不用一个个格子点开 -->
+    <!-- 炸班明细：一人一行 × 时段列的矩阵（v3.14.0），✓ 达标 / ✗ 炸班 / 空 = 没排该班 -->
     <div class="fail-roster" id="fail-roster" hidden>
       <div class="fr-head">
         <div class="fr-title" id="fr-title">炸班明细</div>
@@ -97,6 +97,23 @@
     </div>
     <div class="fail-tip" id="fail-tip"></div>
     <div class="fail-body"><table class="fail-tbl" id="fail-tbl"></table></div>
+  </div>
+</div>
+
+<!-- 班次异常追溯弹窗：点「明日排班明细」里标红的班次打开，列近三天该班次的判定明细。
+     同样放在 #sheet 之外，不进入导出图 -->
+<div class="fail-modal" id="hist-modal" hidden>
+  <div class="fail-mask" data-close></div>
+  <div class="fail-panel" role="dialog" aria-modal="true" aria-labelledby="hist-title">
+    <div class="fail-head">
+      <div class="fail-head-text">
+        <div class="fail-title" id="hist-title">班次异常追溯</div>
+        <div class="fail-sub" id="hist-sub"></div>
+      </div>
+      <button class="fail-x" id="hist-x" type="button" title="关闭（Esc）" aria-label="关闭">×</button>
+    </div>
+    <div class="fail-tip" id="hist-tip"></div>
+    <div class="fail-body"><table class="fail-tbl" id="hist-tbl"></table></div>
   </div>
 </div>
 

@@ -1,6 +1,6 @@
 {
-  "version": "3.13.1",
-  "notes": "T0 炸班明细默认不显示「全天」（当天未结束，按 6h/18 单判定不准）；清单标题右侧留开关，默认关、可手动打开，选择记在本机；矩阵全天列与顶部概览不变",
-  "download": "https://github.com/hubiqi/fengshen-ext/releases/download/v3.13.1/fengshen-ext-v3.13.1.zip",
+  "version": "3.14.0",
+  "notes": "炸班明细改成「一人一行 × 时段列」矩阵：站点 / 姓名+id / 异常次数 / 各时段 ✓✗ / T-3·T-2·T-1 历史异常 / 明日排班明细；列按当日排班动态生成、列宽与导出画布按内容自适应，明日排班整段换行不截断，T0 默认不含全天；历史三天异步取数并按日期缓存；与本日炸班同名的明日班次标红，点击弹出近三天该班次的日期 / 是否达标 / 有效时长 / 有效完单",
+  "download": "https://github.com/hubiqi/fengshen-ext/releases/download/v3.14.0/fengshen-ext-v3.14.0.zip",
   "published_at": "2026-11-08"
 }

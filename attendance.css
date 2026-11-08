@@ -2,7 +2,8 @@
    基础排版复用 dashboard.css（工具条 / .sheet / table.tbl / 纯净模式），
    本文件只放「实排达成 / 应排达成」两张宽表、概览区与日期选择器的样式。
    配色对齐用户提供的截图：浅色表头、细灰线、百分比绿/橙/红、下方灰字分子分母。
-   总宽锁 1218px，班次变多只压缩列宽，不撑破「复制图片」的 1240px 画布。 */
+   总宽基准 1218px；达成矩阵固定列宽，炸班明细矩阵按内容自适应列宽（v3.14.0），
+   明日排班明细整段换行，不省略；画布宽度兜底跟着内容走，不裁掉右侧列。 */
 /* 工具条：日期选择（左右箭头步进）+ 数据源标签（不属于导出画面） */
 .date-pick { font-size: 12px; color: #374151; display: inline-flex; align-items: center;
   gap: 4px; white-space: nowrap; }
@@ -69,20 +70,18 @@ table.tbl.att td.att-cell.zero { color: #9CA3AF; }
 body.clean.att-page .notice, body.clean.att-page .progress-wrap,
 body.clean.att-page .foot-meta { display: none !important; }
 
-/* ---------- 炸班明细清单（v3.13.0 / v3.13.1） ----------
-   达成表只给百分比，看不出到底是谁；这里把「排了班但没达标」的人按班次分行：
-   每班次一条横幅，下面挂姓名 / 站点 / 有效在线 / 完单 / 原因，两项指标各带绿 ✓ 或红 ✗。
-   与弹窗分工：清单用于整篇贴图，弹窗用于只看某一个格子。
-   放在 #sheet 内 → 跟着「复制图片」一起导出。
-   v3.13.1：T0 的「全天」默认从清单里关掉（当天没过完，6h/18 单判不准），
-   标题右侧放一个开关，默认关、可手动打开；用按钮 + class 而非 checkbox，
-   foreignObject 克隆时状态才不会丢。 */
+/* ---------- 炸班明细矩阵（v3.14.0，替代 v3.13 的按班次分行清单） ----------
+   一人一行 × 时段列：站点 / 姓名+id / 异常次数 / 各时段 ✓✗ / T-3 / T-2 / T-1 / 明日排班明细。
+   ✓ 绿、✗ 红、空白 = 没排这个班；列按当日排班动态生成，列宽由内容自适应（无 colgroup），
+   明日排班明细自动换行完整显示；命中本日炸班的班次标红、可点开近三天追溯。
+   放在 #sheet 内 → 跟着「复制图片」一起导出；标题右侧的「全天」开关沿用 v3.13.1。 */
 .fail-roster[hidden] { display: none !important; }
-.fr-head { width: 1218px; max-width: 100%; margin: 34px auto 6px;
+.fail-roster { width: 100%; }
+.fr-head { width: 100%; margin: 34px 0 6px;
   position: relative; display: flex; align-items: center; justify-content: center; min-height: 28px; }
 .fr-head[hidden], button.fr-day[hidden] { display: none !important; }
 .fr-head .fr-title { width: auto; margin: 0; }
-.fr-title { width: 1218px; max-width: 100%; margin: 34px auto 6px; text-align: center;
+.fr-title { width: 100%; margin: 34px 0 6px; text-align: center;
   font-size: 20px; font-weight: 700; color: #1F2937; line-height: 1.4; }
 button.fr-day { position: absolute; right: 0; top: 50%; transform: translateY(-50%);
   display: inline-flex; align-items: center; gap: 6px; cursor: pointer; white-space: nowrap;
@@ -94,35 +93,57 @@ button.fr-day i.fr-box { display: inline-block; width: 13px; height: 13px; line-
   border: 1px solid #9AA5B5; border-radius: 3px; background: #FFF; color: transparent; }
 button.fr-day.on { border-color: #B45309; background: #FFF7ED; color: #B45309; }
 button.fr-day.on i.fr-box { background: #B45309; border-color: #B45309; color: #FFF; }
-.fr-note { width: 1218px; max-width: 100%; margin: 0 auto 10px; text-align: center;
+.fr-note { width: 100%; margin: 0 0 10px; text-align: center;
   font-size: 12.5px; color: #6B7280; line-height: 1.6; padding: 0 16px; }
-table.tbl.fr { width: 1218px; min-width: 1218px; border: 1px solid #E5E7EB; }
-table.tbl.fr th, table.tbl.fr td { border: 1px solid #E5E7EB; padding: 5px 8px; }
+table.tbl.fr { width: 100%; min-width: 0; border: 1px solid #E5E7EB;
+  table-layout: auto; }   /* 列宽由内容自适应，不写死 colgroup / 不锁 1218px */
+table.tbl.fr th, table.tbl.fr td { border: 1px solid #E5E7EB; padding: 4px 5px; }
 table.tbl.fr thead th { height: 34px; background: #F2F5FA; color: #374151;
-  font-size: 12.5px; font-weight: 700; white-space: nowrap; }
-table.tbl.fr thead th.num { text-align: right; }
-table.tbl.fr tbody td { height: 32px; font-size: 12.5px; color: #374151; }
-table.tbl.fr td.who b { font-weight: 600; color: #1F2937; }
-table.tbl.fr td.who span { margin-left: 6px; font-size: 11px; color: #9CA3AF; }
-table.tbl.fr td.site { color: #4B5563; }
-table.tbl.fr td.per { color: #374151; white-space: nowrap; }
-table.tbl.fr td.num { text-align: right; white-space: nowrap; }
-table.tbl.fr i.mk { font-style: normal; font-weight: 700; font-size: 13px; margin-left: 5px; }
+  font-size: 12.5px; font-weight: 700; white-space: nowrap; text-align: center; }
+table.tbl.fr thead th.per { font-size: 10.5px; letter-spacing: -0.2px; padding: 4px 1px; }
+table.tbl.fr thead th.num { text-align: center; }
+table.tbl.fr tbody td { height: 32px; font-size: 12px; color: #374151; }
+table.tbl.fr tbody tr:nth-child(even) td { background: #FAFBFD; }
+/* 只有数值 / 时段格做省略；站点、姓名、明日排班都完整显示，宁可换行不截断 */
+table.tbl.fr td.rm-cnt,
+table.tbl.fr td.rm-hist, table.tbl.fr td.rm-cell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+table.tbl.fr td.rm-site { min-width: 112px; color: #4B5563; font-size: 11px;
+  white-space: normal; word-break: break-word; line-height: 1.35; }
+table.tbl.fr td.rm-who { min-width: 112px; white-space: normal; word-break: break-word; }
+table.tbl.fr td.rm-who b { font-weight: 600; color: #1F2937; display: block; line-height: 1.25; }
+table.tbl.fr td.rm-who span { font-size: 10px; color: #9CA3AF; display: block; line-height: 1.2; }
+table.tbl.fr td.num { text-align: center; white-space: nowrap; }
+table.tbl.fr td.rm-cnt { min-width: 58px; font-size: 14px; font-weight: 700; color: #B91C1C; }
+table.tbl.fr td.rm-hist { min-width: 46px; color: #6B7280; }
+table.tbl.fr td.rm-cell { min-width: 42px; text-align: center; padding: 4px 0; }
+table.tbl.fr td.rm-cell.blank { background: #FFFFFF; }
+table.tbl.fr td.rm-tmr { min-width: 260px; font-size: 10.5px; color: #4B5563;
+  white-space: normal; word-break: break-word; overflow: visible; line-height: 1.7; }
+/* 明日排班按班次拆成小块；命中本日异常班次的标红并可点开近三天追溯 */
+table.tbl.fr .rm-shift { display: inline-block; margin: 1px 1px; padding: 0 2px;
+  border-radius: 3px; font-size: 10.5px; color: #4B5563; border: 1px solid transparent; }
+table.tbl.fr .rm-shift.hit { color: #B91C1C; background: #FEF2F2; border-color: #FECACA;
+  font-weight: 700; cursor: pointer; }
+table.tbl.fr .rm-shift.hit:hover { background: #FEE2E2; }
+table.tbl.fr .rm-shift.hit:focus-visible { outline: 2px solid #EF4444; outline-offset: 1px; }
+table.tbl.fr .rm-sep { font-style: normal; color: #9CA3AF; }
+table.tbl.fr i.mk { font-style: normal; font-weight: 700; font-size: 14px; margin: 0; }
 table.tbl.fr i.mk.ok { color: #15803D; }
 table.tbl.fr i.mk.no { color: #B91C1C; }
-table.tbl.fr td.why { color: #B45309; white-space: nowrap; }
-/* 以班次分行：每个班次一条横幅（班次名 + 人数 + 判定标准 + 片区分布），下面挂这个班次的人。
-   横幅底色比表头浅一档、上加粗线，长名单里一眼能分出段；相邻班次交替极浅底色。 */
-table.tbl.fr tr.fr-band td { background: #EDF2FA; border-top: 2px solid #D3DCEA;
-  padding: 7px 10px; line-height: 1.5; }
-table.tbl.fr tr.fr-band b { font-size: 13.5px; color: #1F2937; }
-table.tbl.fr tr.fr-band .fr-cnt { margin-left: 10px; font-size: 12.5px; font-weight: 700; color: #B45309; }
-table.tbl.fr tr.fr-band .fr-std { margin-left: 14px; font-size: 11.5px; color: #6B7280; }
-table.tbl.fr tr.fr-band .fr-dist { margin-left: 14px; font-size: 11.5px; color: #9CA3AF; }
-table.tbl.fr tr.alt td { background: #FAFBFD; }
-table.tbl.fr tr.off td { background: #FFF7F7; }
-table.tbl.fr tr.off td.why { color: #B91C1C; }
 table.tbl.fr td.fr-empty { padding: 22px 8px; text-align: center; color: #9CA3AF; }
+table.tbl.fr tr.hist-open td.rm-tmr { background: #FFF7ED; }
+/* 追溯弹窗里「是否达标」的颜色 */
+table.fail-tbl i.mk.ok { color: #15803D; font-style: normal; font-weight: 700; }
+table.fail-tbl i.mk.no { color: #B91C1C; font-style: normal; font-weight: 700; }
+#hist-modal .fail-panel { width: 620px; }
+#hist-tbl th:nth-child(2), #hist-tbl td:nth-child(2) { width: 112px; }
+/* 时长写成「2 小时 40 分」较长，这一列加宽且不折行 */
+#hist-tbl th:nth-child(3), #hist-tbl td:nth-child(3) { width: 124px; white-space: nowrap; }
+#hist-tbl th:nth-child(4), #hist-tbl td:nth-child(4) { text-align: right; width: 108px; white-space: nowrap; }
+#hist-tbl td.hist-date { color: #374151; font-variant-numeric: tabular-nums; }
+#hist-tbl td.hist-date span { display: block; font-size: 11px; color: #9CA3AF; }
+#hist-tbl td.hist-none { color: #9CA3AF; font-size: 12px; }
+#hist-tbl tr.off td { background: #FFF7F7; }
 
 /* ---------- 炸班明细弹窗（点击实排 / 应排表里的单元格） ----------
    放在 #sheet 之外，所以「复制图片」不会把它截进导出图；

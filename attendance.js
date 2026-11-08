@@ -64,7 +64,11 @@ const state = {
   loading: false, gen: 0, errors: [], fallbackTried: false,
   schSheets: [], attSheets: [], assess: null, detailStats: null,
   startedAt: null, finishedAt: null, dataNote: "", teamSource: "", teamCount: 0,
-  memo: new Map()   // 日期 -> 已加载的 sheets，切换日期秒回；「立即刷新」强制重拉
+  memo: new Map(),  // 日期 -> 已加载的 sheets，切换日期秒回；「立即刷新」强制重拉
+  teamIds: [],
+  // T-3 / T-2 / T-1 历史异常：日期 -> Map<rid, 炸班班次数>；按日期缓存，切日期不重拉
+  histFails: new Map(), histPending: new Set(), histErrors: new Map(),
+  histDetail: new Map()   // 日期 -> histDayMap，点标红班次时查近三天的时长 / 完单 / 是否达标
 };
 
 function extMsg(msg) {
@@ -259,7 +263,7 @@ function bindViewSwitch() {
 
 // ---------------------------------------------------------------- T0 清单「全天」开关（v3.13.1）
 // 今天还没结束，「全天」按 6h / 18 单判出来的炸班名单不准（人还在陆续上线、单还在攒）。
-// 所以 T0 的炸班明细默认把「全天」整段关掉；想粗略看可点标题右侧开关临时打开。
+// 所以 T0 的炸班明细矩阵默认不给「全天」列；想粗略看可点标题右侧开关临时打开。
 // 只作用于清单：矩阵表头的全天列、顶部「整商全天」概览都不动。历史日期是定稿数据，
 // 开关隐藏、全天照常显示。
 const ROSTER_DAY_KEY = "wb_att_roster_day";
@@ -370,10 +374,121 @@ function renderAttTable(id, att, mode, periods) {
   t.innerHTML = cols + head + body.join("");
 }
 
-// ---------------------------------------------------------------- 炸班明细清单（v3.13.0）
-// 两张达成表只给百分比，看不出具体是谁；把 att.fails（片区 × 班次）摊平后**按班次分行**：
-// 每个班次一条横幅（班次名 + 人数 + 判定标准 + 片区分布），下面挂该班次的人，
-// 两项指标各自带 ✓ / ✗。与弹窗同一份数据，只是视角不同：弹窗看一格，清单看全量。
+// ---------------------------------------------------------------- 炸班明细矩阵（v3.14.0）
+// 一人一行 × 时段列：站点 / 姓名+id / 异常次数 / 各时段（✓ 达标、✗ 炸班、空 = 没排这个班）/
+// T-3 / T-2 / T-1（大前天、前天、昨日的异常班次汇总）/ 明日排班明细。
+// ✗ 直接来自 att.fails（与弹窗同源）；✓ 来自考勤原始表里「排班状态 = 排班」且不在 fails 的格子。
+// 这样不用重算判定标准，也不会和 ASSESS.build 的口径漂移。
+function scheduledSet(sheets) {
+  const out = new Set();
+  for (const sh of sheets || []) {
+    const rows = sh && sh.rows;
+    if (!rows || !rows.length) continue;
+    const head = rows[0].map((x) => String(x == null ? "" : x).trim());
+    const iR = head.indexOf("骑手id"), iS = head.indexOf("排班状态"), iP = head.indexOf("时段");
+    if (iR < 0 || iS < 0 || iP < 0) continue;
+    for (const r of rows.slice(1)) {
+      if (String(r[iS] == null ? "" : r[iS]).trim() !== "排班") continue;
+      const rid = String(r[iR] == null ? "" : r[iR]).trim();
+      const per = String(r[iP] == null ? "" : r[iP]).trim();
+      if (rid && per) out.add(rid + "\u0001" + per);
+    }
+  }
+  return out;
+}
+
+function splitShifts(v) {
+  const s = String(v == null ? "" : v).trim();
+  if (!s || /^(休息|未排班|无|-|—)$/.test(s)) return [];
+  return s.split(/[、,，\/|;；\s]+/).map((x) => x.trim()).filter(Boolean);
+}
+
+/** 排班导出 endDate 已含次日，xlsx 天然带回所选日 + 明天的骑手排班，0 额外请求 */
+function tomorrowSchedule(schSheets, date) {
+  const target = shiftDate(date, 1);
+  const out = new Map();
+  for (const sh of schSheets || []) {
+    const rows = sh && sh.rows;
+    if (!rows || !rows.length) continue;
+    const head = rows[0].map((x) => String(x == null ? "" : x).trim());
+    const iR = head.indexOf("骑手id");
+    if (iR < 0) continue;
+    // 行式：日期 / 骑手id / 排班
+    const iD = head.indexOf("日期"), iA = head.indexOf("排班");
+    if (iD >= 0 && iA >= 0) {
+      for (const r of rows.slice(1)) {
+        if (String(r[iD] == null ? "" : r[iD]).slice(0, 10) !== target) continue;
+        const rid = String(r[iR] == null ? "" : r[iR]).trim();
+        if (rid) out.set(rid, splitShifts(r[iA]));
+      }
+      if (out.size) return out;
+    }
+    // 宽式：表头形如 "2026-11-07 周六"
+    const col = head.findIndex((h) => h.slice(0, 10) === target);
+    if (col >= 0) {
+      for (const r of rows.slice(1)) {
+        const rid = String(r[iR] == null ? "" : r[iR]).trim();
+        if (rid) out.set(rid, splitShifts(r[col]));
+      }
+      if (out.size) return out;
+    }
+  }
+  return out;
+}
+
+// 与 assess.js parseDur 同款：「2小时26分钟」/「2:26」/纯分钟，统一换算成分钟
+// 与 assess.js parseDur 完全同口径（返回分钟）：只认「2小时26分钟」这种文本，
+// 纯数字 / "2:26" 一律当 0 —— 否则 T-3/T-2/T-1 的判定会和当天 build() 漂移。
+function parseDurMin(v) {
+  const t = String(v == null ? "" : v).trim();
+  if (!t) return 0;
+  const h = /(\d+)\s*小时/.exec(t), m = /(\d+)\s*分钟?/.exec(t);
+  if (!h && !m) return 0;
+  return (h ? Number(h[1]) : 0) * 60 + (m ? Number(m[1]) : 0);
+}
+
+/** 历史某天的「骑手 × 班次」判定明细：rid -> Map<班次, {min, orders, ok}>。
+ *  达标的行也留着（追溯弹窗要显示「是否达标」），全天行不算班次。 */
+function histDayMap(sheets, standards) {
+  const out = new Map();
+  const defs = (typeof ASSESS !== "undefined" && ASSESS.PERIOD_DEFS) || [];
+  for (const sh of sheets || []) {
+    const rows = sh && sh.rows;
+    if (!rows || !rows.length) continue;
+    const head = rows[0].map((x) => String(x == null ? "" : x).trim());
+    const iR = head.indexOf("骑手id"), iS = head.indexOf("排班状态"), iP = head.indexOf("时段");
+    const iV = head.indexOf("时段有效在线时长"), iO = head.indexOf("时段完单量");
+    if (iR < 0 || iS < 0 || iP < 0) continue;
+    for (const r of rows.slice(1)) {
+      if (String(r[iS] == null ? "" : r[iS]).trim() !== "排班") continue;
+      const rid = String(r[iR] == null ? "" : r[iR]).trim();
+      const per = String(r[iP] == null ? "" : r[iP]).trim();
+      if (!rid || !per || per === "全天") continue;
+      const std = (standards && standards[per]) || defs.find((d) => d.name === per);
+      if (!std) continue;
+      const min = parseDurMin(iV >= 0 ? r[iV] : "");
+      const orders = iO >= 0 ? (Number(r[iO]) || 0) : 0;
+      const ok = min >= std.timeMin && orders >= std.orders;
+      if (!out.has(rid)) out.set(rid, new Map());
+      const m = out.get(rid), old = m.get(per);
+      // 同一骑手同一时段多行时保留「更好」的那次，与 ASSESS.build 的取法一致
+      if (!old || min > old.min || orders > old.orders) m.set(per, { min, orders, ok });
+    }
+  }
+  return out;
+}
+
+/** T-3 / T-2 / T-1 单元格用的汇总：每人当天炸班班次数 */
+function histCounts(dayMap) {
+  const out = new Map();
+  for (const [rid, m] of dayMap) {
+    let n = 0;
+    for (const rec of m.values()) if (!rec.ok) n++;
+    if (n) out.set(rid, n);
+  }
+  return out;
+}
+
 function failRowsOf(att, periods) {
   const areaIdx = new Map((att.rows || []).map((r, i) => [r.area, i]));
   const allow = new Set(pickP(att, periods));
@@ -392,13 +507,44 @@ function failRowsOf(att, periods) {
   return out;
 }
 
-function renderFailRoster(att, periods) {
-  const box = $("fail-roster"), tbl = $("table5");
+/** 把「片区 × 班次」的 fails 重组成「一人一行」的矩阵行；异常次数 = 这一行可见 ✗ 的个数 */
+function matrixRows(att, periods) {
   const P = pickP(att, periods);
-  const rows = failRowsOf(att, P);
+  const failRows = failRowsOf(att, P);
+  const sched = scheduledSet(state.attSheets);
+  const bad = new Map(), who = new Map();
+  for (const x of failRows) {
+    if (!who.has(x.rid)) who.set(x.rid, { rid: x.rid, name: x.name || "—", site: x.site || "" });
+    if (!bad.has(x.rid)) bad.set(x.rid, new Set());
+    bad.get(x.rid).add(x.per);
+  }
+  const rows = [];
+  for (const [rid, meta] of who) {
+    const b = bad.get(rid);
+    const cells = P.map((per) => b.has(per) ? "no" : (sched.has(rid + "\u0001" + per) ? "ok" : ""));
+    // bad 一并带出去：明日排班里与本日炸班同名的班次要标红并可点开追溯
+    rows.push({ ...meta, bad: b, cells, cnt: cells.filter((c) => c === "no").length });
+  }
+  rows.sort((a, b) => (b.cnt - a.cnt) || String(a.site).localeCompare(String(b.site), "zh")
+    || String(a.name).localeCompare(String(b.name), "zh") || String(a.rid).localeCompare(String(b.rid)));
+  return { P, rows, total: failRows.length };
+}
+
+function histCell(dateStr, rid) {
+  if (state.histPending.has(dateStr)) return "…";
+  const m = state.histFails.get(dateStr);
+  return m ? fmt(m.get(rid) || 0) : "—";
+}
+
+function renderRosterMatrix(att, periods) {
+  const box = $("fail-roster"), tbl = $("table5");
+  const { P, rows, total } = matrixRows(att, periods);
   const live = isToday(state.date);
   const dayOff = live && !state.rosterDay;      // T0 的「全天」是否被关掉
   const dayN = dayFailCount(att);
+  const tomorrow = tomorrowSchedule(state.schSheets, state.date);
+  const hDates = [-3, -2, -1].map((k) => shiftDate(state.date, k));
+  const colCount = P.length + 7;
 
   if (!rows.length) {
     // 清早把「全天」关掉后，可能一个已结束班次都还没炸班；别把整块藏掉，
@@ -408,21 +554,21 @@ function renderFailRoster(att, periods) {
       $("fr-title").textContent = "炸班明细 · 已结束班次暂无炸班（全天未结束，已默认关闭）";
       $("fr-note").innerHTML = "今天还没有已结束班次的炸班记录；全天口径要等当天跑完才准，" +
         `想粗略看可点标题右侧的 <b>显示全天</b>（${fmt(dayN)} 人次，仅供参考）。`;
-      tbl.innerHTML = `<tbody><tr><td class="fr-empty" colspan="5">— 已结束班次暂无炸班 —</td></tr></tbody>`;
+      tbl.innerHTML = `<tbody><tr><td class="fr-empty" colspan="${colCount}">— 已结束班次暂无炸班 —</td></tr></tbody>`;
       return 0;
     }
     box.hidden = true; tbl.innerHTML = ""; return 0;
   }
   box.hidden = false;
 
-  const riders = new Set(rows.map((x) => x.rid)).size;
   $("fr-title").textContent =
-    `炸班明细 · 共 ${rows.length} 人次 / ${riders} 人（排了班但没达到有效出勤）` +
-    (dayOff ? " · 不含全天" : "");
+    `炸班明细 · 共 ${rows.length} 人 / ${total} 个炸班班次` + (dayOff ? " · 不含全天" : "");
 
   const tips = [
-    `按班次分行：每行先给该班次的人数与判定标准，下面挂这个班次里的人；` +
-    `数值后的 <i class="mk ok">✓</i> 为达标、<i class="mk no">✗</i> 为未达标。`
+    `一人一行：<i class="mk ok">✓</i> 该班次达标、<i class="mk no">✗</i> 炸班、空白为没排这个班；` +
+    `<b>异常次数</b> = 这一行 ✗ 的个数。` +
+    `T-3 / T-2 / T-1 分别是大前天 / 前天 / 昨日的炸班班次汇总（— 为明细未取到），` +
+    `「明日排班明细」取排班导出里次日的每人时段。`
   ];
   if (live) {
     const skipped = att.periods.filter((p) => p !== "全天" && (att.ongoing || []).includes(p));
@@ -434,59 +580,52 @@ function renderFailRoster(att, periods) {
     tips.push(dayN > 0
       ? `<b>「全天」已默认关闭</b>：今天还没过完，按 6h / 18 单判「全天未达标」不准，${fmt(dayN)} 人次暂不列入；想粗略看可点标题右侧开关（仅供参考）。`
       : `<b>「全天」已默认关闭</b>：今天还没过完，全天口径不准，想粗略看可点标题右侧开关。`);
-  } else if (rows.some((x) => x.per === "全天")) {
+  } else if (P.includes("全天")) {
     tips.push(live
-      ? "「全天」为手动打开：今天还没结束，这批人仅供参考；同一个人可能也在某个时段炸班，所以按人次统计。"
-      : "「全天」行是整天口径，同一个人可能也在某个时段炸班，所以按人次统计。");
+      ? "「全天」列为手动打开：今天还没结束，这一列仅供参考。"
+      : "「全天」列是整天口径，与各班次列并列展示。");
   }
+  tips.push("明日排班明细按班次拆开显示：与本日炸班班次同名的标红，点标红班次可看该骑手近三天这个班次的日期 / 是否达标 / 有效时长 / 有效完单。");
   tips.push("名单取自考勤「排班状态 = 排班」的记录，与排班统计的「排班人数」可能差 1–2 人。");
   $("fr-note").innerHTML = tips.join(" ");
 
-  const cols = `<colgroup><col style="width:262px"><col style="width:376px">` +
-    `<col style="width:186px"><col style="width:128px"><col style="width:266px"></colgroup>`;
-  const head = `<thead><tr><th>姓名</th><th>站点</th>` +
-    `<th class="num">有效在线</th><th class="num">完单</th><th>未达标原因</th></tr></thead>`;
+  // 列宽自适应：不写死 colgroup，交给 table-layout:auto 按内容分列；
+  // 「明日排班明细」允许整段换行，宁可把行撑高也不截断。
+  const head = `<thead><tr><th>站点</th><th>姓名+id</th><th class="num">异常次数</th>` +
+    P.map((p) => `<th class="per" title="${esc(p)}：✓ 达标 / ✗ 炸班 / 空 = 未排该班">${esc(p)}</th>`).join("") +
+    `<th class="num" title="${hDates[0]} 炸班班次数">T-3</th>` +
+    `<th class="num" title="${hDates[1]} 炸班班次数">T-2</th>` +
+    `<th class="num" title="${hDates[2]} 炸班班次数">T-1</th>` +
+    `<th>明日排班明细</th></tr></thead>`;
 
-  // 先按班次分桶（顺序 = 矩阵列顺序），每个班次一条横幅，再挂人
-  const buckets = new Map();
-  for (const x of rows) {
-    if (!buckets.has(x.per)) buckets.set(x.per, []);
-    buckets.get(x.per).push(x);
-  }
   const body = ["<tbody>"];
-  let alt = false;
-  for (const per of P) {
-    const list = buckets.get(per);
-    if (!list) continue;
-    alt = !alt;
-    const std = per === "全天"
-      ? (att.dayStandard || { timeMin: 360, orders: 18 })
-      : ((att.standards && att.standards[per]) || { timeMin: 0, orders: 0 });
-    // 片区分布：矩阵那一格的人数，压成一行小字，不占列
-    const byArea = new Map();
-    for (const x of list) byArea.set(x.area, (byArea.get(x.area) || 0) + 1);
-    const dist = [...byArea.entries()].map(([a, n]) => `${shortArea(a)} ${n}`).join(" · ");
-    body.push(`<tr class="fr-band${alt ? " alt" : ""}"><td colspan="5">` +
-      `<b>${esc(per)}</b><span class="fr-cnt">${list.length} 人</span>` +
-      `<span class="fr-std">标准 有效在线 ≥${minsText(std.timeMin)} 且 完单 ≥${std.orders} 单</span>` +
-      `<span class="fr-dist">${esc(dist)}</span></td></tr>`);
-    for (const x of list) {
-      const timeOk = x.min >= (x.timeMin || 0);
-      const ordOk = x.orders >= (x.needOrders || 0);
-      const cls = [alt ? "alt" : "", x.reason === "未出勤" ? "off" : ""].filter(Boolean).join(" ");
-      body.push(`<tr class="${cls}">` +
-        `<td class="who"><b>${esc(x.name || "—")}</b><span>${esc(x.rid || "")}</span></td>` +
-        `<td class="site" title="${esc(x.site)}">${esc(String(x.site || "").replace(/^福州/, ""))}</td>` +
-        `<td class="num">${minsText(x.min)}<i class="mk ${timeOk ? "ok" : "no"}">${timeOk ? "✓" : "✗"}</i></td>` +
-        `<td class="num">${fmt(x.orders)}<i class="mk ${ordOk ? "ok" : "no"}">${ordOk ? "✓" : "✗"}</i></td>` +
-        `<td class="why">${esc(x.reason)}</td></tr>`);
-    }
+  for (const r of rows) {
+    const site = String(r.site || "").replace(/^福州/, "");
+    const tm = tomorrow.get(r.rid);
+    const tmText = tm ? (tm.length ? tm.join("、") : "休息") : "—";
+    const tmHtml = tm && tm.length
+      ? tm.map((p) => {
+          const hit = r.bad.has(p);      // 明天又排了今天炸掉的那个班 → 标红可点
+          return `<span class="rm-shift${hit ? " hit" : ""}"` +
+            (hit ? ` data-rid="${esc(r.rid)}" data-per="${esc(p)}" role="button" tabindex="0"` +
+              ` title="${esc(p)}：本日炸班，点击查看近三天该班次追溯"` : "") +
+            `>${esc(p)}</span>`;
+        }).join(`<i class="rm-sep">、</i>`)
+      : esc(tmText);
+    body.push(`<tr>` +
+      `<td class="rm-site" title="${esc(r.site)}">${esc(site)}</td>` +
+      `<td class="rm-who"><b>${esc(r.name)}</b><span>${esc(r.rid)}</span></td>` +
+      `<td class="num rm-cnt">${fmt(r.cnt)}</td>` +
+      r.cells.map((c, i) => `<td class="rm-cell${c ? " " + c : " blank"}" data-per="${esc(P[i])}">` +
+        (c === "no" ? `<i class="mk no">✗</i>` : c === "ok" ? `<i class="mk ok">✓</i>` : "") +
+        `</td>`).join("") +
+      hDates.map((d) => `<td class="num rm-hist" title="${d}">${histCell(d, r.rid)}</td>`).join("") +
+      `<td class="rm-tmr" title="${esc(tmText)}">${tmHtml}</td></tr>`);
   }
   body.push("</tbody>");
-  tbl.innerHTML = cols + head + body.join("");
-  return rows.length;
+  tbl.innerHTML = head + body.join("");
+  return total;
 }
-
 function render() {
   const a = state.assess;
   if (!a) return;
@@ -510,7 +649,7 @@ function render() {
     : "数据源：排班统计（应排人数 / 排班人数）+ 实时考勤（排班状态 / 时段有效在线 / 时段完单）；有效出勤按 KPI 时段标准双达标去重，全天按 6h / 18 单";
   $("doc-foot-small").textContent = history
     ? `注：${state.date} 为历史日期，取次日定稿的时段明细，不再显示「统计中」；全天达成忽略系统的「是否达成」标记，按 6h / 18 单手工计算；两张表按当日排班实际班次动态生成列`
-    : "注：考勤为当日实时快照，只列已结束的班次（未跑完的班次结束后自动出现）；下方炸班明细默认不含「全天」（今天未结束，判定不准，可在清单标题右侧手动打开）；两张表按当日排班实际班次动态生成列，宽表可左右滑动查看全部时段";
+    : "注：考勤为当日实时快照，只列已结束的班次（未跑完的班次结束后自动出现）；下方炸班明细为「一人一行 × 时段列」矩阵，默认不含「全天」列（今天未结束，判定不准，可在清单标题右侧手动打开）；T-3 / T-2 / T-1 取近三天的出勤明细；两张表按当日排班实际班次动态生成列，宽表可左右滑动查看全部时段";
 
   if (!att || !att.ok) {
     // 排班 / 考勤任一侧取不到时，别把两张空表塞进「复制图片」的画面
@@ -534,7 +673,7 @@ function render() {
     note += history
       ? ` 历史日期取「出勤统计 → 导出明细数据」的骑手时段明细；系统全天行「是否达成」标记有误，本页忽略它，按有效在线≥6小时且完单≥18单手工判定。`
       : ` 今天只显示 <b>已结束</b> 的班次：未跑完的班次人还在陆续上线、单还在攒，算成不达标没意义，结束后会自动出现。` +
-        ` 下方炸班明细默认还不含 <b>全天</b>：一天没过完，按 6h / 18 单判「全天未达标」不准，` +
+        ` 下方炸班明细矩阵默认也不给 <b>全天</b> 列：一天没过完，按 6h / 18 单判「全天未达标」不准，` +
         `可在清单标题右侧手动打开，仅供参考。`;
     if (att.degraded) {
       note += ` <span class="warn-text">考勤导出缺少「完单量」列，有效出勤已降级为只看有效在线时长。</span>`;
@@ -550,7 +689,7 @@ function render() {
     renderAttTable("table3", att, "real", P);
     renderAttTable("table4", att, "due", P);
     // 矩阵用 P（保留全天），清单用 rosterPeriods（T0 默认再去掉全天）
-    failShown = renderFailRoster(att, rosterPeriods(att, P));
+    failShown = renderRosterMatrix(att, rosterPeriods(att, P));
     dayHidden = (isToday(state.date) && !state.rosterDay) ? dayFailCount(att) : 0;
     skippedPeriods = skipped;
     shownCount = P.length - 1;
@@ -587,7 +726,8 @@ function render() {
     (state.dataNote ? ` · ${state.dataNote}` : "") +
     (state.detailStats ? ` · 历史明细 ${state.detailStats.rows} 行 / ${state.detailStats.riders} 名骑手` : "") +
     (att && att.ok
-      ? ` · 炸班 ${fmt(failShown)} 人次已按班次分行列在下方清单里` + excludedText +
+      ? ` · 炸班 ${fmt(failShown)} 个班次已按「一人一行 × 时段列」列在下方矩阵里` + excludedText +
+        ` · T-3 / T-2 / T-1 取大前天 / 前天 / 昨日的出勤明细` +
         `；点表格任一单元格可只看该格，弹窗不进入导出图` : "") +
     (state.startedAt && state.finishedAt ? ` · 本次耗时 ${((state.finishedAt - state.startedAt) / 1000).toFixed(0)}s` : "");
 
@@ -679,6 +819,101 @@ function bindFailModal() {
   if (x) x.addEventListener("click", closeFailModal);
 }
 
+// ---------------------------------------------------------------- 次日班次异常追溯弹窗（v3.14.0）
+// 点「明日排班明细」里标红的班次，列出该骑手近三天（T-3 / T-2 / T-1）在同一班次的
+// 日期 / 是否达标 / 有效时长 / 有效完单。数据来自同一份历史出勤明细（state.histDetail），
+// 按日期缓存，点开时 0 额外请求。弹窗在 #sheet 之外，不会进「复制图片」。
+function riderMeta(rid) {
+  const att = state.assess && state.assess.attendance;
+  for (const list of Object.values((att && att.fails) || {})) {
+    for (const x of list) {
+      if (String(x.rid) === String(rid)) return { name: x.name || "—", site: x.site || "" };
+    }
+  }
+  return { name: "—", site: "" };
+}
+
+function closeHistModal() {
+  const m = $("hist-modal");
+  if (!m || m.hidden) return false;
+  m.hidden = true;
+  const other = $("fail-modal");
+  if (!other || other.hidden) document.body.classList.remove("fail-open");
+  for (const tr of document.querySelectorAll("#table5 tr.hist-open")) tr.classList.remove("hist-open");
+  return true;
+}
+
+function openHistModal(rid, per) {
+  const m = $("hist-modal");
+  if (!m) return;
+  closeFailModal();                       // 两个弹窗不叠着开
+  const att = state.assess && state.assess.attendance;
+  const defs = (typeof ASSESS !== "undefined" && ASSESS.PERIOD_DEFS) || [];
+  const std = (att && att.standards && att.standards[per]) || defs.find((d) => d.name === per);
+  const who = riderMeta(rid);
+  const site = String(who.site || "").replace(/^福州/, "");
+  $("hist-title").textContent = `${per} · 近三天班次异常追溯`;
+  $("hist-sub").textContent = `${who.name}（${rid}）${site ? " · " + site : ""} · 本日该班次炸班`;
+  $("hist-tip").innerHTML = (std
+    ? `判定口径与当天一致：<b>有效时长 ≥ ${minsText(std.timeMin)}</b> 且 <b>有效完单 ≥ ${fmt(std.orders)} 单</b> 才算达标，任一不足即炸班。`
+    : "判定口径与当天一致，有效时长与完单同时达标才算达标。") +
+    "数据取「出勤统计 → 导出明细数据」中该骑手该时段的记录；当天没排这个班或明细未生成时，该行会给出提示。";
+
+  const dates = [-3, -2, -1].map((k) => shiftDate(state.date, k));
+  const labels = ["大前天", "前天", "昨日"];
+  const rows = dates.map((d, i) => {
+    const dayMap = state.histDetail.get(d);
+    const byPer = dayMap && dayMap.get(String(rid));
+    const rec = byPer && byPer.get(per);
+    const day = `<td class="hist-date">${d}<span>${labels[i]}</span></td>`;
+    if (!rec) {
+      const why = state.histPending.has(d) ? "取数中…"
+        : state.histErrors.has(d) ? "明细未取到（" + esc(state.histErrors.get(d)) + "）"
+          : "未排该班 / 无明细";
+      return `<tr>${day}<td colspan="3" class="hist-none">${why}</td></tr>`;
+    }
+    const mark = rec.ok ? `<i class="mk ok">✓ 达标</i>` : `<i class="mk no">✗ 未达标</i>`;
+    return `<tr${rec.ok ? "" : " class=\"off\""}>${day}<td>${mark}</td>` +
+      `<td>${minsText(rec.min)}</td><td>${fmt(rec.orders)} 单</td></tr>`;
+  }).join("");
+  $("hist-tbl").innerHTML =
+    `<thead><tr><th>日期</th><th>是否达标</th><th>有效时长</th><th>有效完单</th></tr></thead>` +
+    `<tbody>${rows}</tbody>`;
+  m.hidden = false;
+  document.body.classList.add("fail-open");
+  const x = $("hist-x");
+  if (x && x.focus) x.focus();
+}
+
+function bindHistModal() {
+  const t = $("table5");
+  if (t) {
+    const openFrom = (s) => {
+      if (!s) return false;
+      const tr = s.closest && s.closest("tr");
+      if (tr) tr.classList.add("hist-open");
+      openHistModal(s.dataset.rid, s.dataset.per);
+      return true;
+    };
+    const hitOf = (e) => e.target.closest &&
+      e.target.closest(".rm-shift.hit[data-rid][data-per]");
+    t.addEventListener("click", (e) => { openFrom(hitOf(e)); });
+    t.addEventListener("keydown", (e) => {
+      if (e.key !== "Enter" && e.key !== " ") return;
+      const s = hitOf(e);
+      if (!s) return;
+      e.preventDefault();
+      openFrom(s);
+    });
+  }
+  const m = $("hist-modal");
+  if (m) m.addEventListener("click", (e) => {
+    if (e.target === m || (e.target.dataset && e.target.dataset.close !== undefined)) closeHistModal();
+  });
+  const x = $("hist-x");
+  if (x) x.addEventListener("click", closeHistModal);
+}
+
 // ---------------------------------------------------------------- 主流程
 // 站点范围与考核看板共用同一份缓存（TEAM_KEY），两页之间不重复查运单
 const TEAM_KEY = "wb_team_ids_v1";
@@ -743,6 +978,44 @@ async function loadAttendanceSheets(mode, teamIds, date) {
   return { sheets: conv.sheets, stats: conv.stats };
 }
 
+// ---------------------------------------------------------------- T-3 / T-2 / T-1 历史异常（v3.14.0）
+// 主表先出图，再异步并行补三天数据：每天 1 次「出勤统计 → 导出明细数据」，
+// 标准化后按与当天相同的时段标准手工判定，按骑手汇总炸班班次数。
+// 按日期缓存，切日期/刷新不重复拉；任一天失败只让那一列显示「—」，不影响主表。
+async function loadHistFails(gen) {
+  if (window.__WB_TEST__) return;   // 真机测试走 __SET_HIST__ 注入，不发真请求
+  const att = state.assess && state.assess.attendance;
+  if (!att || !att.ok) return;
+  const dates = [-3, -2, -1].map((k) => shiftDate(state.date, k));
+  const todo = dates.filter((d) => !state.histFails.has(d) && !state.histPending.has(d));
+  if (!todo.length) return;
+  for (const d of todo) state.histPending.add(d);
+  render();                                   // 先把「…」摆出来，别让格子像忘了做
+  const teamIds = state.teamIds || [];
+  await Promise.allSettled(todo.map(async (d) => {
+    try {
+      const detail = await loadExportSheet(API_ATT_DETAIL, "detail", teamIds, d);
+      const conv = ASSESS.detailToAttendance(detail, d, XLSX_READER);
+      if (conv.error || !conv.sheets || !conv.sheets.length) {
+        throw new Error(conv.error || "明细为空");
+      }
+      // 明细留全量（含达标行）：点标红班次追溯近三天时要显示时长 / 完单 / 是否达标；
+      // T-3 / T-2 / T-1 单元格只取其中的炸班班次数。
+      const dayMap = histDayMap(conv.sheets, att.standards);
+      state.histDetail.set(d, dayMap);
+      state.histFails.set(d, histCounts(dayMap));
+      state.histErrors.delete(d);
+    } catch (e) {
+      state.histDetail.delete(d);
+      state.histErrors.set(d, (e && e.message) ? e.message : String(e));
+    } finally {
+      state.histPending.delete(d);
+    }
+  }));
+  if (gen !== state.gen) return;              // 已经切了别的日期，别覆盖新画面
+  render();                                   // 三天都回来后一次性重画
+}
+
 async function loadAll(opts) {
   if (state.loading) return;
   const force = !!(opts && opts.force);
@@ -770,12 +1043,14 @@ async function loadAll(opts) {
     state.dataNote = "已复用本机缓存的该日期数据，点「立即刷新」可重新拉取";
     recompute(); render(); setProgress(1, 1, "done");
     state.loading = false; setBusy(false);
+    loadHistFails(gen);
     return;
   }
 
   try {
     const teamIds = await resolveTeamIds(gen);
     if (gen !== state.gen) return;
+    state.teamIds = teamIds;
     state.teamCount = teamIds.length;
     if (!teamIds.length) {
       showNotice("站点范围为空：历史出勤明细必须带站点 ID。请先打开一次「考核看板」让它写入运单缓存，或点「立即刷新」重试。", "blue");
@@ -813,6 +1088,7 @@ async function loadAll(opts) {
     if (!att.ok && !failed.length) {
       showNotice(`出勤达成暂不可用：${esc(att.missing.length ? att.missing.join("、") + " 未取到" : "排班统计 / " + attLabel + "表结构不匹配")}。请确认导出的 xlsx 含所需列，或点「立即刷新」重试。`);
     }
+    loadHistFails(gen);
   } catch (e) {
     setProgress(1, 1, "err");
     showNotice("同步失败：" + esc(e.message || String(e)) + "。请确认已在本浏览器登录风神（a.ele.me），且已在 chrome://extensions 重新加载扩展。");
@@ -923,6 +1199,7 @@ setInterval(() => {
 window.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
   // 弹窗打开时 Esc 只关弹窗，不要把整个看板面板也关掉
+  if (closeHistModal()) return;
   if (closeFailModal()) return;
   if (window.parent !== window) {
     window.parent.postMessage({ __wbAssess: true, type: "CLOSE" }, "*");
@@ -942,9 +1219,37 @@ window.__SET_DATA__ = (sch, att, date, mode) => {
   recompute();
   if (mode === "history" || mode === "live") { state.mode = mode; render(); }
 };
+// 测试用：注入 T-3/T-2/T-1。第一个参数是「日期 -> {骑手id: 异常班次数}」，
+// 第二个参数可选，是「日期 -> {骑手id: {班次: {min, orders, ok}}}」的追溯明细。
+window.__SET_HIST__ = (obj, detail) => {
+  state.histPending.clear();
+  state.histErrors.clear();
+  state.histFails.clear();
+  state.histDetail.clear();
+  for (const [d, m] of Object.entries(obj || {})) {
+    state.histFails.set(d, new Map(Object.entries(m || {})));
+  }
+  for (const [d, byRider] of Object.entries(detail || {})) {
+    const dayMap = new Map();
+    for (const [rid, byPer] of Object.entries(byRider || {})) {
+      const perMap = new Map();
+      for (const [per, rec] of Object.entries(byPer || {})) {
+        perMap.set(per, {
+          min: Number(rec && rec.min) || 0,
+          orders: Number(rec && rec.orders) || 0,
+          ok: !!(rec && rec.ok)
+        });
+      }
+      dayMap.set(String(rid), perMap);
+    }
+    state.histDetail.set(d, dayMap);
+  }
+  render();
+};
 
 (async function init() {
   bindFailModal();
+  bindHistModal();
   bindViewSwitch();
   bindRosterDay();
   applyView();       // 按上次选的页签先把显示摆好，数据到了再渲染表格
