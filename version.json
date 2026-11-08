@@ -1,6 +1,6 @@
 {
-  "version": "3.13.0",
-  "notes": "出勤达成下方新增「炸班明细」清单：按班次分行列出所有排了班但没达标的人（姓名/站点/有效在线/完单/原因，带绿✓红✗）；今天只显示已结束的班次",
-  "download": "https://github.com/hubiqi/fengshen-ext/releases/download/v3.13.0/fengshen-ext-v3.13.0.zip",
+  "version": "3.13.1",
+  "notes": "T0 炸班明细默认不显示「全天」（当天未结束，按 6h/18 单判定不准）；清单标题右侧留开关，默认关、可手动打开，选择记在本机；矩阵全天列与顶部概览不变",
+  "download": "https://github.com/hubiqi/fengshen-ext/releases/download/v3.13.1/fengshen-ext-v3.13.1.zip",
   "published_at": "2026-11-08"
 }

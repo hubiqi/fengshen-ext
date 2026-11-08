@@ -65,7 +65,14 @@
 
     <!-- 炸班明细：把两张表里所有「排了班但没达标」的人一次性列平，不用一个个格子点开 -->
     <div class="fail-roster" id="fail-roster" hidden>
-      <div class="fr-title" id="fr-title">炸班明细</div>
+      <div class="fr-head">
+        <div class="fr-title" id="fr-title">炸班明细</div>
+        <!-- 今天还没过完，全天按 6h / 18 单判定不准；默认关掉，想粗略看可手动打开 -->
+        <button type="button" class="fr-day" id="btn-roster-day" role="switch" aria-checked="false"
+          title="今天还没结束，全天按 6h / 18 单判定不准；默认关闭，打开后仅供参考">
+          <i class="fr-box" aria-hidden="true">✓</i><span>显示全天（未结束，不准）</span>
+        </button>
+      </div>
       <div class="fr-note" id="fr-note"></div>
       <table class="tbl fr" id="table5"></table>
     </div>

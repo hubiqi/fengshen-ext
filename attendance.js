@@ -58,6 +58,9 @@ const state = {
   date: todayStr(), mode: "live",
   // 「实排达成 / 应排达成」页签：一次只看一张表，切过的选择记在本机
   view: localStorage.getItem("wb_att_view") === "due" ? "due" : "real",
+  // T0 炸班明细里的「全天」默认关：一天没过完，按 6h / 18 单判「全天未达标」不准。
+  // 勾选后只是粗略看一眼，不参与任何达成率计算；选择同样记在本机。
+  rosterDay: localStorage.getItem("wb_att_roster_day") === "on",
   loading: false, gen: 0, errors: [], fallbackTried: false,
   schSheets: [], attSheets: [], assess: null, detailStats: null,
   startedAt: null, finishedAt: null, dataNote: "", teamSource: "", teamCount: 0,
@@ -254,6 +257,36 @@ function bindViewSwitch() {
   });
 }
 
+// ---------------------------------------------------------------- T0 清单「全天」开关（v3.13.1）
+// 今天还没结束，「全天」按 6h / 18 单判出来的炸班名单不准（人还在陆续上线、单还在攒）。
+// 所以 T0 的炸班明细默认把「全天」整段关掉；想粗略看可点标题右侧开关临时打开。
+// 只作用于清单：矩阵表头的全天列、顶部「整商全天」概览都不动。历史日期是定稿数据，
+// 开关隐藏、全天照常显示。
+const ROSTER_DAY_KEY = "wb_att_roster_day";
+function applyRosterDay() {
+  const b = $("btn-roster-day");
+  if (!b) return;
+  const live = isToday(state.date);
+  b.hidden = !live;                       // 历史日期不需要这个开关
+  b.classList.toggle("on", state.rosterDay);
+  b.setAttribute("aria-checked", state.rosterDay ? "true" : "false");
+  b.title = state.rosterDay
+    ? "「全天」已手动打开：今天还没结束，这批人仅供参考；点一下关掉"
+    : "今天还没结束，全天按 6h / 18 单判定不准；默认关闭，打开后仅供参考";
+}
+function setRosterDay(on) {
+  const v = !!on;
+  if (v === state.rosterDay) return;
+  state.rosterDay = v;
+  try { localStorage.setItem(ROSTER_DAY_KEY, v ? "on" : "off"); } catch (e) { /* 无痕模式忽略 */ }
+  render();   // 清单、标题、说明、底部计数一起刷新；不重新取数
+}
+function bindRosterDay() {
+  const b = $("btn-roster-day");
+  if (!b) return;
+  b.addEventListener("click", () => setRosterDay(!state.rosterDay));
+}
+
 // 两张表共用同一份「有效出勤」分子：实排达成 = 有效出勤/实排，应排达成 = 有效出勤/应排。
 // 分母为 0 显示「—」；未结束班次且暂无达标骑手时显示「统计中 / 未开始」。
 // 炸班明细的 key 必须与 assess.js 的 attKey 一致（area + \u0001 + 时段）
@@ -282,15 +315,36 @@ function attCell(c, per, mode, att, area) {
 // T0（今天）只展示**已经结束的班次**：还没跑完的班次，人还在陆续上线、单还在攒，
 // 这个时点把它算成「炸班」既不公平也没意义（11-06 快照里夜宵2 有 84 人才刚上线 10 分钟）。
 // 历史日期是定稿数据，所有班次都算已结束，原样展示。
-// 「全天」不是班次，任何时点都保留（顶部概览也用它）。
+// 「全天」不是班次，矩阵表头与顶部整商全天概览仍保留（清单另按开关处理，见 rosterPeriods）。
 function periodsFor(att) {
   if (!isToday(state.date)) return att.periods.slice();
   const ongoing = att.ongoing || [];
   return att.periods.filter((p) => p === "全天" || !ongoing.includes(p));
 }
 
+// 显式传进来的数组（哪怕是空数组）都按「过滤后的班次」用；只有不传时才退回全量。
+// 清早一个班次都没跑完时过滤结果可能是空数组，不能用 truthy 判断把它丢回全量。
+const pickP = (att, periods) => Array.isArray(periods) ? periods : att.periods;
+
+// 清单专用：在矩阵班次的基础上，T0 且开关关闭时再去掉「全天」。
+function rosterPeriods(att, periods) {
+  const P = pickP(att, periods);
+  if (!isToday(state.date) || state.rosterDay) return P;
+  return P.filter((p) => p !== "全天");
+}
+
+// 全天口径下有多少炸班人次（用于清单说明与底部计数）
+function dayFailCount(att) {
+  let n = 0;
+  for (const [k, list] of Object.entries(att.fails || {})) {
+    const cut = k.indexOf("\u0001");
+    if (cut >= 0 && k.slice(cut + 1) === "全天") n += list.length;
+  }
+  return n;
+}
+
 function renderAttTable(id, att, mode, periods) {
-  const P = periods && periods.length ? periods : att.periods;
+  const P = pickP(att, periods);
   // 与考核看板表 2 一样锁 1218px 总宽：班次从 7 变 9/11 时只压缩列宽，字号保持常规
   const firstW = 210, totalW = 1218;
   const subW = ((totalW - firstW) / Math.max(1, P.length)).toFixed(2);
@@ -322,7 +376,7 @@ function renderAttTable(id, att, mode, periods) {
 // 两项指标各自带 ✓ / ✗。与弹窗同一份数据，只是视角不同：弹窗看一格，清单看全量。
 function failRowsOf(att, periods) {
   const areaIdx = new Map((att.rows || []).map((r, i) => [r.area, i]));
-  const allow = new Set(periods && periods.length ? periods : att.periods);
+  const allow = new Set(pickP(att, periods));
   const out = [];
   for (const [k, list] of Object.entries(att.fails || {})) {
     const cut = k.indexOf("\u0001");
@@ -340,15 +394,31 @@ function failRowsOf(att, periods) {
 
 function renderFailRoster(att, periods) {
   const box = $("fail-roster"), tbl = $("table5");
-  const P = periods && periods.length ? periods : att.periods;
+  const P = pickP(att, periods);
   const rows = failRowsOf(att, P);
-  if (!rows.length) { box.hidden = true; tbl.innerHTML = ""; return 0; }
+  const live = isToday(state.date);
+  const dayOff = live && !state.rosterDay;      // T0 的「全天」是否被关掉
+  const dayN = dayFailCount(att);
+
+  if (!rows.length) {
+    // 清早把「全天」关掉后，可能一个已结束班次都还没炸班；别把整块藏掉，
+    // 否则用户连「打开全天」的开关都点不到。给一句空态，开关留在标题右侧。
+    if (dayOff && dayN > 0) {
+      box.hidden = false;
+      $("fr-title").textContent = "炸班明细 · 已结束班次暂无炸班（全天未结束，已默认关闭）";
+      $("fr-note").innerHTML = "今天还没有已结束班次的炸班记录；全天口径要等当天跑完才准，" +
+        `想粗略看可点标题右侧的 <b>显示全天</b>（${fmt(dayN)} 人次，仅供参考）。`;
+      tbl.innerHTML = `<tbody><tr><td class="fr-empty" colspan="5">— 已结束班次暂无炸班 —</td></tr></tbody>`;
+      return 0;
+    }
+    box.hidden = true; tbl.innerHTML = ""; return 0;
+  }
   box.hidden = false;
 
   const riders = new Set(rows.map((x) => x.rid)).size;
-  const live = isToday(state.date);
   $("fr-title").textContent =
-    `炸班明细 · 共 ${rows.length} 人次 / ${riders} 人（排了班但没达到有效出勤）`;
+    `炸班明细 · 共 ${rows.length} 人次 / ${riders} 人（排了班但没达到有效出勤）` +
+    (dayOff ? " · 不含全天" : "");
 
   const tips = [
     `按班次分行：每行先给该班次的人数与判定标准，下面挂这个班次里的人；` +
@@ -358,10 +428,16 @@ function renderFailRoster(att, periods) {
     const skipped = att.periods.filter((p) => p !== "全天" && (att.ongoing || []).includes(p));
     tips.push(skipped.length
       ? `今天只列 <b>已结束</b> 的班次，${skipped.join("、")} 还没跑完（人还在陆续上线），结束后会自动出现在这里。`
-      : "今天所有班次都已结束，下面是完整名单。");
+      : "今天所有班次都已结束，下面是这些班次的完整名单。");
   }
-  if (rows.some((x) => x.per === "全天")) {
-    tips.push("「全天」行是整天口径，同一个人可能也在某个时段炸班，所以按人次统计。");
+  if (dayOff) {
+    tips.push(dayN > 0
+      ? `<b>「全天」已默认关闭</b>：今天还没过完，按 6h / 18 单判「全天未达标」不准，${fmt(dayN)} 人次暂不列入；想粗略看可点标题右侧开关（仅供参考）。`
+      : `<b>「全天」已默认关闭</b>：今天还没过完，全天口径不准，想粗略看可点标题右侧开关。`);
+  } else if (rows.some((x) => x.per === "全天")) {
+    tips.push(live
+      ? "「全天」为手动打开：今天还没结束，这批人仅供参考；同一个人可能也在某个时段炸班，所以按人次统计。"
+      : "「全天」行是整天口径，同一个人可能也在某个时段炸班，所以按人次统计。");
   }
   tips.push("名单取自考勤「排班状态 = 排班」的记录，与排班统计的「排班人数」可能差 1–2 人。");
   $("fr-note").innerHTML = tips.join(" ");
@@ -419,7 +495,7 @@ function render() {
   const blocks = $("att-blocks");
   const history = state.mode === "history";
   const modeLabel = history ? "历史明细" : "实时快照";
-  let failShown = 0, skippedPeriods = [], shownCount = 0;
+  let failShown = 0, skippedPeriods = [], shownCount = 0, dayHidden = 0;
 
   $("mode-tag").textContent = modeLabel;
   $("mode-tag").className = "mode-tag" + (history ? " history" : "");
@@ -434,7 +510,7 @@ function render() {
     : "数据源：排班统计（应排人数 / 排班人数）+ 实时考勤（排班状态 / 时段有效在线 / 时段完单）；有效出勤按 KPI 时段标准双达标去重，全天按 6h / 18 单";
   $("doc-foot-small").textContent = history
     ? `注：${state.date} 为历史日期，取次日定稿的时段明细，不再显示「统计中」；全天达成忽略系统的「是否达成」标记，按 6h / 18 单手工计算；两张表按当日排班实际班次动态生成列`
-    : "注：考勤为当日实时快照，只列已结束的班次（未跑完的班次结束后自动出现）；两张表按当日排班实际班次动态生成列，宽表可左右滑动查看全部时段";
+    : "注：考勤为当日实时快照，只列已结束的班次（未跑完的班次结束后自动出现）；下方炸班明细默认不含「全天」（今天未结束，判定不准，可在清单标题右侧手动打开）；两张表按当日排班实际班次动态生成列，宽表可左右滑动查看全部时段";
 
   if (!att || !att.ok) {
     // 排班 / 考勤任一侧取不到时，别把两张空表塞进「复制图片」的画面
@@ -457,21 +533,25 @@ function render() {
       `实排达成 = 有效出勤÷实排；应排达成 = 有效出勤÷应排（多排班可 >100%，不封顶）。`;
     note += history
       ? ` 历史日期取「出勤统计 → 导出明细数据」的骑手时段明细；系统全天行「是否达成」标记有误，本页忽略它，按有效在线≥6小时且完单≥18单手工判定。`
-      : ` 今天只显示 <b>已结束</b> 的班次：未跑完的班次人还在陆续上线、单还在攒，算成不达标没意义，结束后会自动出现。`;
+      : ` 今天只显示 <b>已结束</b> 的班次：未跑完的班次人还在陆续上线、单还在攒，算成不达标没意义，结束后会自动出现。` +
+        ` 下方炸班明细默认还不含 <b>全天</b>：一天没过完，按 6h / 18 单判「全天未达标」不准，` +
+        `可在清单标题右侧手动打开，仅供参考。`;
     if (att.degraded) {
       note += ` <span class="warn-text">考勤导出缺少「完单量」列，有效出勤已降级为只看有效在线时长。</span>`;
     }
     const P = periodsFor(att);
     const skipped = history ? [] : att.periods.filter((p) => p !== "全天" && (att.ongoing || []).includes(p));
     if (skipped.length && P.length <= 1) {
-      note += ` <span class="warn-text">今天还没有已结束的班次（${skipped.join("、")} 进行中），先只看全天。</span>`;
+      note += ` <span class="warn-text">今天还没有已结束的班次（${skipped.join("、")} 进行中），矩阵先只看全天。</span>`;
     }
     $("att-note").innerHTML = note;
     $("att-title-real").textContent = `${state.date} · 实排达成（有效出勤 / 实排）`;
     $("att-title-due").textContent = `${state.date} · 应排达成（有效出勤 / 应排）`;
     renderAttTable("table3", att, "real", P);
     renderAttTable("table4", att, "due", P);
-    failShown = renderFailRoster(att, P);
+    // 矩阵用 P（保留全天），清单用 rosterPeriods（T0 默认再去掉全天）
+    failShown = renderFailRoster(att, rosterPeriods(att, P));
+    dayHidden = (isToday(state.date) && !state.rosterDay) ? dayFailCount(att) : 0;
     skippedPeriods = skipped;
     shownCount = P.length - 1;
   }
@@ -483,6 +563,15 @@ function render() {
     ` · 数据源 <b>${modeLabel}</b>` +
     ` · 更新 <b>${hhmm(now)}</b>` +
     ` · 通道 <b>${state.via === "bridge" ? "静默桥接" : "直连"}</b>`;
+
+  // 没进清单的人次单独交代清楚：全天（T0 默认关） + 未结束班次，别让人以为漏了人
+  const excludedFails = att && att.ok ? Math.max(0, (att.failTotal || 0) - failShown) : 0;
+  const excludedBits = [];
+  const dayPart = Math.min(dayHidden, excludedFails);
+  if (dayPart > 0) excludedBits.push(`全天 ${fmt(dayPart)} 人次（今天未结束，默认关闭）`);
+  if (excludedFails - dayPart > 0) excludedBits.push(`未结束班次 ${fmt(excludedFails - dayPart)} 人次`);
+  const excludedText = excludedFails
+    ? `（另有 ${fmt(excludedFails)} 人次暂不计入：${excludedBits.join(" + ")}）` : "";
 
   $("foot-meta").textContent =
     `考核日期 ${state.date} · 数据源：${history
@@ -498,13 +587,13 @@ function render() {
     (state.dataNote ? ` · ${state.dataNote}` : "") +
     (state.detailStats ? ` · 历史明细 ${state.detailStats.rows} 行 / ${state.detailStats.riders} 名骑手` : "") +
     (att && att.ok
-      ? ` · 炸班 ${fmt(failShown)} 人次已按班次分行列在下方清单里` +
-        (failShown < att.failTotal ? `（另有 ${fmt(att.failTotal - failShown)} 人次属于未结束班次，暂不计入）` : "") +
+      ? ` · 炸班 ${fmt(failShown)} 人次已按班次分行列在下方清单里` + excludedText +
         `；点表格任一单元格可只看该格，弹窗不进入导出图` : "") +
     (state.startedAt && state.finishedAt ? ` · 本次耗时 ${((state.finishedAt - state.startedAt) / 1000).toFixed(0)}s` : "");
 
   // 两张表都已渲染，最后按当前页签决定显示哪一张（数据缺失时整块隐藏，这里只切内部状态）
   applyView();
+  applyRosterDay();   // 切日期后开关该不该出现、是不是勾选态，跟着一起摆好
 }
 
 // ---------------------------------------------------------------- 炸班明细弹窗
@@ -857,7 +946,9 @@ window.__SET_DATA__ = (sch, att, date, mode) => {
 (async function init() {
   bindFailModal();
   bindViewSwitch();
-  applyView();   // 按上次选的页签先把显示摆好，数据到了再渲染表格
+  bindRosterDay();
+  applyView();       // 按上次选的页签先把显示摆好，数据到了再渲染表格
+  applyRosterDay();  // 全天开关默认关，历史日期下先藏起来
   const a = localStorage.getItem("wb_att_auto"); if (a != null) $("auto").checked = a === "1";
   const saved = localStorage.getItem("wb_att_date");
   const today = todayStr();
