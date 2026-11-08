@@ -1,6 +1,7 @@
-/* 运力模块（独立页面 v3.15.0，v3.16.0 增补出勤 / 考核运单明细）
+/* 运力模块（独立页面 v3.15.0，v3.16.0 增补出勤 / 考核运单明细，v3.16.1 改复合键）
  * ---------------------------------------------------------------------------
- * 五个数据源，按「骑手 id」合并成一行一条账单的明细表：
+ * 五个数据源，账单主表按「骑手 id」合并成一行一条账单；
+ * 后两源（出勤 / 异常订单）按「骑手 id ＋ 站点 id」复合键归集，跨站骑手各站分开计：
  *   1) 骑手账单管家 → 账单查询（targetId=58484 / salary-bill-ub）
  *      POST xtop.lpd.price.mng.zsSalaryBillQueryFs.pageQuerySalaryBill/1.0
  *      → 账单ID / 站点 / 骑手 / 基础薪资方案 / 排班内外单量 / 一口价单量明细
@@ -19,12 +20,15 @@
  *   5) KPI管理 → 考核数据明细 · UB考核运单明细（targetId=56740 / kpi/detail）
  *      POST xtop.performance.fs.opp.perfDetail.queryDetailList/1.0，tabCode=TRACK_UB
  *      4 个 Radio 筛选各查一次（物流责未完成单 / 不满意单_投诉单 / 不满意单_差评单 /
- *      不满意单_索赔单），按运单ID去重后读 4 个「是否XX单」列，按骑手 id 计数
+ *      不满意单_索赔单），按运单ID去重后读 4 个「是否XX单」列，按复合键计数
  *      → 物流责 / 投诉 / 差评 / 提前点
  *
  * 与另两个页面一样：直连优先、失败自动切「静默桥接」；跟随当前登录态，不依赖本地服务。
  * 前三源并行取数先出主表，后两源异步补齐（失败只让对应列显示「—」，不阻断出表）。
  * v3.16.0：账单ID 默认不在页面/导出图里显示，只在「导出 CSV」时带上。
+ * v3.16.1：出勤异常 / 首跑 / 4 类坏单改按「骑手 id ＋ 站点 id」聚合，
+ *          两个源都读「站点ID」列（与账单 teamId 同体系）；缺站点ID 时归通配键，
+ *          仅当该骑手在账单里只有一个站点时才兜底采用，避免跨站串数。
  */
 
 const XT = "https://httpizza.ele.me/xtop/";
@@ -71,6 +75,26 @@ const shiftMonth = (m, delta) => {
 };
 const validMonth = (s) => /^\d{4}-\d{2}$/.test(String(s || ""));
 
+// v3.16.1：一个骑手可能在不同站点各有一条账单。出勤异常 / 首跑 / 4 类坏单
+// 必须按「骑手 id + 站点 id」归集，否则 A 站的问题订单会被重复记到 B 站账单行上。
+// 两个数据源都有「站点ID」列，且与账单 teamId 是同一套 id（实测 7/7 站点全命中）。
+const normId = (v) => {
+  const s = String(v == null ? "" : v).trim();
+  return /^\d+\.0+$/.test(s) ? s.replace(/\.0+$/, "") : s;
+};
+const ANY_SITE = "*";
+const pairKey = (rid, teamId) => normId(rid) + "\u0001"
+  + normId(teamId == null || String(teamId).trim() === "" ? ANY_SITE : teamId);
+// 数据源偶尔缺「站点ID」列时归到通配键；仅当该骑手在账单里只有一个站点时才采用，
+// 避免把没有站点信息的数据摊到跨站骑手的某一行上。
+function pairGet(map, rid, teamId) {
+  const hit = map.get(pairKey(rid, teamId));
+  if (hit !== undefined) return hit;
+  if (state.singleSiteRiders && state.singleSiteRiders.has(normId(rid)))
+    return map.get(pairKey(rid, ANY_SITE));
+  return undefined;
+}
+
 // 23 列：h 表头 / k 页面字段 / cls 单元格 class / csv 导出字段 / page:false = 只在 CSV 里出现。
 // v3.16.0：账单ID 默认不显示（页面与「复制图片」都不含），只有「导出 CSV」才带。
 // 页面金额 / 单量用 *Text（带 ¥ 与千分位），CSV 用原始数值，Excel 才能直接求和。
@@ -109,9 +133,12 @@ const state = {
   bills: [], staff: new Map(), clues: new Map(),
   errors: {}, rows: [], loadedAt: null,
   // 主表先出图，这两组明细异步补：失败只让对应列显示「—」，不阻断出表
-  attBad: new Map(),        // 骑手id -> 本月除「全天」外「未达成」班次数
-  attRun: new Map(),        // 骑手id -> Set(全天行完单量 > 0 的日期)
-  kpi: new Map(),           // 骑手id -> { lgt, complain, negative, early }
+  // 三组明细统一以「骑手id \u0001 站点id」为键（站点id 缺失时用 "*" 通配）
+  attBad: new Map(),        // 复合键 -> 本月除「全天」外「未达成」班次数
+  attRun: new Map(),        // 复合键 -> Set(全天行完单量 > 0 的日期)
+  kpi: new Map(),           // 复合键 -> { lgt, complain, negative, early }
+  singleSiteRiders: new Set(),  // 账单里只出现一个站点的骑手，允许通配键兜底
+  crossSiteRiders: 0,          // 账单里跨站点的骑手人数（仅用于页面提示）
   attReady: false, kpiReady: false,
   pendingAtt: false, pendingKpi: false, detailLoading: false
 };
@@ -273,22 +300,25 @@ function attStatsFromSheets(sheets) {
       if (k && col[k] === undefined) col[k] = i;
     });
     const iR = col["骑手ID"] != null ? col["骑手ID"] : col["骑手id"];
+    const iS = col["站点ID"] != null ? col["站点ID"]
+      : (col["站点id"] != null ? col["站点id"] : col["站点Id"]);
     const iD = col["考勤日期"] != null ? col["考勤日期"] : col["日期"];
     const iP = col["时段"], iOk = col["是否达成"];
     const iO = col["完单量"] != null ? col["完单量"] : col["时段完单量"];
     if ([iR, iD, iP, iOk, iO].some((i) => i === undefined)) continue;
     for (const r of rows.slice(1)) {
-      const rid = String(r[iR] == null ? "" : r[iR]).trim();
+      const rid = normId(r[iR]);
       if (!rid) continue;
+      const key = pairKey(rid, iS === undefined ? "" : r[iS]);
       const per = String(r[iP] == null ? "" : r[iP]).trim();
       const day = String(r[iD] == null ? "" : r[iD]).slice(0, 10);
       // 口径按用户确认：直接采信系统「是否达成」标记，排除「全天」
       if (per && per !== "全天" && String(r[iOk] == null ? "" : r[iOk]).trim() === "未达成")
-        bad.set(rid, (bad.get(rid) || 0) + 1);
+        bad.set(key, (bad.get(key) || 0) + 1);
       // 首跑：全天行完单量 > 0 的日期集合，后面按入职日期过滤取最早一天
       if (per === "全天" && num(r[iO]) > 0 && /^\d{4}-\d{2}-\d{2}$/.test(day)) {
-        if (!run.has(rid)) run.set(rid, new Set());
-        run.get(rid).add(day);
+        if (!run.has(key)) run.set(key, new Set());
+        run.get(key).add(day);
       }
     }
   }
@@ -298,7 +328,7 @@ function attStatsFromSheets(sheets) {
 // ---------------------------------------------------------------- 考核运单明细
 // 只按 4 个 Radio 筛选拉「有问题」的订单，绝不发起不带筛选的全量运单查询
 // （本月约 6 万单、整月可达 20 万单）。multiHeaders + data 逐行读 4 个「是否XX单」列，
-// 按运单ID 去重后按骑手汇总；每类筛选最多翻 KPI_MAX_PAGES 页。
+// 按运单ID 去重后按「骑手 id + 站点 id」汇总；每类筛选最多翻 KPI_MAX_PAGES 页。
 // 「提前点送达不满意单」没有独立筛选项，实测 3 个 is_early_delivery_* 子筛选的并集
 // 完整覆盖该列（10 月并集 17 单全部命中，日指标汇总 16 单）。
 async function loadKpiFlags(month) {
@@ -317,7 +347,7 @@ async function loadKpiFlags(month) {
       const heads = (d.multiHeaders || [])[0] || [];
       const rows = Array.isArray(d.data) ? d.data : [];
       const ix = (n) => heads.indexOf(n);
-      const iT = ix("运单ID"), iR = ix("骑手ID");
+      const iT = ix("运单ID"), iR = ix("骑手ID"), iS = ix("站点ID");
       const iF = KPI_COLS.map(ix);
       if (iR < 0 || iF.some((i) => i < 0)) break;
       for (const row of rows) {
@@ -327,7 +357,7 @@ async function loadKpiFlags(month) {
         const tid = val(iT);
         if (tid && seen.has(tid)) continue;
         seen.set(tid || ("__" + seen.size), {
-          rid: val(iR),
+          rid: val(iR), teamId: iS >= 0 ? val(iS) : "",
           lgt: val(iF[0]) === "是" ? 1 : 0,
           complain: val(iF[1]) === "是" ? 1 : 0,
           negative: val(iF[2]) === "是" ? 1 : 0,
@@ -341,10 +371,11 @@ async function loadKpiFlags(month) {
   const out = new Map();
   for (const v of seen.values()) {
     if (!v.rid) continue;
-    const cur = out.get(v.rid) || { lgt: 0, complain: 0, negative: 0, early: 0 };
+    const key = pairKey(v.rid, v.teamId);
+    const cur = out.get(key) || { lgt: 0, complain: 0, negative: 0, early: 0 };
     cur.lgt += v.lgt; cur.complain += v.complain;
     cur.negative += v.negative; cur.early += v.early;
-    out.set(v.rid, cur);
+    out.set(key, cur);
   }
   return out;
 }
@@ -385,7 +416,7 @@ function splitSep(list) {
 }
 function buildRows(bills, staff, clues) {
   return (bills || []).map((b) => {
-    const riderId = String(b.knightId == null ? "" : b.knightId).trim();
+    const riderId = normId(b.knightId);
     const st = staff.get(riderId);
     const hh = clues.get(riderId);
     const sep = splitSep(b.specialOrderCountDetailList);
@@ -394,7 +425,7 @@ function buildRows(bills, staff, clues) {
     const bind = num(b.accommodationFee) + num(b.vehicleRental);
     const bindTip = `住宿费用 ${money(b.accommodationFee)} ＋ 车辆租金 ${money(b.vehicleRental)}`;
     return {
-      billId: String(b.settleNum || ""), teamId: String(b.teamId || ""),
+      billId: String(b.settleNum || ""), teamId: normId(b.teamId),
       team: String(b.teamName || ""), riderId, riderName: String(b.knightName || ""),
       scheme: String(b.baseRuleName || ""),
       inOrders: num(b.scheduleOrderCount), outOrders: num(b.noScheduleOrderCount),
@@ -422,17 +453,18 @@ function buildRows(bills, staff, clues) {
 // 没取到数据时显示「—」而不是 0，避免被误读成「确实没有异常」。
 function attachDetail(rows) {
   for (const r of rows) {
-    const rid = r.riderId;
-    r.bad = state.attBad.get(rid) || 0;
+    // 同一骑手跨站时按「骑手 id + 站点 id」取各自的数据，不串站、不重复计数
+    const rid = r.riderId, tid = r.teamId;
+    r.bad = pairGet(state.attBad, rid, tid) || 0;
     r.badText = state.pendingAtt ? "…" : (state.attReady ? int(r.bad) : "—");
     // 首跑时间只给本月入职骑手：入职日期起第一个「全天」完单 > 0 的日期
     const isNew = /^\d{4}-\d{2}-\d{2}/.test(r.entry) && r.entry.slice(0, 7) === state.month;
-    const days = state.attRun.get(rid);
+    const days = pairGet(state.attRun, rid, tid);
     const first = isNew && days
       ? ([...days].filter((d) => d >= r.entry.slice(0, 10)).sort()[0] || "") : "";
     r.firstRun = first;
     r.firstRunText = state.pendingAtt ? "…" : (isNew ? (first || "—") : "—");
-    const f = state.kpi.get(rid) || {};
+    const f = pairGet(state.kpi, rid, tid) || {};
     r.lgt = f.lgt || 0; r.complain = f.complain || 0;
     r.negative = f.negative || 0; r.early = f.early || 0;
     const kt = (n) => state.pendingKpi ? "…" : (state.kpiReady ? int(n) : "—");
@@ -481,6 +513,7 @@ function renderSummary(rows) {
   const errs = Object.entries(state.errors).filter(([, v]) => v);
   const bits = [`共 <b>${int(state.rows.length)}</b> 条账单，当前筛选显示 <b>${int(rows.length)}</b> 条`];
   if (miss) bits.push(`<b>${int(miss)}</b> 条账单没在人资名单里匹配到（在职 / 入职 / 离职显示「—」）`);
+  if (state.crossSiteRiders) bits.push(`<b>${int(state.crossSiteRiders)}</b> 名骑手跨站点，出勤与坏单按「骑手id＋站点id」各站分开计`);
   if (errs.length) bits.push(`<b>${errs.length}</b> 个数据源未取到：${esc(errs.map(([k]) => SRC_LABEL[k] || k).join("、"))}`);
   $("wf-note").innerHTML = bits.join("　·　");
 }
@@ -500,7 +533,7 @@ function renderTable(rows) {
       const txt = isHtml ? raw : esc(raw);
       const title = key === "bindText" ? ` title="${esc(r.bindTip)}"`
         : key === "thirdHtml" && r.thirdName ? ` title="${esc(r.thirdName)}"`
-        : key === "badText" ? ' title="出勤明细中除全天外「是否达成 = 未达成」的班次数"'
+        : key === "badText" ? ' title="按骑手id＋站点id 统计：出勤明细中除全天外「是否达成 = 未达成」的班次数"'
         : key === "firstRunText" && r.firstRun ? ` title="入职 ${esc(r.entry)} 起首个全天有单日"` : "";
       const na = !isHtml && (raw === "—" || raw === "") ? " c-empty" : "";
       const hot = !isHtml && /^(badText|lgtText|complainText|negativeText|earlyText)$/.test(key)
@@ -541,11 +574,22 @@ function renderMeta() {
     "人资名单取全部状态（含离职）；绑定扣款 = 住宿费用 + 车辆租金；" +
     "本月班次异常数 = 出勤明细里除「全天」外「是否达成 = 未达成」的班次数；" +
     "首跑时间只给本月入职骑手，取入职日起首个「全天」完单 > 0 的日期；" +
-    "物流责 / 投诉 / 差评 / 提前点 = 考核运单明细里 4 类异常订单按骑手计数；金额单位人民币元。";
+    "物流责 / 投诉 / 差评 / 提前点 = 考核运单明细里 4 类异常订单计数；" +
+    "出勤异常 / 首跑 / 4 类坏单均按「骑手id＋站点id」归集，同一骑手跨站点各站分开计、不重复；金额单位人民币元。";
 }
 
 function applyData() {
-  state.rows = attachDetail(buildRows(state.bills, state.staff, state.clues));
+  const base = buildRows(state.bills, state.staff, state.clues);
+  // 先算「哪些骑手只有一个站点」，attachDetail 里的通配键兜底要用
+  const sites = new Map();
+  for (const r of base) {
+    const rid = normId(r.riderId);
+    if (!sites.has(rid)) sites.set(rid, new Set());
+    sites.get(rid).add(normId(r.teamId));
+  }
+  state.singleSiteRiders = new Set([...sites].filter(([, s]) => s.size === 1).map(([rid]) => rid));
+  state.crossSiteRiders = [...sites].filter(([, s]) => s.size > 1).length;
+  state.rows = attachDetail(base);
   renderSiteOptions();
   const rows = visibleRows();
   renderSummary(rows);
@@ -730,7 +774,18 @@ $("btn-clean").addEventListener("click", () => {
 window.addEventListener("keydown", (e) => { if (e.key === "Escape") clearNotice(); });
 
 // ---------------------------------------------------------------- 测试钩子
-// 注入三份样本数据后直接出表，不触发任何网络请求；CDP 回归用。
+// 注入样本数据后直接出表，不触发任何网络请求；CDP 回归用。
+// 明细键支持两种写法：复合键 "骑手id\u0001站点id"，或纯骑手id（归到通配站点，
+// 只在账单里该骑手只有一个站点时生效，兼容旧样本）。
+function hookPairMap(obj, conv) {
+  const out = new Map();
+  for (const [k, v] of Object.entries(obj || {})) {
+    const parts = String(k).split("\u0001");
+    const key = parts.length >= 2 ? pairKey(parts[0], parts[1]) : pairKey(k, ANY_SITE);
+    out.set(key, conv(v));
+  }
+  return out;
+}
 window.__SET_WORKFORCE__ = (obj) => {
   state.errors = obj.errors || {};
   if (Array.isArray(obj.bills)) state.bills = obj.bills;
@@ -741,13 +796,13 @@ window.__SET_WORKFORCE__ = (obj) => {
   if (obj.month && validMonth(obj.month)) { state.month = obj.month; $("month-picker").value = obj.month; }
   // 真机测试注入出勤 / 考核运单明细，不发网络请求
   if (obj.att) {
-    state.attBad = new Map(Object.entries(obj.att.bad || {}));
-    state.attRun = new Map(Object.entries(obj.att.run || {}).map(([k, v]) => [k, new Set(v || [])]));
+    state.attBad = hookPairMap(obj.att.bad, (v) => num(v));
+    state.attRun = hookPairMap(obj.att.run, (v) => new Set(v || []));
     state.attReady = true;
   }
   if (obj.kpi) {
-    state.kpi = new Map(Object.entries(obj.kpi).map(([k, v]) =>
-      [k, Object.assign({ lgt: 0, complain: 0, negative: 0, early: 0 }, v)]));
+    state.kpi = hookPairMap(obj.kpi, (v) =>
+      Object.assign({ lgt: 0, complain: 0, negative: 0, early: 0 }, v));
     state.kpiReady = true;
   }
   if (obj.attReady === false) { state.attReady = false; state.attBad = new Map(); state.attRun = new Map(); }
@@ -760,7 +815,8 @@ window.__SET_WORKFORCE__ = (obj) => {
 };
 window.__WF__ = { state, COLS, PAGE_COLS, buildRows, attachDetail, visibleRows, splitSep,
   staffMap, clueMap, money, attStatsFromSheets, monthSegments, monthBounds, exportCsv,
-  applyData, loadKpiFlags, loadAttendance, KPI_FILTERS };
+  applyData, loadKpiFlags, loadAttendance, KPI_FILTERS,
+  normId, pairKey, pairGet, hookPairMap };
 
 // ---------------------------------------------------------------- 初始化
 (async function init() {

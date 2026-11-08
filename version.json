@@ -1,6 +1,6 @@
 {
-  "version": "3.16.0",
-  "notes": "运力模块：账单ID 默认隐藏、仅导出 CSV 带出，「绑定扣款（住宿费用+车辆租金）」改名「绑定扣款」；新增 6 列（本月班次异常数（除全天）/ 首跑时间 / 物流责 / 投诉 / 差评 / 提前点），前两列取本月出勤明细按 7 天分段导出、后四列取 KPI 考核运单明细 4 类问题订单筛选（不拉全量运单），主表先出图再异步补列；发薪/预支服务费 4 列暂不添加",
-  "download": "https://github.com/hubiqi/fengshen-ext/releases/download/v3.16.0/fengshen-ext-v3.16.0.zip",
+  "version": "3.16.1",
+  "notes": "运力模块：本月班次异常数 / 首跑时间 / 物流责 / 投诉 / 差评 / 提前点 6 列改按「骑手id＋站点id」复合键归集，跨站骑手各站分开计、不重复；出勤明细与考核运单明细都读「站点ID」列（与账单 teamId 同体系），缺站点ID 时仅对该骑手只有一个站点的情况兜底",
+  "download": "https://github.com/hubiqi/fengshen-ext/releases/download/v3.16.1/fengshen-ext-v3.16.1.zip",
   "published_at": "2026-11-09"
 }

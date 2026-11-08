@@ -49,7 +49,7 @@
 <main class="sheet" id="sheet">
   <div class="doc-title">运力模块 · 骑手账单 × 人资 × 出勤 × 异常订单</div>
   <div class="doc-sub" id="doc-sub">账单月份 —&nbsp;&nbsp;&nbsp;&nbsp;生成时间 —</div>
-  <div class="doc-note" id="doc-note">数据源：骑手账单管家 → 账单查询 ＋ 人资综合服务 → 成员管理（全部状态）＋ 招募缺口管理 → 线索结果明细 ＋ 出勤统计 → 明细数据（本月）＋ KPI管理 → 考核运单明细（仅 4 类异常订单）；按骑手 id 合并，一行一条账单</div>
+  <div class="doc-note" id="doc-note">数据源：骑手账单管家 → 账单查询 ＋ 人资综合服务 → 成员管理（全部状态）＋ 招募缺口管理 → 线索结果明细 ＋ 出勤统计 → 明细数据（本月）＋ KPI管理 → 考核运单明细（仅 4 类异常订单）；账单主表按骑手 id 合并，一行一条账单；出勤与问题订单按「骑手 id ＋ 站点 id」归集</div>
 
   <div class="wf-summary" id="wf-summary"></div>
   <div class="wf-note" id="wf-note"></div>
@@ -59,7 +59,7 @@
   </div>
 
   <div class="doc-foot">一行 = 一条账单；同一骑手跨站会产生多条账单。账单ID 默认不显示，仅在「导出 CSV」时带出；绑定扣款 = 住宿费用 ＋ 车辆租金；取分离 / 送分离单量取自账单的「一口价单量明细」。</div>
-  <div class="doc-foot small" id="doc-foot-small">本月班次异常数取系统「未达成」标记（除全天）；首跑时间只给本月入职骑手；物流责 / 投诉 / 差评 / 提前点按考核运单明细里的问题订单计数。</div>
+  <div class="doc-foot small" id="doc-foot-small">本月班次异常数取系统「未达成」标记（除全天）；首跑时间只给本月入职骑手；物流责 / 投诉 / 差评 / 提前点按考核运单明细里的问题订单计数；出勤与坏单按「骑手 id ＋ 站点 id」各站分开计。</div>
 </main>
 
 <footer id="foot-meta" class="foot-meta"></footer>
