@@ -1,6 +1,6 @@
 {
-  "version": "3.20.0",
-  "notes": "出勤达成实排/应排两张表末列新增「时段排班率」= Σ(11 时段完成率 × 时段权重)/100：已结束班次按 min(有效出勤/应排,100%)，T0 未开始/进行中班次降级按 min(排班/应排,100%)，无该班次或应排 0 按 100%；总计行按整商逐时段重新加权；权重与排班模块共用 wb_sch_weights、改一次两边实时同步，全部本机重算 0 额外请求",
-  "download": "https://github.com/hubiqi/fengshen-ext/releases/download/v3.20.0/fengshen-ext-v3.20.0.zip",
+  "version": "3.20.1",
+  "notes": "修复运力模块冻结列的竖线边框异常：border-collapse 下 sticky 单元格的共享边框在横向滚动时断裂成透明缝，改用 inset 阴影自绘 1px 黑线，冻结区边界也改为黑色并移除半透明白/蓝阴影；更新条新增「打开下载文件夹」，README 写明 MV3 热更新边界并提供本机一键脚本 scripts/hot-update.command",
+  "download": "https://github.com/hubiqi/fengshen-ext/releases/download/v3.20.1/fengshen-ext-v3.20.1.zip",
   "published_at": "2026-11-09"
 }

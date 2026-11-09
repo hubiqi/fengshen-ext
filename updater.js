@@ -265,6 +265,12 @@ export async function handleUpdateMessage(msg) {
     case "WB_UPD_OPEN_EXTENSIONS":
       await chrome.tabs.create({ url: "chrome://extensions" });
       return { ok: true };
+    case "WB_UPD_OPEN_FOLDER":
+      // v3.20.1：MV3 扩展不能写自身安装目录，但可以把「下载」文件夹直接弹到用户面前，
+      // 省掉自己翻目录找 zip；解压覆盖后 checkDiskVersion() 会自动 reload。
+      try { await chrome.downloads.showDefaultFolder(); }
+      catch (e) { return { ok: false, error: String(e && e.message ? e.message : e) }; }
+      return { ok: true };
     default:
       return { ok: false, error: "未知的更新消息类型" };
   }

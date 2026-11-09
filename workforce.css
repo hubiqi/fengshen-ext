@@ -98,14 +98,20 @@ table.tbl.wf thead th.filtered button.wf-th-filter { color: #FBBF24; }
 /* ---------------------------------------------------------------- v3.18.0 冻结列
    左侧列 position:sticky，left 由 JS 按真实列宽逐个累加写入 inline style。
    冻结格必须自带不透明背景，否则滚动时会透出下层单元格。 */
-table.tbl.wf th.fz, table.tbl.wf td.fz { position: sticky; z-index: 3; background: #FFFFFF; }
+table.tbl.wf th.fz, table.tbl.wf td.fz { position: sticky; z-index: 3; background: #FFFFFF;
+  /* v3.20.1：border-collapse 下 sticky 单元格的共享边框会在横向滚动时断开成透明缝，
+     这里用 inset 阴影自绘 1px 黑竖线，冻结列之间的分隔线始终是黑色实线 */
+  box-shadow: inset -1px 0 0 #000000; }
 table.tbl.wf thead th.fz { z-index: 7; background: #2F5597; }
 table.tbl.wf tbody tr:nth-child(even) td.fz { background: #FAFBFE; }
 table.tbl.wf tbody tr:hover td.fz { background: #EFF6FF; }
 table.tbl.wf tbody td.fz.hot { background: #FEF2F2; }
+/* 冻结区最右边界：仍是 1px 黑线，另加一条淡黑阴影提示「左边是冻结区」，
+   替换旧版半透明白 / 半透明蓝阴影（那正是看起来像「透明空白」的来源） */
 table.tbl.wf th.fz-edge, table.tbl.wf td.fz-edge {
-  box-shadow: 3px 0 0 rgba(47, 85, 151, .28); }
-table.tbl.wf thead th.fz-edge { box-shadow: 3px 0 0 rgba(255, 255, 255, .45); }
+  box-shadow: inset -1px 0 0 #000000, 2px 0 0 rgba(0, 0, 0, .22); }
+table.tbl.wf thead th.fz-edge {
+  box-shadow: inset -1px 0 0 #000000, 2px 0 0 rgba(0, 0, 0, .35); }
 
 /* ---------------------------------------------------------------- 表头筛选 / 冻结列浮层 */
 .wf-pop { position: fixed; z-index: 9999; width: 268px; max-width: calc(100vw - 16px);

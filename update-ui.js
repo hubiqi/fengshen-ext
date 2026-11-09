@@ -113,6 +113,9 @@
 
     $("ub-skip").hidden = !hasNew;
     $("ub-ext").hidden = !downloaded;
+    // v3.20.1：下载完成后直接给一个打开「下载」文件夹的入口
+    const folder = $("ub-folder");
+    if (folder) folder.hidden = !downloaded;
   }
 
   // ---------------------------------------------------------------- 初始与同步
@@ -204,4 +207,11 @@
   });
 
   $("ub-ext").addEventListener("click", () => send({ type: "WB_UPD_OPEN_EXTENSIONS" }).catch(() => {}));
+
+  const btnFolder = $("ub-folder");
+  if (btnFolder) btnFolder.addEventListener("click", () => {
+    send({ type: "WB_UPD_OPEN_FOLDER" }).then((r) => {
+      if (r && r.ok === false) setHint("无法自动打开下载文件夹，请手动到系统「下载」目录找 zip。", true);
+    }).catch(() => setHint("无法自动打开下载文件夹，请手动到系统「下载」目录找 zip。", true));
+  });
 })();
