@@ -376,7 +376,7 @@ function renderAttTable(id, att, mode, periods) {
 
 // ---------------------------------------------------------------- 炸班明细矩阵（v3.14.0）
 // 一人一行 × 时段列：站点 / 姓名+id / 异常次数 / 各时段（✓ 达标、✗ 炸班、空 = 没排这个班）/
-// T-3 / T-2 / T-1（大前天、前天、昨日的异常班次汇总）/ 明日排班明细。
+// T-3 / T-2 / T-1（大前天、前天、昨日的异常班次汇总）/ T+1排班。
 // ✗ 直接来自 att.fails（与弹窗同源）；✓ 来自考勤原始表里「排班状态 = 排班」且不在 fails 的格子。
 // 这样不用重算判定标准，也不会和 ASSESS.build 的口径漂移。
 function scheduledSet(sheets) {
@@ -403,7 +403,7 @@ function splitShifts(v) {
   return s.split(/[、,，\/|;；\s]+/).map((x) => x.trim()).filter(Boolean);
 }
 
-/** 排班导出 endDate 已含次日，xlsx 天然带回所选日 + 明天的骑手排班，0 额外请求 */
+/** 排班导出 endDate 已含次日，xlsx 天然带回所选日（T）+ 次日（T+1）的骑手排班，0 额外请求 */
 function tomorrowSchedule(schSheets, date) {
   const target = shiftDate(date, 1);
   const out = new Map();
@@ -522,7 +522,7 @@ function matrixRows(att, periods) {
   for (const [rid, meta] of who) {
     const b = bad.get(rid);
     const cells = P.map((per) => b.has(per) ? "no" : (sched.has(rid + "\u0001" + per) ? "ok" : ""));
-    // bad 一并带出去：明日排班里与本日炸班同名的班次要标红并可点开追溯
+    // bad 一并带出去：T+1排班里与本日炸班同名的班次要标红并可点开追溯
     rows.push({ ...meta, bad: b, cells, cnt: cells.filter((c) => c === "no").length });
   }
   rows.sort((a, b) => (b.cnt - a.cnt) || String(a.site).localeCompare(String(b.site), "zh")
@@ -568,7 +568,7 @@ function renderRosterMatrix(att, periods) {
     `一人一行：<i class="mk ok">✓</i> 该班次达标、<i class="mk no">✗</i> 炸班、空白为没排这个班；` +
     `<b>异常次数</b> = 这一行 ✗ 的个数。` +
     `T-3 / T-2 / T-1 分别是大前天 / 前天 / 昨日的炸班班次汇总（— 为明细未取到），` +
-    `「明日排班明细」取排班导出里次日的每人时段。`
+    `「T+1排班」中 T = 当前所选日期，显示的是 T 的次日（T+1）排班；查历史日期时是「该日 + 1 天」，不是真实的明天，数据取自排班导出的次日每人时段。`
   ];
   if (live) {
     const skipped = att.periods.filter((p) => p !== "全天" && (att.ongoing || []).includes(p));
@@ -585,18 +585,18 @@ function renderRosterMatrix(att, periods) {
       ? "「全天」列为手动打开：今天还没结束，这一列仅供参考。"
       : "「全天」列是整天口径，与各班次列并列展示。");
   }
-  tips.push("明日排班明细按班次拆开显示：与本日炸班班次同名的标红，点标红班次可看该骑手近三天这个班次的日期 / 是否达标 / 有效时长 / 有效完单。");
+  tips.push("T+1排班按班次拆开显示：与本日炸班班次同名的标红，点标红班次可看该骑手近三天这个班次的日期 / 是否达标 / 有效时长 / 有效完单。");
   tips.push("名单取自考勤「排班状态 = 排班」的记录，与排班统计的「排班人数」可能差 1–2 人。");
   $("fr-note").innerHTML = tips.join(" ");
 
   // 列宽自适应：不写死 colgroup，交给 table-layout:auto 按内容分列；
-  // 「明日排班明细」允许整段换行，宁可把行撑高也不截断。
+  // 「T+1排班」允许整段换行，宁可把行撑高也不截断。
   const head = `<thead><tr><th>站点</th><th>姓名+id</th><th class="num">异常次数</th>` +
     P.map((p) => `<th class="per" title="${esc(p)}：✓ 达标 / ✗ 炸班 / 空 = 未排该班">${esc(p)}</th>`).join("") +
     `<th class="num" title="${hDates[0]} 炸班班次数">T-3</th>` +
     `<th class="num" title="${hDates[1]} 炸班班次数">T-2</th>` +
     `<th class="num" title="${hDates[2]} 炸班班次数">T-1</th>` +
-    `<th>明日排班明细</th></tr></thead>`;
+    `<th title="T = 当前所选日期；T+1 = 所选日期的次日排班。查历史日期时显示该日 + 1 天，不是真实的明天">T+1排班</th></tr></thead>`;
 
   const body = ["<tbody>"];
   for (const r of rows) {
@@ -605,7 +605,7 @@ function renderRosterMatrix(att, periods) {
     const tmText = tm ? (tm.length ? tm.join("、") : "休息") : "—";
     const tmHtml = tm && tm.length
       ? tm.map((p) => {
-          const hit = r.bad.has(p);      // 明天又排了今天炸掉的那个班 → 标红可点
+          const hit = r.bad.has(p);      // T+1 又排了本日炸掉的那个班 → 标红可点
           return `<span class="rm-shift${hit ? " hit" : ""}"` +
             (hit ? ` data-rid="${esc(r.rid)}" data-per="${esc(p)}" role="button" tabindex="0"` +
               ` title="${esc(p)}：本日炸班，点击查看近三天该班次追溯"` : "") +
@@ -820,7 +820,7 @@ function bindFailModal() {
 }
 
 // ---------------------------------------------------------------- 次日班次异常追溯弹窗（v3.14.0）
-// 点「明日排班明细」里标红的班次，列出该骑手近三天（T-3 / T-2 / T-1）在同一班次的
+// 点「T+1排班」里标红的班次，列出该骑手近三天（T-3 / T-2 / T-1）在同一班次的
 // 日期 / 是否达标 / 有效时长 / 有效完单。数据来自同一份历史出勤明细（state.histDetail），
 // 按日期缓存，点开时 0 额外请求。弹窗在 #sheet 之外，不会进「复制图片」。
 function riderMeta(rid) {

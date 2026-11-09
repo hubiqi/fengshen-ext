@@ -3,7 +3,7 @@
    本文件只放「实排达成 / 应排达成」两张宽表、概览区与日期选择器的样式。
    配色对齐用户提供的截图：浅色表头、细灰线、百分比绿/橙/红、下方灰字分子分母。
    总宽基准 1218px；达成矩阵固定列宽，炸班明细矩阵按内容自适应列宽（v3.14.0），
-   明日排班明细整段换行，不省略；画布宽度兜底跟着内容走，不裁掉右侧列。 */
+   T+1排班整段换行，不省略；画布宽度兜底跟着内容走，不裁掉右侧列。 */
 /* 工具条：日期选择（左右箭头步进）+ 数据源标签（不属于导出画面） */
 .date-pick { font-size: 12px; color: #374151; display: inline-flex; align-items: center;
   gap: 4px; white-space: nowrap; }
@@ -71,9 +71,9 @@ body.clean.att-page .notice, body.clean.att-page .progress-wrap,
 body.clean.att-page .foot-meta { display: none !important; }
 
 /* ---------- 炸班明细矩阵（v3.14.0，替代 v3.13 的按班次分行清单） ----------
-   一人一行 × 时段列：站点 / 姓名+id / 异常次数 / 各时段 ✓✗ / T-3 / T-2 / T-1 / 明日排班明细。
+   一人一行 × 时段列：站点 / 姓名+id / 异常次数 / 各时段 ✓✗ / T-3 / T-2 / T-1 / T+1排班。
    ✓ 绿、✗ 红、空白 = 没排这个班；列按当日排班动态生成，列宽由内容自适应（无 colgroup），
-   明日排班明细自动换行完整显示；命中本日炸班的班次标红、可点开近三天追溯。
+   T+1排班自动换行完整显示；命中本日炸班的班次标红、可点开近三天追溯。
    放在 #sheet 内 → 跟着「复制图片」一起导出；标题右侧的「全天」开关沿用 v3.13.1。 */
 .fail-roster[hidden] { display: none !important; }
 .fail-roster { width: 100%; }
@@ -104,7 +104,7 @@ table.tbl.fr thead th.per { font-size: 10.5px; letter-spacing: -0.2px; padding: 
 table.tbl.fr thead th.num { text-align: center; }
 table.tbl.fr tbody td { height: 32px; font-size: 12px; color: #374151; }
 table.tbl.fr tbody tr:nth-child(even) td { background: #FAFBFD; }
-/* 只有数值 / 时段格做省略；站点、姓名、明日排班都完整显示，宁可换行不截断 */
+/* 只有数值 / 时段格做省略；站点、姓名、T+1排班都完整显示，宁可换行不截断 */
 table.tbl.fr td.rm-cnt,
 table.tbl.fr td.rm-hist, table.tbl.fr td.rm-cell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 table.tbl.fr td.rm-site { min-width: 112px; color: #4B5563; font-size: 11px;
@@ -119,7 +119,7 @@ table.tbl.fr td.rm-cell { min-width: 42px; text-align: center; padding: 4px 0; }
 table.tbl.fr td.rm-cell.blank { background: #FFFFFF; }
 table.tbl.fr td.rm-tmr { min-width: 260px; font-size: 10.5px; color: #4B5563;
   white-space: normal; word-break: break-word; overflow: visible; line-height: 1.7; }
-/* 明日排班按班次拆成小块；命中本日异常班次的标红并可点开近三天追溯 */
+/* T+1排班按班次拆成小块；命中本日异常班次的标红并可点开近三天追溯 */
 table.tbl.fr .rm-shift { display: inline-block; margin: 1px 1px; padding: 0 2px;
   border-radius: 3px; font-size: 10.5px; color: #4B5563; border: 1px solid transparent; }
 table.tbl.fr .rm-shift.hit { color: #B91C1C; background: #FEF2F2; border-color: #FECACA;

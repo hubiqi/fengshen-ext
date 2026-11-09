@@ -1,6 +1,6 @@
 {
-  "version": "3.16.1",
-  "notes": "运力模块：本月班次异常数 / 首跑时间 / 物流责 / 投诉 / 差评 / 提前点 6 列改按「骑手id＋站点id」复合键归集，跨站骑手各站分开计、不重复；出勤明细与考核运单明细都读「站点ID」列（与账单 teamId 同体系），缺站点ID 时仅对该骑手只有一个站点的情况兜底",
-  "download": "https://github.com/hubiqi/fengshen-ext/releases/download/v3.16.1/fengshen-ext-v3.16.1.zip",
+  "version": "3.16.2",
+  "notes": "出勤达成：炸班明细矩阵最后一列由「明日排班明细」改名为「T+1排班」；T 为当前所选日期，查历史日期时显示该日 + 1 天的排班而非真实的明天；表头 hover 与页面说明同步写明口径，取数、标红与近三天追溯逻辑不变",
+  "download": "https://github.com/hubiqi/fengshen-ext/releases/download/v3.16.2/fengshen-ext-v3.16.2.zip",
   "published_at": "2026-11-09"
 }
