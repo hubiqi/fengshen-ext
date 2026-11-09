@@ -1,6 +1,6 @@
 {
-  "version": "3.17.0",
-  "notes": "新增第四个独立入口「排班模块」：复用现有 exportSchedule/1.0 排班导出，按商圈片/站点给出各时段缺口、排班率(百分比)、分数与 4排班占比；日期默认 T+1，站点多选、维度切换、显示方式切换均本机重算 0 额外请求",
-  "download": "https://github.com/hubiqi/fengshen-ext/releases/download/v3.17.0/fengshen-ext-v3.17.0.zip",
+  "version": "3.18.0",
+  "notes": "运力模块表头支持点击排序（升序/降序/取消）与每列唯一值多选筛选，表头纵向冻结、左侧列可自定义冻结一列或几列并本机记忆；排序与筛选同步作用于页面、导出CSV与复制图片，全部纯前端重算、0 额外请求",
+  "download": "https://github.com/hubiqi/fengshen-ext/releases/download/v3.18.0/fengshen-ext-v3.18.0.zip",
   "published_at": "2026-11-09"
 }

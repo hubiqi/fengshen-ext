@@ -32,7 +32,7 @@
 .wf-note b { color: #1F2937; }
 
 /* ---------------------------------------------------------------- 明细表 */
-.tbl-scroll.wf-scroll { overflow-x: auto; margin-top: 18px; }
+.tbl-scroll.wf-scroll { overflow: auto; margin-top: 18px; max-height: 72vh; }
 table.tbl.wf { table-layout: auto; width: max-content; min-width: 1240px;
   margin: 0 auto; font-size: 11.5px; }
 table.tbl.wf thead th { height: 42px; font-size: 11.5px; line-height: 1.35;
@@ -72,6 +72,73 @@ table.tbl.wf i.mk.no { color: #B91C1C; }
 table.tbl.wf i.mk.third { color: #7C3AED; }
 table.tbl.wf i.mk.na { color: #9CA3AF; font-weight: 400; }
 table.tbl.wf tr.wf-empty td { height: 90px; color: #6B7280; font-size: 13px; }
+
+/* ---------------------------------------------------------------- v3.18.0 表头排序 / 列筛选
+   表头文字仍是纯文本（排序箭头与筛选按钮都用 CSS 伪元素画），
+   复制图片与 CSV 的表头口径不受影响；交互控件只留在屏幕上。 */
+.wf-state { font-size: 11.5px; color: #1D4ED8; line-height: 1.5; }
+table.tbl.wf thead th { position: sticky; top: 0; z-index: 5; cursor: pointer;
+  user-select: none; background: #2F5597; }
+table.tbl.wf thead th:hover { background: #24457C; }
+/* 未排序的列默认不显示箭头，悬停才提示可点击，避免 22 列表头全是符号 */
+table.tbl.wf thead th::after { content: ""; font-size: 10px; font-weight: 400;
+  color: #B9C9E8; letter-spacing: 0; }
+table.tbl.wf thead th:hover::after { content: " ⇅"; }
+table.tbl.wf thead th.sort-asc::after { content: " ↑"; color: #FDE68A; font-weight: 700; }
+table.tbl.wf thead th.sort-desc::after { content: " ↓"; color: #FDE68A; font-weight: 700; }
+table.tbl.wf thead th.filtered { box-shadow: inset 0 -3px 0 #F59E0B; }
+/* 空按钮：textContent 为空，表头文字与导出图保持原样；▾ 由伪元素绘制 */
+table.tbl.wf thead th button.wf-th-filter { border: 0; background: transparent;
+  color: #CFDDF5; padding: 0 0 0 3px; margin: 0; font-size: 10px; line-height: 1;
+  cursor: pointer; vertical-align: 1px; }
+table.tbl.wf thead th button.wf-th-filter::before { content: "▾"; }
+table.tbl.wf thead th button.wf-th-filter:hover { color: #FFFFFF; background: transparent; }
+table.tbl.wf thead th.filtered button.wf-th-filter { color: #FBBF24; }
+
+/* ---------------------------------------------------------------- v3.18.0 冻结列
+   左侧列 position:sticky，left 由 JS 按真实列宽逐个累加写入 inline style。
+   冻结格必须自带不透明背景，否则滚动时会透出下层单元格。 */
+table.tbl.wf th.fz, table.tbl.wf td.fz { position: sticky; z-index: 3; background: #FFFFFF; }
+table.tbl.wf thead th.fz { z-index: 7; background: #2F5597; }
+table.tbl.wf tbody tr:nth-child(even) td.fz { background: #FAFBFE; }
+table.tbl.wf tbody tr:hover td.fz { background: #EFF6FF; }
+table.tbl.wf tbody td.fz.hot { background: #FEF2F2; }
+table.tbl.wf th.fz-edge, table.tbl.wf td.fz-edge {
+  box-shadow: 3px 0 0 rgba(47, 85, 151, .28); }
+table.tbl.wf thead th.fz-edge { box-shadow: 3px 0 0 rgba(255, 255, 255, .45); }
+
+/* ---------------------------------------------------------------- 表头筛选 / 冻结列浮层 */
+.wf-pop { position: fixed; z-index: 9999; width: 268px; max-width: calc(100vw - 16px);
+  background: #FFFFFF; border: 1px solid #C7D2E5; border-radius: 8px;
+  box-shadow: 0 10px 30px rgba(15, 23, 42, .22); padding: 10px 11px;
+  font-size: 12px; color: #374151; }
+.wf-pop[hidden] { display: none; }
+.wf-pop-head { display: flex; align-items: center; justify-content: space-between;
+  font-weight: 700; font-size: 12.5px; color: #1F2937; padding-bottom: 8px;
+  border-bottom: 1px solid #E5E7EB; }
+.wf-pop-head button { border: 0; background: transparent; font-size: 16px;
+  padding: 0 2px; line-height: 1; color: #6B7280; }
+.wf-pop-tools { display: flex; gap: 6px; align-items: center; margin: 8px 0; flex-wrap: wrap; }
+.wf-pop-tools button { padding: 3px 8px; font-size: 11px; }
+.wf-pop-tools input.wf-pop-search { flex: 1 1 120px; min-width: 90px; height: 26px;
+  font-size: 11.5px; padding: 0 7px; border: 1px solid #D1D5DB; border-radius: 5px; }
+.wf-pop-list { max-height: 292px; overflow: auto; border: 1px solid #E5E7EB;
+  border-radius: 5px; padding: 4px; }
+.wf-pop-item { display: flex; align-items: center; gap: 7px; padding: 4px 5px;
+  border-radius: 4px; cursor: pointer; line-height: 1.4; }
+.wf-pop-item:hover { background: #F3F6FC; }
+.wf-pop-item input { margin: 0; flex: 0 0 auto; }
+.wf-pop-item .v { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; }
+.wf-pop-item .n { color: #9CA3AF; font-size: 11px; flex: 0 0 auto; }
+.wf-pop-empty { color: #9CA3AF; padding: 10px 6px; text-align: center; }
+.wf-pop-foot { display: flex; gap: 8px; align-items: center; justify-content: space-between;
+  margin-top: 9px; }
+.wf-pop-foot .hint { font-size: 11px; color: #6B7280; line-height: 1.5; }
+.wf-pop-foot button { padding: 4px 10px; font-size: 11.5px; white-space: nowrap; }
+.wf-pop.freeze { width: 296px; }
+.wf-pop.freeze .wf-pop-list { max-height: 340px; }
+body.clean .wf-pop { display: none !important; }
 
 @media (max-width: 1260px) {
   .wf-summary, .wf-note { padding-left: 12px; padding-right: 12px; }

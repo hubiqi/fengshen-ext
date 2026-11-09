@@ -29,6 +29,10 @@
  * v3.16.1：出勤异常 / 首跑 / 4 类坏单改按「骑手 id ＋ 站点 id」聚合，
  *          两个源都读「站点ID」列（与账单 teamId 同体系）；缺站点ID 时归通配键，
  *          仅当该骑手在账单里只有一个站点时才兜底采用，避免跨站串数。
+ * v3.18.0：表头点击排序（升序 → 降序 → 取消）＋ 每列漏斗筛选（唯一值多选）；
+ *          表头纵向冻结，左侧列可自定义冻结（一列或几列、localStorage 记忆）。
+ *          排序与筛选统一作用于页面 / CSV / 复制图片；冻结只是屏幕上的滚动行为，
+ *          导出图由 capture.js 关掉 sticky 后还原成完整表格。
  */
 
 const XT = "https://httpizza.ele.me/xtop/";
@@ -125,10 +129,33 @@ const COLS = [
 ];
 const PAGE_COLS = COLS.filter((c) => c.page !== false);
 
+// v3.18.0：排序用「原始数值」而不是带 ¥ / 千分位的显示串；这些 csv 字段都是数值型。
+const NUM_CSV = new Set(["inOrders", "outOrders", "takeSep", "giveSep", "total",
+  "prepay", "bind", "bad", "lgt", "complain", "negative", "early"]);
+const COLLATOR = new Intl.Collator("zh-CN", { numeric: true, sensitivity: "base" });
+const LS_FROZEN = "wb_wf_frozen";
+const DEFAULT_FROZEN = ["teamId", "team"];   // 默认冻结最左两列，可在面板里任意改
+const MAX_FROZEN = 6;                        // 冻结太多会把可滚动区盖住，给个上限
+function loadFrozen() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(LS_FROZEN) || "null");
+    if (Array.isArray(raw)) {
+      const valid = raw.filter((k) => PAGE_COLS.some((c) => c.k === k));
+      return [...new Set(valid)].slice(0, MAX_FROZEN);
+    }
+  } catch (e) { /* 偏好损坏则用默认 */ }
+  return DEFAULT_FROZEN.slice();
+}
+
 const state = {
   via: localStorage.getItem("wb_via") || "direct",
   month: validMonth(localStorage.getItem("wb_wf_month")) ? localStorage.getItem("wb_wf_month") : curMonth(),
   query: "", site: "", third: "",
+  // 表头视图状态：排序（key + 1 升 / -1 降 / 0 无）、列筛选（k -> Set(显示值)）、冻结列 key 列表
+  sort: { key: "", dir: 0 },
+  colFilters: Object.create(null),
+  frozen: loadFrozen(),
+  pop: { type: "", key: "", anchor: null },
   loading: false, gen: 0,
   bills: [], staff: new Map(), clues: new Map(),
   errors: {}, rows: [], loadedAt: null,
@@ -474,20 +501,88 @@ function attachDetail(rows) {
   return rows;
 }
 
-// ---------------------------------------------------------------- 筛选 / 排序
-function visibleRows() {
+// ---------------------------------------------------------------- 筛选 / 排序（v3.18.0）
+// 单元格的「纯文本值」：页面渲染、列筛选候选值、排序比较共用同一口径。
+// 两个 HTML 标记列用对应的文本字段，其余直接取展示串（金额带 ¥、时间已格式化）。
+function cellText(r, c) {
+  if (!r || !c) return "";
+  if (c.k === "onJobHtml") return r.onJob || "—";
+  if (c.k === "thirdHtml") return r.thirdYesRaw || "否";
+  const v = r[c.k];
+  return v == null ? "" : String(v);
+}
+// 「—」「…」与空串都表示「暂无数据」，排序时永远排最后（升降序都一样）。
+const EMPTY_CELL = new Set(["", "—", "…", "-"]);
+function sortVal(r, c) {
+  const t = cellText(r, c).trim();
+  if (EMPTY_CELL.has(t)) return null;
+  if (NUM_CSV.has(c.csv)) {
+    const n = num(r[c.csv]);
+    return Number.isFinite(n) && r[c.csv] != null ? n : null;
+  }
+  return t;
+}
+function compareCell(a, b) {
+  if (a === null && b === null) return 0;
+  if (a === null) return 1;
+  if (b === null) return -1;
+  return typeof a === "number" ? a - b : COLLATOR.compare(String(a), String(b));
+}
+function defaultCompare(a, b) {
+  return a.team.localeCompare(b.team, "zh")
+    || a.riderName.localeCompare(b.riderName, "zh")
+    || a.billId.localeCompare(b.billId);
+}
+// exceptKey：算某列筛选候选值时排除该列自身，做法同 Excel（其它筛选照常生效）。
+function filteredRows(exceptKey) {
   const q = state.query.trim().toLowerCase();
-  const rows = state.rows.filter((r) => {
+  const active = Object.entries(state.colFilters)
+    .filter(([k, set]) => set && set.size && k !== exceptKey)
+    .map(([k, set]) => {
+      const c = PAGE_COLS.find((x) => x.k === k);
+      return c ? { c, set } : null;
+    }).filter(Boolean);
+  return state.rows.filter((r) => {
     if (state.site && r.team !== state.site) return false;
     if (state.third === "yes" && !r.thirdYes) return false;
     if (state.third === "no" && r.thirdYes) return false;
     if (q && ![r.billId, r.team, r.teamId, r.riderId, r.riderName, r.scheme]
       .some((v) => String(v).toLowerCase().includes(q))) return false;
+    for (const { c, set } of active) if (!set.has(cellText(r, c))) return false;
     return true;
   });
-  return rows.sort((a, b) =>
-    a.team.localeCompare(b.team, "zh") || a.riderName.localeCompare(b.riderName, "zh") || a.billId.localeCompare(b.billId));
 }
+function visibleRows() {
+  const rows = filteredRows(null);
+  const c = state.sort.key ? PAGE_COLS.find((x) => x.k === state.sort.key) : null;
+  if (c && state.sort.dir) {
+    return rows.sort((a, b) => {
+      const va = sortVal(a, c), vb = sortVal(b, c);
+      // 「—」「…」等无数据行永远垫底，升序降序都一样；不能乘上 dir 把它们翻到最前
+      if (va === null || vb === null) {
+        if (va === null && vb === null) return defaultCompare(a, b);
+        return va === null ? 1 : -1;
+      }
+      return (compareCell(va, vb) * state.sort.dir) || defaultCompare(a, b);
+    });
+  }
+  return rows.sort(defaultCompare);
+}
+function toggleSort(key) {
+  const s = state.sort;
+  if (s.key !== key) { s.key = key; s.dir = 1; }
+  else if (s.dir === 1) s.dir = -1;
+  else { s.key = ""; s.dir = 0; }
+  closePop();
+  applyData();
+}
+function clearView() {
+  state.sort = { key: "", dir: 0 };
+  state.colFilters = Object.create(null);
+  closePop();
+  applyData();
+}
+function activeFilterCount() { return Object.keys(state.colFilters).length; }
 
 // ---------------------------------------------------------------- 渲染
 function renderSummary(rows) {
@@ -520,7 +615,17 @@ function renderSummary(rows) {
 
 function renderTable(rows) {
   const t = $("wf-table");
-  const head = "<thead><tr>" + PAGE_COLS.map((c) => `<th>${esc(c.h)}</th>`).join("") + "</tr></thead>";
+  // 表头文字保持纯文本：排序箭头与筛选按钮都是 CSS 伪元素 / 空按钮，
+  // textContent 仍是原来的列名，复制图片与 CSV 表头不受交互控件影响。
+  const head = "<thead><tr>" + PAGE_COLS.map((c, i) => {
+    const cls = (state.sort.key === c.k && state.sort.dir === 1) ? " sort-asc"
+      : (state.sort.key === c.k && state.sort.dir === -1) ? " sort-desc" : "";
+    const filtered = state.colFilters[c.k] ? " filtered" : "";
+    const tip = `${c.h}：点击表头按此列排序（升序 → 降序 → 取消）；点右侧 ▾ 按此列筛选`;
+    return `<th class="${cls.trim()}${filtered}" data-sort="${esc(c.k)}" data-i="${i}" title="${esc(tip)}">`
+      + `${esc(c.h)}<button type="button" class="wf-th-filter" data-filter="${esc(c.k)}"`
+      + ` aria-label="按${esc(c.h)}筛选" title="按「${esc(c.h)}」筛选"></button></th>`;
+  }).join("") + "</tr></thead>";
   const body = ["<tbody>"];
   if (!rows.length) {
     body.push(`<tr class="wf-empty"><td colspan="${PAGE_COLS.length}">没有符合条件的账单${state.rows.length ? "（试试清空搜索或筛选）" : "（可切换月份或点「立即刷新」）"}</td></tr>`);
@@ -528,21 +633,212 @@ function renderTable(rows) {
   for (const r of rows) {
     body.push("<tr>" + PAGE_COLS.map((c) => {
       const key = c.k;
-      const raw = r[key] == null ? "" : r[key];
+      const raw = cellText(r, c);
       const isHtml = key === "onJobHtml" || key === "thirdHtml";
-      const txt = isHtml ? raw : esc(raw);
+      const txt = isHtml ? (r[key] == null ? "" : r[key]) : esc(raw);
       const title = key === "bindText" ? ` title="${esc(r.bindTip)}"`
         : key === "thirdHtml" && r.thirdName ? ` title="${esc(r.thirdName)}"`
         : key === "badText" ? ' title="按骑手id＋站点id 统计：出勤明细中除全天外「是否达成 = 未达成」的班次数"'
         : key === "firstRunText" && r.firstRun ? ` title="入职 ${esc(r.entry)} 起首个全天有单日"` : "";
-      const na = !isHtml && (raw === "—" || raw === "") ? " c-empty" : "";
+      const na = !isHtml && (raw === "—" || raw === "" || raw === "…") ? " c-empty" : "";
       const hot = !isHtml && /^(badText|lgtText|complainText|negativeText|earlyText)$/.test(key)
         && Number(raw) > 0 ? " hot" : "";
-      return `<td class="${c.cls || ""}${na}${hot}"${title}>${txt}</td>`;
+      return `<td class="${(c.cls || "") + na + hot}"${title}>${txt}</td>`;
     }).join("") + "</tr>");
   }
   body.push("</tbody>");
   t.innerHTML = head + body.join("");
+  applyFreeze();
+  renderViewState();
+}
+
+// ---------------------------------------------------------------- v3.18.0 冻结列
+// left 必须按「前面所有冻结列的真实宽度」累加，不能写死；列宽由内容决定，
+// 筛选 / 排序 / 切月后都会变，所以每次重绘与窗口 resize 都重算一次。
+function applyFreeze() {
+  const t = $("wf-table");
+  if (!t) return;
+  const ths = [...t.querySelectorAll("thead th")];
+  if (!ths.length) return;
+  const idx = state.frozen.map((k) => PAGE_COLS.findIndex((c) => c.k === k))
+    .filter((i) => i >= 0).sort((a, b) => a - b);
+  const last = idx.length ? idx[idx.length - 1] : -1;
+  let left = 0;
+  const offsets = new Map();
+  for (const i of idx) {
+    offsets.set(i, left);
+    left += ths[i] ? ths[i].getBoundingClientRect().width : 0;
+  }
+  for (const tr of t.querySelectorAll("tr")) {
+    const cells = [...tr.children];
+    cells.forEach((td, i) => {
+      const hit = offsets.has(i);
+      td.classList.toggle("fz", hit);
+      td.classList.toggle("fz-edge", hit && i === last);
+      if (hit) td.style.left = Math.round(offsets.get(i)) + "px";
+      else td.style.left = "";
+    });
+  }
+  updateScrollClip();
+}
+
+// CSS sticky 只会「盖住」被滚走的列，滚到一半的列仍会在冻结边界右侧露出几个数字，
+// 看起来像数据错位。这里把完全进入冻结区的非冻结列整列隐藏，行为与 Excel 一致。
+// 只是屏幕上的滚动表现：capture.js 导出图会强制 visibility:visible 还原全部列。
+let clipPending = false;
+function updateScrollClip() {
+  const t = $("wf-table"), sc = $("wf-scroll");
+  if (!t || !sc) return;
+  const ths = [...t.querySelectorAll("thead th")];
+  if (!ths.length) return;
+  const frozenIdx = new Set(state.frozen.map((k) => PAGE_COLS.findIndex((c) => c.k === k))
+    .filter((i) => i >= 0));
+  const widths = ths.map((th) => th.getBoundingClientRect().width);
+  const frozenWidth = [...frozenIdx].reduce((w, i) => w + (widths[i] || 0), 0);
+  const scrollLeft = sc.scrollLeft;
+  const hide = new Set();
+  if (scrollLeft > 0 && frozenWidth > 0) {
+    let x = 0;
+    widths.forEach((w, i) => {
+      // 只要列左边界还落在冻结区里就整列隐藏（含只被盖住一部分的列），
+      // 这样冻结边界右侧永远从完整的一列开始，不会露出半截数字。
+      if (!frozenIdx.has(i) && x - scrollLeft < frozenWidth - 2) hide.add(i);
+      x += w;
+    });
+  }
+  for (const tr of t.querySelectorAll("tr")) {
+    [...tr.children].forEach((td, i) => { td.style.visibility = hide.has(i) ? "hidden" : ""; });
+  }
+}
+function setFrozen(keys) {
+  const valid = [...new Set((keys || []).filter((k) => PAGE_COLS.some((c) => c.k === k)))]
+    .sort((a, b) => PAGE_COLS.findIndex((c) => c.k === a) - PAGE_COLS.findIndex((c) => c.k === b))
+    .slice(0, MAX_FROZEN);
+  state.frozen = valid;
+  try { localStorage.setItem(LS_FROZEN, JSON.stringify(valid)); } catch (e) { /* ignore */ }
+  applyFreeze();
+  renderViewState();
+}
+function renderViewState() {
+  const bits = [];
+  if (state.sort.key && state.sort.dir) {
+    const c = PAGE_COLS.find((x) => x.k === state.sort.key);
+    if (c) bits.push(`排序：${c.h} ${state.sort.dir > 0 ? "↑" : "↓"}`);
+  }
+  if (activeFilterCount()) bits.push(`列筛选 ${activeFilterCount()} 列`);
+  bits.push(`冻结 ${state.frozen.length} 列`);
+  $("wf-state").textContent = bits.join("　·　");
+  $("btn-freeze").textContent = `冻结列 (${state.frozen.length})`;
+  $("btn-clear-view").disabled = !state.sort.key && !activeFilterCount();
+}
+
+// ---------------------------------------------------------------- v3.18.0 表头浮层
+function popEl() { return $("wf-pop"); }
+function closePop() {
+  const p = popEl();
+  if (p) { p.hidden = true; p.innerHTML = ""; }
+  state.pop = { type: "", key: "", anchor: null };
+}
+function placePop(anchor) {
+  const p = popEl();
+  p.hidden = false;
+  const r = anchor.getBoundingClientRect();
+  const w = p.offsetWidth || 268, h = p.offsetHeight || 320;
+  let x = Math.min(r.left, window.innerWidth - w - 8);
+  let y = r.bottom + 6;
+  if (y + h > window.innerHeight - 8) y = Math.max(8, r.top - h - 6);
+  p.style.left = Math.max(8, Math.round(x)) + "px";
+  p.style.top = Math.round(y) + "px";
+}
+function colValues(key) {
+  const c = PAGE_COLS.find((x) => x.k === key);
+  if (!c) return [];
+  const m = new Map();
+  for (const r of filteredRows(key)) {
+    const v = cellText(r, c);
+    m.set(v, (m.get(v) || 0) + 1);
+  }
+  const emptyLast = (v) => EMPTY_CELL.has(String(v).trim()) ? 1 : 0;
+  return [...m].sort((a, b) => {
+    if (emptyLast(a[0]) !== emptyLast(b[0])) return emptyLast(a[0]) - emptyLast(b[0]);
+    return NUM_CSV.has(c.csv)
+      ? num(String(a[0]).replace(/[^\d.-]/g, "")) - num(String(b[0]).replace(/[^\d.-]/g, ""))
+      : COLLATOR.compare(a[0], b[0]);
+  });
+}
+function openFilterPop(key, anchor) {
+  const c = PAGE_COLS.find((x) => x.k === key);
+  if (!c) return;
+  const values = colValues(key);
+  const chosen = state.colFilters[key];
+  const p = popEl();
+  p.className = "wf-pop";
+  p.innerHTML =
+    `<div class="wf-pop-head"><span>按「${esc(c.h)}」筛选</span><button type="button" data-act="close" title="关闭">×</button></div>`
+    + `<div class="wf-pop-tools"><input type="search" class="wf-pop-search" placeholder="搜索取值…" aria-label="搜索取值">`
+    + `<button type="button" data-act="all">全选</button><button type="button" data-act="none">清空</button></div>`
+    + `<div class="wf-pop-list">` + (values.length ? values.map(([v, n]) =>
+      `<label class="wf-pop-item" data-v="${esc(v)}"><input type="checkbox" data-v="${esc(v)}"`
+      + `${!chosen || chosen.has(v) ? " checked" : ""}><span class="v" title="${esc(v)}">${esc(v || "（空）")}</span>`
+      + `<span class="n">${n}</span></label>`).join("")
+      : `<div class="wf-pop-empty">当前数据没有可用的取值</div>`) + `</div>`
+    + `<div class="wf-pop-foot"><button type="button" data-act="clear">清除该列</button>`
+    + `<button type="button" class="primary" data-act="apply">应用</button></div>`;
+  state.pop = { type: "filter", key, anchor };
+  placePop(anchor);
+}
+function openFreezePop(anchor) {
+  const p = popEl();
+  p.className = "wf-pop freeze";
+  p.innerHTML =
+    `<div class="wf-pop-head"><span>冻结左侧列（可指定一列或几列）</span>`
+    + `<button type="button" data-act="close" title="关闭">×</button></div>`
+    + `<div class="wf-pop-tools"><button type="button" data-act="none">不冻结</button>`
+    + `<button type="button" data-act="default">默认（站点id＋站点）</button></div>`
+    + `<div class="wf-pop-list">` + PAGE_COLS.map((c, i) =>
+      `<label class="wf-pop-item"><input type="checkbox" data-freeze="${esc(c.k)}"`
+      + `${state.frozen.includes(c.k) ? " checked" : ""}>`
+      + `<span class="v">${i + 1}. ${esc(c.h)}</span></label>`).join("") + `</div>`
+    + `<div class="wf-pop-foot"><span class="hint">表头始终冻结；建议从左起连续勾选，最多 ${MAX_FROZEN} 列</span>`
+    + `<button type="button" class="primary" data-act="close">完成</button></div>`;
+  state.pop = { type: "freeze", key: "", anchor };
+  placePop(anchor);
+}
+function applyFilterPop() {
+  const p = popEl();
+  const boxes = [...p.querySelectorAll('input[type="checkbox"][data-v]')];
+  const all = boxes.length;
+  const picked = boxes.filter((b) => b.checked).map((b) => b.dataset.v);
+  if (!picked.length) {
+    showNotice("至少要保留一个取值；如需取消筛选，请点「清除该列」。", "blue");
+    return;
+  }
+  if (picked.length === all) delete state.colFilters[state.pop.key];
+  else state.colFilters[state.pop.key] = new Set(picked);
+  closePop();
+  applyData();
+}
+function onPopClick(e) {
+  const btn = e.target.closest("[data-act]");
+  if (!btn) return;
+  const act = btn.dataset.act;
+  if (act === "close") { closePop(); return; }
+  const p = popEl();
+  if (state.pop.type === "filter") {
+    const boxes = [...p.querySelectorAll('input[type="checkbox"][data-v]')];
+    if (act === "all" || act === "none") boxes.forEach((b) => { b.checked = act === "all"; });
+    if (act === "apply") applyFilterPop();
+    if (act === "clear") {
+      delete state.colFilters[state.pop.key];
+      closePop(); applyData();
+    }
+  } else if (state.pop.type === "freeze") {
+    if (act === "none" || act === "default") {
+      const want = act === "default" ? DEFAULT_FROZEN : [];
+      p.querySelectorAll("input[data-freeze]").forEach((b) => { b.checked = want.includes(b.dataset.freeze); });
+      setFrozen(want);
+    }
+  }
 }
 
 function renderSiteOptions() {
@@ -739,6 +1035,47 @@ $("wf-search").addEventListener("input", (e) => { state.query = e.target.value; 
 $("wf-site").addEventListener("change", (e) => { state.site = e.target.value; applyData(); });
 $("wf-third").addEventListener("change", (e) => { state.third = e.target.value; applyData(); });
 $("btn-export-csv").addEventListener("click", exportCsv);
+
+// ---- v3.18.0：表头排序 / 列筛选 / 冻结列交互 ----
+$("wf-table").addEventListener("click", (e) => {
+  const f = e.target.closest && e.target.closest("[data-filter]");
+  if (f) { openFilterPop(f.dataset.filter, f); return; }
+  const th = e.target.closest && e.target.closest("th[data-sort]");
+  if (th) toggleSort(th.dataset.sort);
+});
+$("btn-freeze").addEventListener("click", (e) => {
+  if (!popEl().hidden && state.pop.type === "freeze") { closePop(); return; }
+  openFreezePop(e.currentTarget);
+});
+$("btn-clear-view").addEventListener("click", clearView);
+$("wf-pop").addEventListener("click", onPopClick);
+$("wf-pop").addEventListener("input", (e) => {
+  if (!e.target.classList || !e.target.classList.contains("wf-pop-search")) return;
+  const q = e.target.value.trim().toLowerCase();
+  popEl().querySelectorAll(".wf-pop-item[data-v]").forEach((it) => {
+    it.hidden = !!q && !String(it.dataset.v).toLowerCase().includes(q);
+  });
+});
+$("wf-pop").addEventListener("change", (e) => {
+  if (!e.target.matches || !e.target.matches("input[data-freeze]")) return;
+  const keys = [...popEl().querySelectorAll("input[data-freeze]:checked")]
+    .map((b) => b.dataset.freeze);
+  setFrozen(keys);
+});
+document.addEventListener("click", (e) => {
+  const p = popEl();
+  if (p.hidden || p.contains(e.target)) return;
+  const anchor = state.pop.anchor;
+  if (anchor && anchor.contains && anchor.contains(e.target)) return;
+  if (e.target.closest && e.target.closest("#btn-freeze")) return;
+  closePop();
+});
+window.addEventListener("resize", applyFreeze);
+$("wf-scroll").addEventListener("scroll", () => {
+  if (clipPending) return;
+  clipPending = true;
+  requestAnimationFrame(() => { clipPending = false; updateScrollClip(); });
+});
 $("btn-copy-image").addEventListener("click", async (e) => {
   const btn = $("btn-copy-image");
   if (btn.disabled) return;
@@ -760,6 +1097,7 @@ $("btn-copy-image").addEventListener("click", async (e) => {
   } finally { btn.disabled = false; btn.textContent = label; }
 });
 $("btn-clean").addEventListener("click", () => {
+  closePop();
   const on = document.body.classList.toggle("clean");
   $("btn-clean").textContent = on ? "退出纯净看板" : "纯净看板";
   if (!on) return;
@@ -771,7 +1109,9 @@ $("btn-clean").addEventListener("click", () => {
   b.onclick = () => { document.body.classList.remove("clean"); b.remove(); $("btn-clean").textContent = "纯净看板"; };
   document.body.appendChild(b);
 });
-window.addEventListener("keydown", (e) => { if (e.key === "Escape") clearNotice(); });
+window.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") { clearNotice(); closePop(); }
+});
 
 // ---------------------------------------------------------------- 测试钩子
 // 注入样本数据后直接出表，不触发任何网络请求；CDP 回归用。
@@ -807,6 +1147,10 @@ window.__SET_WORKFORCE__ = (obj) => {
   }
   if (obj.attReady === false) { state.attReady = false; state.attBad = new Map(); state.attRun = new Map(); }
   if (obj.kpiReady === false) { state.kpiReady = false; state.kpi = new Map(); }
+  // 真机回归可显式指定视图状态，避免上一次跑留下的 localStorage 偏好干扰
+  if (Array.isArray(obj.frozen)) setFrozen(obj.frozen);
+  if (obj.sort) state.sort = { key: obj.sort.key || "", dir: num(obj.sort.dir) };
+  if (obj.clearView) clearView();
   state.pendingAtt = false; state.pendingKpi = false;
   state.loadedAt = new Date().toTimeString().slice(0, 5);
   applyData();
@@ -816,7 +1160,11 @@ window.__SET_WORKFORCE__ = (obj) => {
 window.__WF__ = { state, COLS, PAGE_COLS, buildRows, attachDetail, visibleRows, splitSep,
   staffMap, clueMap, money, attStatsFromSheets, monthSegments, monthBounds, exportCsv,
   applyData, loadKpiFlags, loadAttendance, KPI_FILTERS,
-  normId, pairKey, pairGet, hookPairMap };
+  normId, pairKey, pairGet, hookPairMap,
+  // v3.18.0 视图能力（真机回归用）
+  cellText, sortVal, compareCell, filteredRows, toggleSort, clearView, activeFilterCount,
+  colValues, openFilterPop, openFreezePop, applyFilterPop, closePop, setFrozen, applyFreeze,
+  loadFrozen, DEFAULT_FROZEN, MAX_FROZEN, NUM_CSV };
 
 // ---------------------------------------------------------------- 初始化
 (async function init() {

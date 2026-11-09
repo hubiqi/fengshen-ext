@@ -67,6 +67,17 @@
     }
     rules.push(`.sheet { width:${WIDTH}px !important;max-width:none !important;margin:0 !important; }`);
     rules.push(`.tbl-scroll { overflow:visible !important;width:${WIDTH}px !important; }`);
+    // v3.18.0：运力模块屏幕上有「表头 + 左侧列」冻结，导出图必须还原成一张完整表格，
+    // 否则 sticky 会让表头悬浮、max-height 会把滚动区以外的内容挤掉。
+    rules.push(`.tbl-scroll { max-height:none !important;height:auto !important; }`);
+    rules.push(`table.tbl.wf thead th,table.tbl.wf tbody td` +
+      ` { position:static !important;top:auto !important;left:auto !important;box-shadow:none !important; }`);
+    // 排序箭头 / 筛选漏斗只是屏幕上的交互标记，不该出现在发给钉钉的图里
+    rules.push(`table.tbl.wf thead th::after { content:none !important;display:none !important; }`);
+    rules.push(`table.tbl.wf thead th button.wf-th-filter { display:none !important; }`);
+    // 滚动裁剪会把完全滚进冻结区的列临时 hidden，导出图必须还原所有列
+    rules.push(`table.tbl.wf th,table.tbl.wf td { visibility:visible !important; }`);
+    rules.push(`.wf-pop { display:none !important; }`);
     if (WIDTH > BASE_WIDTH) {
       // 画布加宽时，标题 / 说明等原本锁 1218px 的块跟着铺满，固定宽的达成矩阵居中
       rules.push(`.att-kpi,.att-note,.att-switch,.att-block-title,.fr-head,.fr-title,.fr-note,` +
