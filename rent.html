@@ -60,6 +60,7 @@
     <div class="rent-card-head">
       <h2>批量登记</h2>
       <span class="rent-hint">每条间隔 150ms · 逐条返回成功 / 失败</span>
+      <button id="btn-import" class="ghost rent-head-btn">批量执行（导入表格）</button>
     </div>
     <div class="rent-batch">
       <div class="rent-batch-left">
@@ -93,6 +94,28 @@
 
   <section class="rent-card">
     <div class="rent-card-head">
+      <h2>本月可绑定日期</h2>
+      <span class="rent-hint">入职前 / 离职后 / 今天之前都不能绑定</span>
+      <span class="rent-head-right">
+        <input type="month" id="bind-month" class="rent-input rent-month" title="选择月份">
+        <select id="bind-scope" class="rent-select rent-mini" title="导出范围">
+          <option value="site">当前站点</option>
+          <option value="all">全部站点</option>
+        </select>
+        <label class="rent-check-inline" title="勾上后连带本月离职的骑手一起导出">
+          <input type="checkbox" id="bind-left"> 含已离职
+        </label>
+        <button id="bind-export-matrix" class="ghost rent-head-btn">导出日历 CSV</button>
+        <button id="bind-export-detail" class="ghost rent-head-btn">导出逐日明细</button>
+      </span>
+    </div>
+    <div id="bind-sum" class="rent-bind-sum"></div>
+    <div id="bind-rows" class="rent-bind-rows"></div>
+    <div id="bind-msg" class="rent-msg"></div>
+  </section>
+
+  <section class="rent-card">
+    <div class="rent-card-head">
       <h2>最近提交</h2>
       <span class="rent-hint">只记在本机（最多 100 条），用于核对，不代表服务端全部记录</span>
     </div>
@@ -102,14 +125,49 @@
   </section>
 
   <div class="rent-note" id="rent-note">
-    数据源：<code>getTeamsAll</code> / <code>queryRentType</code> / <code>queryTeamKnightInfo</code> / <code>createRent</code>。
+    数据源：<code>getTeamsAll</code> / <code>queryRentType</code> / <code>queryTeamKnightInfo</code> / <code>createRent</code> / <code>ehr/staff/knight/list</code>。
     租用登记固定 <code>rentType=2</code>，开始日期取当天 00:00:00、结束日期取当天 23:59:59。
-    <b>提交会真实写入租用单</b>，请核对骑手、物资类型与日期后再确认；批量提交逐条成功 / 失败都会记在下方「最近提交」。
+    <b>提交会真实写入租用单</b>，请核对骑手、物资类型与日期后再确认；单条、批量、表格导入的成功 / 失败都会记在「最近提交」。
+    「本月可绑定日期」只按在职区间推算，服务端没有开放已有租用单的查询接口，所以它不代表该日期一定没被别的租用单占用。
   </div>
 </main>
 
+<div class="rent-modal" id="import-modal" hidden>
+  <div class="rm-box" role="dialog" aria-label="批量执行 · 表格导入">
+    <div class="rm-head">
+      <h3>批量执行 · 表格导入</h3>
+      <span class="rm-sub">最多 200 行 · 逐行校验，只执行通过的行</span>
+      <button id="import-close" class="rm-x" title="关闭">×</button>
+    </div>
+    <div class="rm-body">
+      <div class="imp-top">
+        <button id="tpl-download" class="ghost">下载模板 CSV</button>
+        <label class="ghost imp-file">选择表格文件
+          <input type="file" id="import-file" accept=".csv,.txt,.xlsx" hidden>
+        </label>
+        <span class="rent-hint">支持 .csv / .xlsx；也可以把 Excel 里选中的区域直接粘到下面</span>
+      </div>
+      <textarea id="import-paste" class="rent-input imp-paste" spellcheck="false"
+        placeholder="把 Excel 里的表格直接粘到这里（第一行是表头）：&#10;骑手姓名	手机号	骑士ID	物资类型	数量	开始日期	结束日期"></textarea>
+      <div class="imp-actions">
+        <button id="import-parse" class="ghost">解析预览</button>
+        <button id="import-clear" class="ghost">清空</button>
+        <span id="import-file-name" class="rent-hint"></span>
+      </div>
+      <div id="import-preview" class="imp-preview"></div>
+      <div id="import-progress" class="rent-progress" hidden></div>
+      <div id="import-msg" class="rent-msg"></div>
+    </div>
+    <div class="rm-foot">
+      <button id="import-run" class="primary" disabled>执行 0 条</button>
+      <button id="import-cancel" class="ghost">取消</button>
+    </div>
+  </div>
+</div>
+
 <footer id="foot-meta" class="foot-meta"></footer>
 
+<script src="xlsx.js"></script>
 <script src="rent.js"></script>
 </body>
 </html>

@@ -21,6 +21,61 @@ body.rent-page { background: #F3F4F6; }
   margin-bottom: 12px; padding-bottom: 8px; border-bottom: 1px solid #F1F5F9; }
 .rent-card-head h2 { margin: 0; font-size: 14px; color: #1F2937; }
 .rent-hint { font-size: 11.5px; color: #9CA3AF; }
+.rent-head-btn { height: 26px; padding: 0 10px; font-size: 12px; margin-left: auto; }
+.rent-head-right { margin-left: auto; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.rent-head-right .rent-head-btn { margin-left: 0; }
+.rent-month, .rent-mini { height: 26px; font-size: 12px; padding: 0 6px; width: auto; }
+.rent-check-inline { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: #4B5563; }
+
+/* 本月可绑定：一人一行 + 月度条形 */
+.rent-bind-sum { font-size: 12.5px; color: #374151; margin-bottom: 10px; }
+.rent-bind-sum b { color: #2F5597; font-size: 14px; }
+.rent-bind-sum .rent-hint { margin-left: 4px; }
+.rent-bind-rows { max-height: 460px; overflow: auto; border: 1px solid #E5E7EB; border-radius: 6px; padding: 2px 8px; }
+.bind-row { display: grid; grid-template-columns: 190px 88px 88px 62px minmax(360px, 1fr);
+  gap: 8px; align-items: center; padding: 4px 0; border-bottom: 1px dashed #F1F5F9; font-size: 12px; }
+.bind-row:last-child { border-bottom: 0; }
+.bind-row.head { position: sticky; top: 0; background: #FFFFFF; z-index: 1;
+  font-size: 11px; color: #6B7280; border-bottom: 1px solid #E5E7EB; }
+.bind-row.head .bind-bar i { background: transparent; height: auto; font-style: normal;
+  font-size: 9.5px; line-height: 14px; color: #9CA3AF; text-align: center; }
+.br-name { font-weight: 600; color: #1F2937; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.br-name em { font-style: normal; font-weight: 400; color: #9CA3AF; font-size: 11px; margin-left: 5px; }
+.br-date { color: #6B7280; }
+.br-day { color: #15803D; font-weight: 700; text-align: right; }
+.bind-bar { display: flex; gap: 1px; height: 15px; }
+.bind-bar i { flex: 1 1 0; border-radius: 2px; background: #E5E7EB; }
+.bind-bar i.ok { background: #22C55E; }
+.bind-bar i.past { background: #CBD5E1; }
+.bind-bar i.before { background: #FDE68A; }
+.bind-bar i.after { background: #FCA5A5; }
+.bind-bar i:hover { outline: 1px solid #111827; }
+
+/* 批量执行（表格导入）弹层 */
+.rent-modal { position: fixed; inset: 0; background: rgba(15, 23, 42, .38); z-index: 999;
+  display: flex; align-items: center; justify-content: center; padding: 24px; }
+.rent-modal[hidden] { display: none; }
+.rm-box { width: 980px; max-width: 100%; max-height: 88vh; background: #FFFFFF; border-radius: 12px;
+  box-shadow: 0 18px 50px rgba(15, 23, 42, .28); display: flex; flex-direction: column; overflow: hidden; }
+.rm-head { display: flex; align-items: baseline; gap: 10px; padding: 13px 16px; border-bottom: 1px solid #EEF2F7; }
+.rm-head h3 { margin: 0; font-size: 14px; color: #1F2937; }
+.rm-sub { font-size: 11.5px; color: #9CA3AF; }
+.rm-x { margin-left: auto; border: 0; background: transparent; font-size: 20px; line-height: 1;
+  color: #9CA3AF; cursor: pointer; padding: 0 4px; }
+.rm-x:hover { color: #374151; }
+.rm-body { padding: 12px 16px; overflow: auto; }
+.rm-foot { display: flex; gap: 10px; align-items: center; padding: 10px 16px;
+  border-top: 1px solid #EEF2F7; background: #FCFCFD; }
+.imp-top { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
+.imp-file { height: 28px; padding: 0 12px; display: inline-flex; align-items: center;
+  border: 1px solid #CBD5E1; border-radius: 6px; font-size: 12px; color: #334155; cursor: pointer; background: #FFFFFF; }
+.imp-file:hover { background: #F8FAFC; }
+.imp-paste { width: 100%; min-height: 84px; font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 12px; line-height: 1.6; resize: vertical; }
+.imp-actions { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
+.imp-preview { max-height: 320px; overflow: auto; border: 1px solid #E5E7EB; border-radius: 6px; }
+.imp-preview td em { font-style: normal; color: #9CA3AF; font-size: 11px; margin-left: 4px; }
+.imp-preview table.tbl { min-width: 760px; }
 
 .rent-form { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px 12px; }
 .rent-field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: #4B5563; }

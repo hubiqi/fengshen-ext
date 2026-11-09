@@ -1,6 +1,6 @@
 {
-  "version": "3.21.0",
-  "notes": "新增第五个独立入口「物资租用」：复刻 FengshenMonitor 的物资租用登记，站点→物资类型(电动车/住宿)→骑手→起止日期，逐条与批量(150ms间隔)提交 createRent(rentType=2)，提交前二次确认，批量逐条回显成功/失败并记入本机最近100条；站点/类型/骑手/登记全部沿用原接口，不新增后端，直连失败自动切静默桥接",
-  "download": "https://github.com/hubiqi/fengshen-ext/releases/download/v3.21.0/fengshen-ext-v3.21.0.zip",
-  "published_at": "2026-11-09"
+  "version": "3.22.0",
+  "notes": "物资租用加「批量执行（表格导入）」：模板 CSV / xlsx / 粘贴 Excel 区域都能识别，逐行校验骑手、物资类型、数量、日期并拦重复行，只执行通过的行；新增「本月可绑定日期」，用人资名单的入职 / 离职时间 × 本月日历算出每人哪天能绑定，页面画月度条形图，可导出日历矩阵与逐日明细 CSV（当前站点或全部站点）",
+  "download": "https://github.com/hubiqi/fengshen-ext/releases/download/v3.22.0/fengshen-ext-v3.22.0.zip",
+  "published_at": "2026-11-10"
 }
