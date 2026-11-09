@@ -1,6 +1,6 @@
 {
-  "version": "3.16.2",
-  "notes": "出勤达成：炸班明细矩阵最后一列由「明日排班明细」改名为「T+1排班」；T 为当前所选日期，查历史日期时显示该日 + 1 天的排班而非真实的明天；表头 hover 与页面说明同步写明口径，取数、标红与近三天追溯逻辑不变",
-  "download": "https://github.com/hubiqi/fengshen-ext/releases/download/v3.16.2/fengshen-ext-v3.16.2.zip",
+  "version": "3.17.0",
+  "notes": "新增第四个独立入口「排班模块」：复用现有 exportSchedule/1.0 排班导出，按商圈片/站点给出各时段缺口、排班率(百分比)、分数与 4排班占比；日期默认 T+1，站点多选、维度切换、显示方式切换均本机重算 0 额外请求",
+  "download": "https://github.com/hubiqi/fengshen-ext/releases/download/v3.17.0/fengshen-ext-v3.17.0.zip",
   "published_at": "2026-11-09"
 }

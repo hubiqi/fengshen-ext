@@ -1,0 +1,87 @@
+/* 排班模块（v3.17.0 新建，第四个独立入口）
+   数据源只有现有的 exportSchedule/1.0 排班导出（一次请求返回所选日 + 次日两天）。
+   通用骨架（工具条 / .sheet / .doc-title / .tbl-scroll / table.tbl）沿用 dashboard.css，
+   本文件只放日期 / 站点多选 / 维度 / 显示方式控件与排班宽表样式。
+   表格按内容自适应宽度，导出图由 capture.js measureWidth 跟着放宽，不裁右侧列。 */
+
+.sch-page .toolbar { flex-wrap: wrap; gap: 8px; }
+.sch-page .tb-right { flex-wrap: wrap; gap: 8px; }
+.date-pick input[type="date"] {
+  font-family: inherit; font-size: 12px; height: 28px; color: #374151;
+  background: #FFFFFF; border: 1px solid #D1D5DB; border-radius: 5px; padding: 0 6px;
+}
+.sch-tag { font-size: 11.5px; color: #6B7280; white-space: nowrap; }
+
+/* ---------- 站点多选下拉 ---------- */
+.sch-site-wrap { position: relative; }
+.sch-site-pop { position: absolute; z-index: 30; top: 32px; left: 0; width: 268px;
+  background: #FFFFFF; border: 1px solid #D1D5DB; border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(15, 23, 42, .16); padding: 8px; }
+.sch-site-head { display: flex; gap: 8px; border-bottom: 1px solid #EEF2F7; padding-bottom: 6px; margin-bottom: 6px; }
+.sch-site-head button { font-family: inherit; font-size: 11.5px; cursor: pointer;
+  background: #EFF6FF; color: #1D4ED8; border: 1px solid #BFDBFE; border-radius: 4px; padding: 3px 8px; }
+.sch-site-list { max-height: 260px; overflow-y: auto; }
+.sch-site-list label { display: flex; align-items: center; gap: 6px; font-size: 12px;
+  color: #374151; padding: 4px 2px; cursor: pointer; white-space: nowrap; }
+.sch-site-list input { margin: 0; }
+
+/* ---------- 分段按钮（维度 / 显示方式） ---------- */
+.sch-seg { display: inline-flex; border: 1px solid #D1D5DB; border-radius: 6px; overflow: hidden; }
+.sch-seg button { font-family: inherit; font-size: 11.5px; height: 28px; padding: 0 9px;
+  background: #FFFFFF; color: #374151; border: 0; border-right: 1px solid #E5E7EB; cursor: pointer; }
+.sch-seg button:last-child { border-right: 0; }
+.sch-seg button.on { background: #2F6BFF; color: #FFFFFF; font-weight: 600; }
+
+/* ---------- 顶部概览 ---------- */
+.sch-summary { width: 1240px; max-width: 100%; margin: 22px auto 0; padding: 0 8px;
+  display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; }
+.sch-card { min-width: 128px; flex: 0 1 150px; padding: 10px 12px; border-radius: 8px;
+  background: #F8FAFF; border: 1px solid #DCE6F7; text-align: center; }
+.sch-card .k { display: block; font-size: 11.5px; color: #6B7280; line-height: 1.5; }
+.sch-card .v { display: block; margin-top: 3px; font-size: 20px; font-weight: 700; color: #1F2937; }
+.sch-card .v.up { color: #15803D; }
+.sch-card .v.down { color: #B91C1C; }
+.sch-note { width: 1240px; max-width: 100%; margin: 10px auto 0; padding: 0 8px;
+  font-size: 11.5px; color: #6B7280; text-align: center; line-height: 1.6; }
+
+/* ---------- 排班宽表 ---------- */
+.sch-scroll { width: 100%; overflow-x: auto; margin-top: 18px; }
+table.tbl.sch { border-collapse: collapse; width: max-content; min-width: 100%;
+  table-layout: auto; font-size: 12px; color: #374151; }
+table.tbl.sch th, table.tbl.sch td { border: 1px solid #E5E7EB; padding: 5px 7px; text-align: center; }
+table.tbl.sch thead th { background: #F3F6FC; color: #1F2937; font-weight: 700;
+  font-size: 12px; white-space: nowrap; height: 34px; }
+table.tbl.sch th.sch-name, table.tbl.sch td.sch-name { min-width: 132px; text-align: left;
+  white-space: normal; word-break: break-word; font-weight: 600; }
+table.tbl.sch th.sch-four, table.tbl.sch td.sch-four { background: #FAFBFD; min-width: 92px; }
+table.tbl.sch tbody tr:nth-child(even) td { background: #FAFBFD; }
+table.tbl.sch tbody tr.sch-total td { background: #EEF4FF; font-weight: 700; color: #1F2937; }
+table.tbl.sch tbody tr.sch-total td.sch-four { background: #E6EEFC; }
+
+/* 每格三行：缺口 / 排班率(百分比) / 排班率(分数) */
+.sch-cell > span { display: block; line-height: 1.45; white-space: nowrap; }
+.sch-cell .v-gap { font-size: 13px; font-weight: 700; }
+.sch-cell .v-pct { font-size: 12px; }
+.sch-cell .v-frac { font-size: 10.5px; color: #9CA3AF; }
+.sch-cell .up { color: #15803D; }
+.sch-cell .down { color: #B91C1C; }
+.sch-cell .flat { color: #9CA3AF; font-weight: 400; }
+.sch-cell .pct-good { color: #15803D; font-weight: 600; }
+.sch-cell .pct-bad { color: #B91C1C; font-weight: 600; }
+.sch-cell .pct-mid { color: #374151; }
+.sch-cell.sch-four .v-gap { display: none; }
+.sch-cell.sch-four .v-pct { color: #15803D; font-weight: 600; }
+
+/* 显示方式切换：默认「全部」三行都在；切到某一种只留对应一行 */
+body[data-show="gap"] .sch-cell .v-pct,
+body[data-show="gap"] .sch-cell .v-frac,
+body[data-show="pct"] .sch-cell .v-gap,
+body[data-show="pct"] .sch-cell .v-frac,
+body[data-show="frac"] .sch-cell .v-gap,
+body[data-show="frac"] .sch-cell .v-pct { display: none !important; }
+
+/* 纯净看板：工具条等不进画面 */
+body.clean.sch-page .toolbar,
+body.clean.sch-page .notice,
+body.clean.sch-page .progress-wrap,
+body.clean.sch-page .foot-meta { display: none !important; }

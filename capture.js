@@ -41,7 +41,7 @@
     let w = 0;
     // v3.15.0：运力模块 17 列天然比 1240 宽，measureWidth 也要量它，否则导出图右侧被裁
     const sels = "table.tbl.fr,.fail-roster,table.tbl.att,.fr-note,.att-note,.att-kpi," +
-      "table.tbl.wf,.wf-summary,.wf-note";
+      "table.tbl.wf,.wf-summary,.wf-note,table.tbl.sch,.sch-summary,.sch-note";
     for (const el of Array.from(src.querySelectorAll(sels) || [])) {
       if (el.closest && el.closest("[hidden]")) continue;
       try { if (global.getComputedStyle(el).display === "none") continue; } catch (e) { /* ignore */ }
@@ -70,9 +70,9 @@
     if (WIDTH > BASE_WIDTH) {
       // 画布加宽时，标题 / 说明等原本锁 1218px 的块跟着铺满，固定宽的达成矩阵居中
       rules.push(`.att-kpi,.att-note,.att-switch,.att-block-title,.fr-head,.fr-title,.fr-note,` +
-        `.wf-summary,.wf-note,.doc-title,.doc-sub,.doc-note,.doc-foot` +
+        `.wf-summary,.wf-note,.sch-summary,.sch-note,.doc-title,.doc-sub,.doc-note,.doc-foot` +
         ` { width:${WIDTH}px !important;max-width:none !important; }`);
-      rules.push(`table.tbl.att,table.tbl.wf { margin-left:auto !important;margin-right:auto !important; }`);
+      rules.push(`table.tbl.att,table.tbl.wf,table.tbl.sch { margin-left:auto !important;margin-right:auto !important; }`);
     }
     return rules.join("\n");
   }

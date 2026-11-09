@@ -4,7 +4,8 @@
  *   总按钮（可拖动） -> 展开小菜单 -> 「考核看板」/「出勤达成」两个子入口
  *   子入口分别打开 dashboard.html / attendance.html，各自独立刷新与复制图片。
  * v3.15.0：新增第三个独立入口「运力模块」（workforce.html）—— 骑手账单 × 人资 × 三方人资。
- * 面板顶部三页签、三 iframe 各自保留状态，切回来不会重新拉数、也不会互相污染。
+ * v3.17.0：新增第四个独立入口「排班模块」（schedule.html）—— 每日排班缺口 / 排班率。
+ * 面板顶部四页签、四 iframe 各自保留状态，切回来不会重新拉数、也不会互相污染。
  */
 (function () {
   "use strict";
@@ -19,14 +20,16 @@
   const PAGES = {
     assess: HAS_EXT ? chrome.runtime.getURL("dashboard.html") : "dashboard.html",
     attendance: HAS_EXT ? chrome.runtime.getURL("attendance.html") : "attendance.html",
-    workforce: HAS_EXT ? chrome.runtime.getURL("workforce.html") : "workforce.html"
+    workforce: HAS_EXT ? chrome.runtime.getURL("workforce.html") : "workforce.html",
+    schedule: HAS_EXT ? chrome.runtime.getURL("schedule.html") : "schedule.html"
   };
   const POS_KEY = "wb_assess_launcher_pos";   // 只有一颗总按钮，位置只记一份
   const DEF_TOP = DEFAULT_TOP;
   const HEAD = {
     assess: { title: "指定日考核看板", sub: "规划单量完成率 · 标2骑手占比 · 时段达成矩阵" },
     attendance: { title: "出勤达成", sub: "应排 / 实排 / 有效出勤 · 实排达成 / 应排达成" },
-    workforce: { title: "运力模块", sub: "骑手账单 · 人资在职 · 三方人资" }
+    workforce: { title: "运力模块", sub: "骑手账单 · 人资在职 · 三方人资" },
+    schedule: { title: "排班模块", sub: "每日排班缺口 · 排班率 · 4排班占比" }
   };
 
   // ---------------------------------------------------------------- 样式（Shadow DOM 隔离）
@@ -90,6 +93,7 @@
   .wb-menu-item.assess .mi-ico { background: #2F5597; }
   .wb-menu-item.attendance .mi-ico { background: #0B7C60; }
   .wb-menu-item.workforce .mi-ico { background: #7C3AED; }
+  .wb-menu-item.schedule .mi-ico { background: #0E7490; }
   .wb-menu-item .mi-sub { display: block; font-size: 10px; font-weight: 400; color: #6B7280;
     margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
@@ -150,6 +154,10 @@
       <path d="M3 20h18M5 16v-5M12 16V6M19 16v-8"/>
       <path d="M3 8l6-4 6 4 6-4"/>
     </svg>`;
+  const ICON_SCH = `<svg class="wb-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/>
+      <path d="M7 14h3M7 17h3M14 14h3M14 17h3"/>
+    </svg>`;
 
   // ---------------------------------------------------------------- 存储（每个入口各记各的位置）
   function savePos(p, key) {
@@ -204,6 +212,10 @@
         <span class="mi-ico">${ICON_WF}</span>
         <span>运力模块<span class="mi-sub">账单 · 人资 · 三方人资</span></span>
       </button>
+      <button class="wb-menu-item schedule" id="wbMenuSch">
+        <span class="mi-ico">${ICON_SCH}</span>
+        <span>排班模块<span class="mi-sub">缺口 · 排班率 · 4排班占比</span></span>
+      </button>
     </div>
     <div class="wb-mask" id="wbMask">
       <div class="wb-panel" id="wbPanel">
@@ -215,6 +227,7 @@
             <button class="wb-tab active" id="wbTabAssess" title="切回原考核看板（独立页面）">考核看板</button>
             <button class="wb-tab" id="wbTabAtt" title="切到出勤达成（独立页面）">出勤达成</button>
             <button class="wb-tab" id="wbTabWf" title="切到运力模块（独立页面）">运力模块</button>
+            <button class="wb-tab" id="wbTabSch" title="切到排班模块（独立页面）">排班模块</button>
           </div>
           <button class="wb-btn" id="wbReload" title="重新拉取当前看板的数据">↻ 刷新</button>
           <button class="wb-btn" id="wbNewTab" title="把当前看板在独立标签页打开">↗ 新标签打开</button>
@@ -224,6 +237,7 @@
         <iframe class="wb-frame" id="wbFrame" title="风神考核看板" allow="clipboard-write *" allowtransparency="false"></iframe>
         <iframe class="wb-frame" id="wbFrameAtt" title="风神出勤达成看板" allow="clipboard-write *" allowtransparency="false" hidden></iframe>
         <iframe class="wb-frame" id="wbFrameWf" title="风神运力模块" allow="clipboard-write *" allowtransparency="false" hidden></iframe>
+        <iframe class="wb-frame" id="wbFrameSch" title="风神排班模块" allow="clipboard-write *" allowtransparency="false" hidden></iframe>
       </div>
     </div>`;
   if (root === host) {
@@ -234,15 +248,15 @@
   }
   const q = (id) => root.getElementById ? root.getElementById(id) : document.getElementById(id);
   const ball = q("wbBall"), tip = q("wbTip"), mask = q("wbMask"), menu = q("wbMenu");
-  const frames = { assess: q("wbFrame"), attendance: q("wbFrameAtt"), workforce: q("wbFrameWf") };
-  const tabs = { assess: q("wbTabAssess"), attendance: q("wbTabAtt"), workforce: q("wbTabWf") };
-  const MODES = ["assess", "attendance", "workforce"];
+  const frames = { assess: q("wbFrame"), attendance: q("wbFrameAtt"), workforce: q("wbFrameWf"), schedule: q("wbFrameSch") };
+  const tabs = { assess: q("wbTabAssess"), attendance: q("wbTabAtt"), workforce: q("wbTabWf"), schedule: q("wbTabSch") };
+  const MODES = ["assess", "attendance", "workforce", "schedule"];
 
   // ---------------------------------------------------------------- 自动更新角标（挂在总按钮上）
   let updateState = null;
   function tipFor() {
     if (updateState && updateState.on) return "发现新版本 v" + updateState.latest + " · 打开看板可一键更新";
-    return "风神看板 · 点击展开（考核 / 出勤 / 运力）";
+    return "风神看板 · 点击展开（考核 / 出勤 / 运力 / 排班）";
   }
   function applyUpdateState(s) {
     const on = !!(s && s.available && s.latest !== s.skipped);
@@ -379,6 +393,7 @@
   q("wbMenuAssess").addEventListener("click", () => { setMenu(false); setOpen(true, "assess"); });
   q("wbMenuAtt").addEventListener("click", () => { setMenu(false); setOpen(true, "attendance"); });
   q("wbMenuWf").addEventListener("click", () => { setMenu(false); setOpen(true, "workforce"); });
+  q("wbMenuSch").addEventListener("click", () => { setMenu(false); setOpen(true, "schedule"); });
   // 点页面其他地方 / 按 Esc：先收起菜单，再收起面板
   document.addEventListener("pointerdown", (e) => {
     if (!menuOpen) return;
@@ -393,6 +408,7 @@
   tabs.assess.addEventListener("click", () => setOpen(true, "assess"));
   tabs.attendance.addEventListener("click", () => setOpen(true, "attendance"));
   tabs.workforce.addEventListener("click", () => setOpen(true, "workforce"));
+  tabs.schedule.addEventListener("click", () => setOpen(true, "schedule"));
   q("wbReload").addEventListener("click", () => {
     frames[mode].src = PAGES[mode] + "?_t=" + Date.now();
   });
@@ -409,7 +425,7 @@
   // iframe 内按 Esc / 点「考核看板 ↗」/ 关闭时通过 postMessage 通知父页面
   window.addEventListener("message", (e) => {
     if (e.source !== frames.assess.contentWindow && e.source !== frames.attendance.contentWindow &&
-        e.source !== frames.workforce.contentWindow) return;
+        e.source !== frames.workforce.contentWindow && e.source !== frames.schedule.contentWindow) return;
     const d = e.data;
     if (!d || d.__wbAssess !== true) return;
     if (d.type === "CLOSE") setOpen(false);

@@ -22,7 +22,9 @@ const DASHBOARD = chrome.runtime.getURL("dashboard.html");
 const ATTENDANCE = chrome.runtime.getURL("attendance.html");
 // v3.15.0：运力模块是第三个独立页面
 const WORKFORCE = chrome.runtime.getURL("workforce.html");
-const PAGE_URL = { assess: DASHBOARD, attendance: ATTENDANCE, workforce: WORKFORCE };
+// v3.17.0：排班模块是第四个独立页面
+const SCHEDULE = chrome.runtime.getURL("schedule.html");
+const PAGE_URL = { assess: DASHBOARD, attendance: ATTENDANCE, workforce: WORKFORCE, schedule: SCHEDULE };
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 

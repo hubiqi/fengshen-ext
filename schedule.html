@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>排班模块 · 每日排班缺口 / 排班率</title>
+  <link rel="stylesheet" href="dashboard.css">
+  <link rel="stylesheet" href="schedule.css">
+</head>
+<body class="sch-page" data-show="all">
+
+<!-- 工具条：不属于导出画面，可一键隐藏为「纯净看板」 -->
+<div class="toolbar" id="toolbar">
+  <div class="tb-left">
+    <strong>排班模块</strong>
+    <span class="tb-ver" id="tb-ver"></span>
+    <span class="tb-sub" id="sub">正在读取当前浏览器登录态…</span>
+  </div>
+  <div class="tb-right">
+    <div class="date-pick">
+      <button id="btn-prev" class="date-step" type="button" title="前一天" aria-label="前一天"></button>
+      <input type="date" id="date-picker" aria-label="排班日期">
+      <button id="btn-next" class="date-step" type="button" title="后一天" aria-label="后一天"></button>
+      <span class="sch-tag" id="date-tag">（明天）</span>
+    </div>
+    <button id="btn-today" class="ghost" title="切到今天">今天</button>
+    <button id="btn-t1" class="ghost" title="切到明天（T+1）">T+1</button>
+
+    <div class="sch-site-wrap">
+      <button id="btn-sites" class="ghost" type="button" aria-expanded="false">站点选择 (<span id="site-count">0</span>) ▾</button>
+      <div class="sch-site-pop" id="site-pop" hidden>
+        <div class="sch-site-head">
+          <button id="btn-site-all" type="button">全选</button>
+          <button id="btn-site-none" type="button">取消全选</button>
+        </div>
+        <div class="sch-site-list" id="site-list"></div>
+      </div>
+    </div>
+
+    <div class="sch-seg" id="view-seg" role="group" aria-label="统计维度">
+      <button type="button" data-view="area" class="on">商圈片</button>
+      <button type="button" data-view="site">站点</button>
+    </div>
+    <div class="sch-seg" id="mode-seg" role="group" aria-label="单元格显示方式">
+      <button type="button" data-show="all" class="on">全部</button>
+      <button type="button" data-show="gap">缺口</button>
+      <button type="button" data-show="pct">排班率(百分比)</button>
+      <button type="button" data-show="frac">排班率(分数)</button>
+    </div>
+
+    <button id="btn-refresh" class="primary">立即刷新</button>
+    <button id="btn-export-csv" class="ghost" title="导出当前宽表为 CSV（UTF-8 BOM）">导出 CSV</button>
+    <button id="btn-copy-image" class="primary" title="把排班模块画面复制为高清 PNG；按住 Shift 点击则另存为 PNG 文件">复制图片</button>
+    <button id="btn-clean" class="ghost">纯净看板</button>
+  </div>
+</div>
+
+<div class="notice" id="notice" hidden></div>
+
+<div class="progress-wrap" id="progress-wrap">
+  <div class="progress"><div class="bar" id="bar"></div></div>
+  <span class="progress-text" id="progress-text">准备中…</span>
+</div>
+
+<!-- ============ 排班模块画面（独立 PNG） ============ -->
+<main class="sheet" id="sheet">
+  <div class="doc-title" id="doc-title">排班</div>
+  <div class="doc-sub" id="doc-sub">日期 —&nbsp;&nbsp;&nbsp;&nbsp;生成时间 —</div>
+  <div class="doc-note" id="doc-note">数据源：排班查询 → 导出排班数据（exportSchedule/1.0，一次请求返回所选日与次日两天）。缺口 = 排班人数 − 应排人数；排班率 = 排班人数 / 应排人数；分数 = 排班人数 / 应排人数。全天为排班统计的「全天」行，时段列按当日实际排班动态生成。</div>
+
+  <div class="sch-summary" id="sch-summary"></div>
+  <div class="sch-note" id="sch-note"></div>
+
+  <div class="tbl-scroll sch-scroll" id="sch-scroll">
+    <table class="tbl sch" id="sch-table"></table>
+  </div>
+
+  <div class="doc-foot">一行 = 一个商圈片（切「站点」后一行 = 一个站点）；最后一行「总计」为各列求和。正数缺口为绿色、负数缺口为红色；排班率 ≥100% 绿色、&lt;80% 红色。4排班占比 = 当天排了 ≥4 个班次的骑手数 / 全天排班人数。</div>
+  <div class="doc-foot small" id="doc-foot-small">站点勾选、维度切换、显示方式切换都只在本机重算，不额外请求接口；日期切换会重新导出该日排班。T 为所选日期，T+1 指所选日期的次日。</div>
+</main>
+
+<footer id="foot-meta" class="foot-meta"></footer>
+
+<script src="capture.js"></script>
+<script src="xlsx.js"></script>
+<script src="schedule.js"></script>
+</body>
+</html>
