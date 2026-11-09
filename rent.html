@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>物资租用 · 电动车 / 住宿登记</title>
+<link rel="stylesheet" href="dashboard.css">
+<link rel="stylesheet" href="rent.css">
+</head>
+<body class="rent-page">
+
+<header class="toolbar" id="toolbar">
+  <div class="tb-left">
+    <strong>物资租用</strong>
+    <select id="site-select" class="rent-site" title="切换站点后重新加载物资类型与骑手"></select>
+    <button id="btn-refresh" class="primary">立即刷新</button>
+    <button id="btn-channel" class="ghost">通道：直连</button>
+    <button id="btn-clean" class="ghost" title="隐藏工具条与说明，只留登记区">纯净看板</button>
+    <button id="btn-goto-assess" class="ghost">考核看板 ↗</button>
+  </div>
+  <div class="tb-right">
+    <span class="tb-sub" id="sub">正在读取当前登录态…</span>
+    <span class="tb-ver" id="tb-ver">v—</span>
+  </div>
+</header>
+
+<div class="notice" id="notice" hidden></div>
+
+<main class="rent-wrap" id="rent-wrap">
+  <div class="rent-kpis" id="rent-kpis"></div>
+
+  <section class="rent-card">
+    <div class="rent-card-head">
+      <h2>逐条登记</h2>
+      <span class="rent-hint">单条提交 · rentType=2 · 提交前会二次确认</span>
+    </div>
+    <div class="rent-form">
+      <label class="rent-field">骑手
+        <input id="one-search" class="rent-input" placeholder="搜索姓名 / 手机号">
+        <select id="one-knight" class="rent-select"></select>
+      </label>
+      <label class="rent-field">物资类型
+        <select id="one-type" class="rent-select"></select>
+      </label>
+      <label class="rent-field rent-num">数量
+        <input id="one-num" class="rent-input" type="number" min="1" max="99" value="1">
+      </label>
+      <label class="rent-field">开始日期
+        <input id="one-start" class="rent-input" type="date">
+      </label>
+      <label class="rent-field">结束日期
+        <input id="one-end" class="rent-input" type="date">
+      </label>
+      <button id="one-submit" class="primary rent-submit">提交登记</button>
+      <span id="one-msg" class="rent-msg"></span>
+    </div>
+  </section>
+
+  <section class="rent-card">
+    <div class="rent-card-head">
+      <h2>批量登记</h2>
+      <span class="rent-hint">每条间隔 150ms · 逐条返回成功 / 失败</span>
+    </div>
+    <div class="rent-batch">
+      <div class="rent-batch-left">
+        <div class="rent-batch-tools">
+          <input id="batch-search" class="rent-input" placeholder="搜索骑手姓名 / 手机号">
+          <button id="batch-select-all" class="ghost">全选</button>
+          <button id="batch-clear" class="ghost">清空</button>
+          <span id="batch-count" class="rent-count">已选 0 人</span>
+        </div>
+        <div class="rent-batch-list" id="batch-list"></div>
+      </div>
+      <div class="rent-batch-right">
+        <label class="rent-field">物资类型
+          <select id="batch-type" class="rent-select"></select>
+        </label>
+        <label class="rent-field rent-num">数量
+          <input id="batch-num" class="rent-input" type="number" min="1" max="99" value="1">
+        </label>
+        <label class="rent-field">开始日期
+          <input id="batch-start" class="rent-input" type="date">
+        </label>
+        <label class="rent-field">结束日期
+          <input id="batch-end" class="rent-input" type="date">
+        </label>
+        <button id="batch-submit" class="primary rent-submit">批量提交</button>
+        <div id="batch-progress" class="rent-progress" hidden></div>
+        <div id="batch-msg" class="rent-msg"></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="rent-card">
+    <div class="rent-card-head">
+      <h2>最近提交</h2>
+      <span class="rent-hint">只记在本机（最多 100 条），用于核对，不代表服务端全部记录</span>
+    </div>
+    <div class="rent-history-wrap">
+      <table class="tbl rent-history" id="history-table"></table>
+    </div>
+  </section>
+
+  <div class="rent-note" id="rent-note">
+    数据源：<code>getTeamsAll</code> / <code>queryRentType</code> / <code>queryTeamKnightInfo</code> / <code>createRent</code>。
+    租用登记固定 <code>rentType=2</code>，开始日期取当天 00:00:00、结束日期取当天 23:59:59。
+    <b>提交会真实写入租用单</b>，请核对骑手、物资类型与日期后再确认；批量提交逐条成功 / 失败都会记在下方「最近提交」。
+  </div>
+</main>
+
+<footer id="foot-meta" class="foot-meta"></footer>
+
+<script src="rent.js"></script>
+</body>
+</html>

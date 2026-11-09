@@ -1,6 +1,6 @@
 {
-  "version": "3.20.1",
-  "notes": "修复运力模块冻结列的竖线边框异常：border-collapse 下 sticky 单元格的共享边框在横向滚动时断裂成透明缝，改用 inset 阴影自绘 1px 黑线，冻结区边界也改为黑色并移除半透明白/蓝阴影；更新条新增「打开下载文件夹」，README 写明 MV3 热更新边界并提供本机一键脚本 scripts/hot-update.command",
-  "download": "https://github.com/hubiqi/fengshen-ext/releases/download/v3.20.1/fengshen-ext-v3.20.1.zip",
+  "version": "3.21.0",
+  "notes": "新增第五个独立入口「物资租用」：复刻 FengshenMonitor 的物资租用登记，站点→物资类型(电动车/住宿)→骑手→起止日期，逐条与批量(150ms间隔)提交 createRent(rentType=2)，提交前二次确认，批量逐条回显成功/失败并记入本机最近100条；站点/类型/骑手/登记全部沿用原接口，不新增后端，直连失败自动切静默桥接",
+  "download": "https://github.com/hubiqi/fengshen-ext/releases/download/v3.21.0/fengshen-ext-v3.21.0.zip",
   "published_at": "2026-11-09"
 }

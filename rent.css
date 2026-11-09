@@ -1,0 +1,83 @@
+/* 物资租用（v3.21.0，第五个独立入口）
+   基础按钮 / 输入框 / 提示条沿用 dashboard.css，这里只加登记页自己的布局。 */
+
+body.rent-page { background: #F3F4F6; }
+
+.rent-site { min-width: 210px; max-width: 300px; font-size: 12px; padding: 5px 7px; }
+
+.rent-wrap { width: 1218px; max-width: calc(100% - 36px); margin: 16px auto 26px; }
+
+.rent-kpis { display: flex; flex-wrap: wrap; gap: 10px; margin: 0 0 14px; }
+.rent-kpi { flex: 1 1 150px; min-width: 132px; min-height: 64px; padding: 10px 12px; border-radius: 8px;
+  background: #FFFFFF; border: 1px solid #DCE6F7; text-align: center;
+  display: flex; flex-direction: column; justify-content: center; }
+.rent-kpi b { display: block; font-size: 20px; line-height: 1.3; color: #2F5597;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rent-kpi span { display: block; font-size: 11.5px; color: #6B7280; margin-top: 2px; }
+
+.rent-card { background: #FFFFFF; border: 1px solid #E5E7EB; border-radius: 10px;
+  padding: 14px 16px 16px; margin-bottom: 14px; box-shadow: 0 1px 2px rgba(15, 23, 42, .04); }
+.rent-card-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+  margin-bottom: 12px; padding-bottom: 8px; border-bottom: 1px solid #F1F5F9; }
+.rent-card-head h2 { margin: 0; font-size: 14px; color: #1F2937; }
+.rent-hint { font-size: 11.5px; color: #9CA3AF; }
+
+.rent-form { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px 12px; }
+.rent-field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: #4B5563; }
+.rent-field .rent-input, .rent-field .rent-select { width: 100%; }
+.rent-form .rent-field:nth-child(1) { flex: 0 1 280px; }
+.rent-form .rent-field:nth-child(2) { flex: 0 1 160px; }
+.rent-form .rent-field:nth-child(3) { flex: 0 1 88px; }
+.rent-form .rent-field:nth-child(4), .rent-form .rent-field:nth-child(5) { flex: 0 1 148px; }
+.rent-submit { height: 32px; padding: 0 16px; white-space: nowrap; }
+.rent-msg { font-size: 12px; line-height: 1.5; color: #6B7280; min-height: 18px; }
+.rent-msg.success { color: #15803D; }
+.rent-msg.error { color: #B91C1C; }
+.rent-msg.info { color: #1D4ED8; }
+
+.rent-batch { display: flex; gap: 16px; align-items: flex-start; }
+.rent-batch-left { flex: 1 1 58%; min-width: 0; }
+.rent-batch-right { flex: 1 1 42%; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+.rent-batch-tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+.rent-batch-tools .rent-input { flex: 1 1 180px; min-width: 140px; }
+.rent-count { font-size: 12px; color: #1D4ED8; white-space: nowrap; }
+.rent-batch-list { max-height: 300px; overflow: auto; border: 1px solid #E5E7EB;
+  border-radius: 6px; padding: 4px; background: #FCFCFD; }
+.rent-check { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 5px;
+  font-size: 12.5px; color: #374151; cursor: pointer; line-height: 1.4; }
+.rent-check:hover { background: #F1F5F9; }
+.rent-check.checked { background: #EFF6FF; }
+.rent-check input { margin: 0; }
+.rent-check .rc-name { font-weight: 600; color: #1F2937; }
+.rent-check .rc-meta { color: #9CA3AF; font-size: 11px; margin-left: auto; }
+.rent-empty { padding: 18px 8px; text-align: center; color: #9CA3AF; font-size: 12px; }
+.rent-progress { font-size: 12px; color: #1D4ED8; line-height: 1.5; }
+.rent-progress .rp-bar { height: 5px; border-radius: 3px; background: #E5E7EB; margin-top: 5px; overflow: hidden; }
+.rent-progress .rp-bar i { display: block; height: 100%; width: 0; background: #3B82F6; transition: width .15s; }
+
+.rent-history-wrap { overflow-x: auto; }
+table.tbl.rent-history { width: 100%; min-width: 860px; border: 1px solid #E5E7EB;
+  table-layout: fixed; }
+table.tbl.rent-history th, table.tbl.rent-history td { border: 1px solid #E5E7EB;
+  padding: 6px 6px; font-size: 12px; }
+table.tbl.rent-history thead th { height: 32px; background: #F2F5FA; color: #374151; }
+table.tbl.rent-history td { height: 30px; color: #374151; text-align: center;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+table.tbl.rent-history td.ok { color: #15803D; font-weight: 700; }
+table.tbl.rent-history td.bad { color: #B91C1C; font-weight: 700; }
+table.tbl.rent-history td.name { text-align: left; }
+
+.rent-note { margin: 4px 2px 0; font-size: 11.5px; line-height: 1.7; color: #6B7280; }
+.rent-note code { background: #F1F5F9; border-radius: 3px; padding: 0 4px; color: #334155; }
+
+body.clean.rent-page .toolbar,
+body.clean.rent-page .notice,
+body.clean.rent-page .rent-note,
+body.clean.rent-page .foot-meta { display: none !important; }
+body.clean.rent-page .rent-wrap { margin-top: 24px; }
+
+@media (max-width: 980px) {
+  .rent-batch { flex-direction: column; }
+  .rent-batch-left, .rent-batch-right { flex: 1 1 auto; width: 100%; }
+  .rent-form .rent-field:nth-child(1) { flex: 1 1 100%; }
+}

@@ -49,6 +49,7 @@ jobs:
             attendance.html attendance.css attendance.js \
             workforce.html workforce.css workforce.js \
             schedule.html schedule.css schedule.js \
+            rent.html rent.css rent.js \
             assess.js sync.js capture.js xlsx.js
 
       - name: Create GitHub Release with the zip

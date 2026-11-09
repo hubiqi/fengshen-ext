@@ -24,7 +24,9 @@ const ATTENDANCE = chrome.runtime.getURL("attendance.html");
 const WORKFORCE = chrome.runtime.getURL("workforce.html");
 // v3.17.0：排班模块是第四个独立页面
 const SCHEDULE = chrome.runtime.getURL("schedule.html");
-const PAGE_URL = { assess: DASHBOARD, attendance: ATTENDANCE, workforce: WORKFORCE, schedule: SCHEDULE };
+// v3.21.0：物资租用是第五个独立页面
+const RENT = chrome.runtime.getURL("rent.html");
+const PAGE_URL = { assess: DASHBOARD, attendance: ATTENDANCE, workforce: WORKFORCE, schedule: SCHEDULE, rent: RENT };
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
