@@ -75,8 +75,7 @@
     // 排序箭头 / 筛选漏斗只是屏幕上的交互标记，不该出现在发给钉钉的图里
     rules.push(`table.tbl.wf thead th::after { content:none !important;display:none !important; }`);
     rules.push(`table.tbl.wf thead th button.wf-th-filter { display:none !important; }`);
-    // 滚动裁剪会把完全滚进冻结区的列临时 hidden，导出图必须还原所有列
-    rules.push(`table.tbl.wf th,table.tbl.wf td { visibility:visible !important; }`);
+    // v3.19.1 起不再隐藏滚动列，无需再做 visibility 还原
     rules.push(`.wf-pop { display:none !important; }`);
     // v3.19.0：排班模块的「时段权重配置」弹窗也不能混进导出图
     rules.push(`.sch-weight-overlay { display:none !important; }`);

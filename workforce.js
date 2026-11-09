@@ -677,39 +677,17 @@ function applyFreeze() {
       td.classList.toggle("fz-edge", hit && i === last);
       if (hit) td.style.left = Math.round(offsets.get(i)) + "px";
       else td.style.left = "";
+      // v3.19.1：旧版在这里把滚动列整列 visibility:hidden，导致「列消失 + 留白」。
+      // 统一清掉历史内联值，之后只靠 sticky 覆盖，不再隐藏任何列。
+      if (td.style.visibility) td.style.visibility = "";
     });
   }
-  updateScrollClip();
 }
 
-// CSS sticky 只会「盖住」被滚走的列，滚到一半的列仍会在冻结边界右侧露出几个数字，
-// 看起来像数据错位。这里把完全进入冻结区的非冻结列整列隐藏，行为与 Excel 一致。
-// 只是屏幕上的滚动表现：capture.js 导出图会强制 visibility:visible 还原全部列。
-let clipPending = false;
-function updateScrollClip() {
-  const t = $("wf-table"), sc = $("wf-scroll");
-  if (!t || !sc) return;
-  const ths = [...t.querySelectorAll("thead th")];
-  if (!ths.length) return;
-  const frozenIdx = new Set(state.frozen.map((k) => PAGE_COLS.findIndex((c) => c.k === k))
-    .filter((i) => i >= 0));
-  const widths = ths.map((th) => th.getBoundingClientRect().width);
-  const frozenWidth = [...frozenIdx].reduce((w, i) => w + (widths[i] || 0), 0);
-  const scrollLeft = sc.scrollLeft;
-  const hide = new Set();
-  if (scrollLeft > 0 && frozenWidth > 0) {
-    let x = 0;
-    widths.forEach((w, i) => {
-      // 只要列左边界还落在冻结区里就整列隐藏（含只被盖住一部分的列），
-      // 这样冻结边界右侧永远从完整的一列开始，不会露出半截数字。
-      if (!frozenIdx.has(i) && x - scrollLeft < frozenWidth - 2) hide.add(i);
-      x += w;
-    });
-  }
-  for (const tr of t.querySelectorAll("tr")) {
-    [...tr.children].forEach((td, i) => { td.style.visibility = hide.has(i) ? "hidden" : ""; });
-  }
-}
+// v3.19.1：移除「滚动时整列隐藏」逻辑。
+// CSS sticky 下被 visibility:hidden 的列仍占布局宽度，冻结列右侧会出现一大片空白，
+// 表头与数据行看起来像丢了几列、数字错位（用户实测反馈）。现在 22 列始终全部可见，
+// 滚到左边的列由不透明的冻结列自然盖住，逐列对齐、不会出现空洞。
 function setFrozen(keys) {
   const valid = [...new Set((keys || []).filter((k) => PAGE_COLS.some((c) => c.k === k)))]
     .sort((a, b) => PAGE_COLS.findIndex((c) => c.k === a) - PAGE_COLS.findIndex((c) => c.k === b))
@@ -1071,11 +1049,6 @@ document.addEventListener("click", (e) => {
   closePop();
 });
 window.addEventListener("resize", applyFreeze);
-$("wf-scroll").addEventListener("scroll", () => {
-  if (clipPending) return;
-  clipPending = true;
-  requestAnimationFrame(() => { clipPending = false; updateScrollClip(); });
-});
 $("btn-copy-image").addEventListener("click", async (e) => {
   const btn = $("btn-copy-image");
   if (btn.disabled) return;
