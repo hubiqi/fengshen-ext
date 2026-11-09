@@ -3,6 +3,11 @@
 // 本页只做一件事：算「应排 / 实排 / 有效出勤」并输出实排达成、应排达成两张宽表。
 // 不拉运单明细、不写运单缓存、不改动原考核看板的任何画面或导出图。
 //
+// v3.20.0：两张表末列新增「时段排班率」= 11 时段加权。
+//   已结束班次完成率 = min(有效出勤/应排, 100%)；T0 未开始 / 进行中班次
+//   降级用「排班完成率」= min(排班/应排, 100%)；无该班次或应排 0 按 100%。
+//   权重与排班模块共用 localStorage.wb_sch_weights，改一次两个模块同步。
+//
 // 日期可选择（默认今天，可回看最近 90 天；日期框两侧有 ‹ › 箭头逐日快切，
 // 到「今天」或「90 天前」边界自动置灰）。两条取数链路：
 //   今天：exportSchedule/1.0 排班统计 + exportAttendance/1.0 实时考勤（当日快照）
@@ -53,6 +58,33 @@ const shiftDate = (date, days) => {
 const validDate = (s) => /^\d{4}-\d{2}-\d{2}$/.test(String(s || "")) && !isNaN(new Date(s + "T00:00:00").getTime());
 const hhmm = (d) => d.toTimeString().slice(0, 5);
 
+// ---------------------------------------------------------------- v3.20.0 时段权重
+// 固定 11 个 KPI 时段（与 assess.js PERIOD_DEFS、schedule.js PERIOD_ORDER 完全一致）。
+// 加权列固定遍历这 11 项，不随「当天只排了几个班」变化：没排的班按 100% 计入。
+const ATT_PERIOD_ORDER = ["凌晨1", "凌晨2", "凌晨3", "早餐1", "早餐2", "午高峰",
+  "下午茶1", "下午茶2", "晚高峰", "夜宵1", "夜宵2"];
+const ATT_DEFAULT_WEIGHTS = Object.freeze({
+  "凌晨1": 4, "凌晨2": 4, "凌晨3": 4, "早餐1": 4, "早餐2": 4,
+  "午高峰": 30, "下午茶1": 7, "下午茶2": 7, "晚高峰": 20,
+  "夜宵1": 8, "夜宵2": 8
+});
+const ATT_LS_WEIGHTS = "wb_sch_weights";   // 与排班模块「时段权重」面板共用同一份配置
+function loadAttWeights() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(ATT_LS_WEIGHTS) || "null");
+    if (raw && typeof raw === "object") {
+      const out = {};
+      for (const p of ATT_PERIOD_ORDER) {
+        const v = Number(raw[p]);
+        out[p] = Number.isFinite(v) && v >= 0 && v <= 100 ? v : ATT_DEFAULT_WEIGHTS[p];
+      }
+      return out;
+    }
+  } catch (e) { /* 偏好损坏则用默认 */ }
+  return { ...ATT_DEFAULT_WEIGHTS };
+}
+const attWeightSum = (w) => ATT_PERIOD_ORDER.reduce((a, p) => a + (Number(w[p]) || 0), 0);
+
 const state = {
   via: localStorage.getItem("wb_via") || "direct",
   date: todayStr(), mode: "live",
@@ -66,6 +98,7 @@ const state = {
   startedAt: null, finishedAt: null, dataNote: "", teamSource: "", teamCount: 0,
   memo: new Map(),  // 日期 -> 已加载的 sheets，切换日期秒回；「立即刷新」强制重拉
   teamIds: [],
+  weights: loadAttWeights(),   // v3.20.0：11 时段权重，与排班模块共用、可跨页实时同步
   // T-3 / T-2 / T-1 历史异常：日期 -> Map<rid, 炸班班次数>；按日期缓存，切日期不重拉
   histFails: new Map(), histPending: new Set(), histErrors: new Map(),
   histDetail: new Map()   // 日期 -> histDayMap，点标红班次时查近三天的时长 / 完单 / 是否达标
@@ -316,6 +349,45 @@ function attCell(c, per, mode, att, area) {
          `<b>${attPct(rate)}</b><span>${fmt(c.valid)}/${fmt(den)}</span></td>`;
 }
 
+// ---------------------------------------------------------------- v3.20.0 时段排班率
+/**
+ * Σ(时段完成率 × 时段权重) / 100，固定遍历 11 个 KPI 时段。
+ *  - 已结束班次：完成率 = min(有效出勤 / 应排, 100%)（应排达成口径，与表内格子一致）
+ *  - T0 未开始 / 进行中班次：达成数据还没跑出来，降级用「排班完成率」
+ *    = min(排班 / 应排, 100%)，避免把未来班次算成 0% 炸班
+ *  - 当天没有该班次 / 应排为 0：按 100%（与排班模块「时段排班率」同口径）
+ *  - 权重合计建议 100%，不自动归一化；合计为 0 返回 null（显示「—」）
+ * cells 既可以是片区行的 cells，也可以是 att.totals（两者结构相同）。
+ */
+function attPeriodRate(cells, att) {
+  let sum = 0, sumW = 0;
+  for (const p of ATT_PERIOD_ORDER) {
+    const wp = Number(state.weights[p]) || 0;
+    const c = cells && cells[p];
+    const due = c ? Number(c.due) || 0 : 0;
+    const real = c ? Number(c.real) || 0 : 0;
+    const valid = c ? Number(c.valid) || 0 : 0;
+    const pending = (att && att.ongoing || []).includes(p);
+    const rate = due <= 0 ? 100
+      : pending ? Math.min(real / due * 100, 100)
+      : Math.min(valid / due * 100, 100);
+    sum += rate * wp;
+    sumW += wp;
+  }
+  return { value: sumW > 0 ? sum / 100 : null, wsum: sumW };
+}
+function attRateTip(r) {
+  return `Σ(时段完成率 × 时段权重) / 100；已结束班次 = min(有效出勤/应排,100%)，` +
+    `T0 未开始 / 进行中 = min(排班/应排,100%)，无该班次或应排 0 = 100%；` +
+    `权重合计 ${attPct(r.wsum)}（与排班模块共用，可在排班模块「时段权重」面板修改）`;
+}
+function attRateCell(r) {
+  if (!r || r.value == null) return `<td class="att-cell att-rate zero" title="权重合计为 0，暂不计算">—</td>`;
+  const cls = r.value >= 100 ? "good" : (r.value >= 80 ? "warn" : "bad");
+  return `<td class="att-cell att-rate ${cls}" title="${esc(attRateTip(r))}">` +
+    `<b>${attPct(r.value)}</b><span>权重 ${attPct(r.wsum)}</span></td>`;
+}
+
 // T0（今天）只展示**已经结束的班次**：还没跑完的班次，人还在陆续上线、单还在攒，
 // 这个时点把它算成「炸班」既不公平也没意义（11-06 快照里夜宵2 有 84 人才刚上线 10 分钟）。
 // 历史日期是定稿数据，所有班次都算已结束，原样展示。
@@ -349,25 +421,29 @@ function dayFailCount(att) {
 
 function renderAttTable(id, att, mode, periods) {
   const P = pickP(att, periods);
-  // 与考核看板表 2 一样锁 1218px 总宽：班次从 7 变 9/11 时只压缩列宽，字号保持常规
-  const firstW = 210, totalW = 1218;
-  const subW = ((totalW - firstW) / Math.max(1, P.length)).toFixed(2);
+  // 总宽仍锁 1218px（导出图宽度不变）：末列「时段排班率」固定 112px，其余班次均分，字号保持常规
+  const firstW = 210, rateW = 112, totalW = 1218;
+  const subW = ((totalW - firstW - rateW) / Math.max(1, P.length)).toFixed(2);
   const cols = `<colgroup><col style="width:${firstW}px">` +
-    P.map(() => `<col style="width:${subW}px">`).join("") + `</colgroup>`;
+    P.map(() => `<col style="width:${subW}px">`).join("") +
+    `<col style="width:${rateW}px"></colgroup>`;
+  const rateHeadTip = attRateTip({ wsum: attWeightSum(state.weights) });
   const head = `<thead><tr><th>团队名称</th>` + P.map((p) => {
     const st = att.standards[p];
     const hint = p === "全天"
       ? "全天：有效在线≥6小时 且 完单≥18单"
       : `有效在线≥${(st && st.timeMin) || 0}分钟 且 完单≥${(st && st.orders) || 0}单`;
     return `<th title="${esc(hint)}">${esc(p)}</th>`;
-  }).join("") + `</tr></thead>`;
+  }).join("") + `<th class="att-rate" title="${esc(rateHeadTip)}">时段排班率</th></tr></thead>`;
   const body = ["<tbody>"];
   for (const r of att.rows) {
     body.push(`<tr><td class="name" title="${esc(r.area)}">${esc(shortArea(r.area))}</td>` +
-      P.map((p) => attCell(r.cells[p], p, mode, att, r.area)).join("") + `</tr>`);
+      P.map((p) => attCell(r.cells[p], p, mode, att, r.area)).join("") +
+      attRateCell(attPeriodRate(r.cells, att)) + `</tr>`);
   }
   body.push(`<tr class="total"><td>总计</td>` +
-    P.map((p) => attCell(att.totals[p], p, mode, att, "")).join("") + `</tr></tbody>`);
+    P.map((p) => attCell(att.totals[p], p, mode, att, "")).join("") +
+    attRateCell(attPeriodRate(att.totals, att)) + `</tr></tbody>`);
   const t = $(id);
   t.style.width = totalW + "px";
   t.style.minWidth = totalW + "px";
@@ -663,13 +739,18 @@ function render() {
   } else {
     blocks.hidden = false;
     const day = att.totals["全天"] || { due: 0, real: 0, valid: 0, realRate: null, dueRate: null };
+    const rateAll = attPeriodRate(att.totals, att);   // v3.20.0：整商加权值（总计行同一个数）
     $("att-kpi").innerHTML =
       `整商全天：应排 <b>${fmt(day.due)}</b> · 实排 <b>${fmt(day.real)}</b> · 有效出勤 <b>${fmt(day.valid)}</b>` +
       `　｜　实排达成 <b>${day.realRate == null ? "—" : attPct(day.realRate)}</b>` +
-      ` · 应排达成 <b>${day.dueRate == null ? "—" : attPct(day.dueRate)}</b>`;
+      ` · 应排达成 <b>${day.dueRate == null ? "—" : attPct(day.dueRate)}</b>` +
+      ` · 时段排班率 <b>${rateAll.value == null ? "—" : attPct(rateAll.value)}</b>`;
     let note = `应排 = 排班统计「应排人数」；实排 = 「排班人数」；有效出勤 = 考勤「排班状态=排班」且` +
       `（时段有效在线≥该时段标准 且 时段完单≥该时段标准）的去重骑手数，全天按 6h / 18 单。` +
-      `实排达成 = 有效出勤÷实排；应排达成 = 有效出勤÷应排（多排班可 >100%，不封顶）。`;
+      `实排达成 = 有效出勤÷实排；应排达成 = 有效出勤÷应排（多排班可 >100%，不封顶）。` +
+      `末列「时段排班率」= Σ(11 时段完成率 × 时段权重)/100：已结束班次按 min(有效出勤/应排,100%)，` +
+      `今天未开始 / 进行中的班次按 min(排班/应排,100%) 补，无该班次或应排 0 按 100%；` +
+      `当前权重合计 ${attPct(rateAll.wsum)}，与排班模块「时段权重」面板共用（改一次两边同步）。`;
     note += history
       ? ` 历史日期取「出勤统计 → 导出明细数据」的骑手时段明细；系统全天行「是否达成」标记有误，本页忽略它，按有效在线≥6小时且完单≥18单手工判定。`
       : ` 今天只显示 <b>已结束</b> 的班次：未跑完的班次人还在陆续上线、单还在攒，算成不达标没意义，结束后会自动出现。` +
@@ -1252,6 +1333,12 @@ window.__SET_HIST__ = (obj, detail) => {
   bindHistModal();
   bindViewSwitch();
   bindRosterDay();
+  // v3.20.0：排班模块改了时段权重 → 本机实时重算，不用刷新页面、不发任何请求
+  window.addEventListener("storage", (e) => {
+    if (e.key && e.key !== ATT_LS_WEIGHTS) return;
+    state.weights = loadAttWeights();
+    if (state.assess && state.assess.attendance && state.assess.attendance.ok) render();
+  });
   applyView();       // 按上次选的页签先把显示摆好，数据到了再渲染表格
   applyRosterDay();  // 全天开关默认关，历史日期下先藏起来
   const a = localStorage.getItem("wb_att_auto"); if (a != null) $("auto").checked = a === "1";

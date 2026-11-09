@@ -66,6 +66,12 @@ table.tbl.att td.att-cell.warn b { color: #EA580C; }
 table.tbl.att td.att-cell.bad b { color: #B91C1C; }
 table.tbl.att td.att-cell.pending b { color: #9CA3AF; font-size: 12.5px; }
 table.tbl.att td.att-cell.zero { color: #9CA3AF; }
+/* v3.20.0 末列「时段排班率」：沿用 att-cell 两行版式与绿/橙/红配色，浅蓝底与班次列区分 */
+table.tbl.att thead th.att-rate { background: #E8F1FD; color: #1D4ED8; font-size: 13px; }
+table.tbl.att tbody td.att-rate { background: #F7FAFF; }
+table.tbl.att tbody tr.total td.att-rate { background: #FFF3D6; }
+table.tbl.att td.att-rate b { font-size: 14px; }
+table.tbl.att td.att-rate span { font-size: 10.5px; }
 /* 纯净模式：出勤页没有播报区，隐藏概览以外的工具性质区块 */
 body.clean.att-page .notice, body.clean.att-page .progress-wrap,
 body.clean.att-page .foot-meta { display: none !important; }

@@ -1,6 +1,6 @@
 {
-  "version": "3.19.1",
-  "notes": "修复运力模块左右滑动时的列隐藏异常：移除滚动时整列 visibility:hidden 的逻辑（隐藏列仍占布局宽度，导致冻结区右侧留白、表头与数据看似缺列错位），22 列始终全部渲染，改由不透明 sticky 冻结列自然盖住滚动区；导出图不再需要可见性还原，排序/筛选/冻结口径全部不变",
-  "download": "https://github.com/hubiqi/fengshen-ext/releases/download/v3.19.1/fengshen-ext-v3.19.1.zip",
+  "version": "3.20.0",
+  "notes": "出勤达成实排/应排两张表末列新增「时段排班率」= Σ(11 时段完成率 × 时段权重)/100：已结束班次按 min(有效出勤/应排,100%)，T0 未开始/进行中班次降级按 min(排班/应排,100%)，无该班次或应排 0 按 100%；总计行按整商逐时段重新加权；权重与排班模块共用 wb_sch_weights、改一次两边实时同步，全部本机重算 0 额外请求",
+  "download": "https://github.com/hubiqi/fengshen-ext/releases/download/v3.20.0/fengshen-ext-v3.20.0.zip",
   "published_at": "2026-11-09"
 }
