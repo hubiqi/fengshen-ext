@@ -7,6 +7,7 @@
  *   knightRentPizza.queryTeamKnightInfo 站点骑手 [{teamId,knightId,knightName,mobile}]
  *   knightRentPizza.createRent          登记，固定 rentType=2
  *   ehr/staff/knight/list       人资名单（departmentId=站点 id），带 entryTime / leaveTime / workStatus
+ *   knightRentPizza.queryList   已有租用单（queryType=2），带 knightId / categoryId / startTime / endTime
  *
  * 租用登记与「装备领用」的区别：领用走 rentType=1、只有 startTime、需要 typeId+categoryId；
  * 租用走 rentType=2、有 startTime + endTime、只需要 categoryId。这里只做租用。
@@ -19,9 +20,13 @@
  *   1) 批量执行（表格导入）：CSV / XLSX / 直接粘贴都能识别，逐行匹配骑手与物资类型，
  *      预览里标出每行的校验结果，只执行通过的行。模板表头固定 7 列。
  *   2) 本月可绑定日期：用「人资名单的入职 / 离职时间 × 本月日历」算出每位骑手哪天能绑定
- *      （入职前、离职后、今天之前都不能绑），页面画条形图，另可导出日历矩阵 / 逐日明细 CSV。
- *      注意：服务端没有开放「已有租用单查询」接口，所以这里只按在职区间算，
- *      不代表该日期一定没被别的租用单占用。
+ *      （入职前、离职后、早于 T-6 都不能绑），页面画条形图，另可导出日历矩阵 / 逐日明细 CSV。
+ *
+ * v3.23.0 两条业务规则：
+ *   1) 同一骑手 + 同一物资类型的租用单**区间不能重叠**：新单起始日必须 > 已有单结束日
+ *      （例：已有 11-01~11-03，则新单最早 11-04 开始）。数据源是风神物资租用页的
+ *      queryList/1.0（queryType=2），逐条 / 批量 / 表格导入 / 可绑定日历四处共用同一套校验。
+ *   2) 可绑定窗口由「今天起」放宽到「T-6 起」（可补登记最近 6 天），但入职前 / 离职后仍不可绑。
  */
 
 const XT = "https://httpizza.ele.me/xtop/";
@@ -29,12 +34,17 @@ const API_TEAMS = XT + "xtop.lpd.intelligentConfig.getTeamsAll/1.0";
 const API_TYPES = XT + "xtop.knight.task.mng.growth.knightRentPizza.queryRentType/1.0";
 const API_KNIGHTS = XT + "xtop.knight.task.mng.growth.knightRentPizza.queryTeamKnightInfo/1.0";
 const API_CREATE = XT + "xtop.knight.task.mng.growth.knightRentPizza.createRent/1.0";
+const API_RENT_LIST = XT + "xtop.knight.task.mng.growth.knightRentPizza.queryList/1.0";
 const API_STAFF = "https://app2-edu.ele.me/kunkka-svr/ehr/staff/knight/list";
 
 const RENT_TYPE = 2;                 // 2 = 物资租用（1 = 装备领用，本页不用）
+const QUERY_TYPE = 2;                // queryList 的 queryType：2=租用记录，1=装备领用
 const BATCH_GAP_MS = 150;            // 批量提交间隔，与原插件一致
 const STAFF_PAGE_SIZE = 500;         // 人资名单每页条数（运力模块实测可用）
 const STAFF_MAX_PAGES = 6;           // 单站点最多翻 6 页 = 3000 人，防异常翻页
+const RENT_PAGE_SIZE = 500;          // 已有租用单每页条数（实测 500 可用）
+const RENT_MAX_PAGES = 20;           // 最多 20 页 = 10000 条
+const BIND_BACK_DAYS = 6;            // 可补登记窗口：T-6 起（含）到未来
 const IMPORT_MAX_ROWS = 200;         // 一次导入最多执行 200 行
 const LS_SITE = "wb_rent_site";
 const LS_HISTORY = "wb_rent_history";
@@ -77,6 +87,13 @@ function ymd(v) {
   return "";
 }
 const curMonth = () => todayStr().slice(0, 7);
+/** 最早可登记日 = 今天往前 BIND_BACK_DAYS 天（含当天） */
+const earliestBindDate = (today) => shiftDate(today || todayStr(), -BIND_BACK_DAYS);
+/** 服务端时间戳（毫秒）→ 本地时区的 YYYY-MM-DD；createRent 也是按本地时区写 T00:00:00 / T23:59:59 */
+const ymdFromTs = (ms) => {
+  const d = new Date(Number(ms));
+  return Number.isFinite(d.getTime()) ? dateStrOf(d) : "";
+};
 /** 某月全部日期（YYYY-MM-DD 数组） */
 function monthDays(month) {
   const [y, m] = String(month || curMonth()).split("-").map(Number);
@@ -107,8 +124,14 @@ const state = {
   rosterErr: "",
   rosterLoading: false,
   rosterSeq: 0,               // 站点切换防串号：只认最后一次请求的结果
+  rents: [],                  // 服务端已有租用单 [{knightId,categoryId,typeName,start,end,teamId,teamName}]
+  rentsAt: null,
+  rentsErr: "",
+  rentsLoading: false,
+  rentsSeq: 0,
   bindMonth: curMonth(),
   bindScope: "site",
+  bindType: "all",            // all / 10001 / 10002：可绑定日历按哪种物资类型算占用
   bindLeft: false,
   bindRowsCache: [],
   importRows: [],             // [{line,name,mobile,knightId,...,res:{ok,err,...},done,result}]
@@ -233,6 +256,109 @@ async function loadRoster(teamId, teamName) {
   }
   return [...byId.values()];
 }
+/** 已有租用单：物资租用页的「查询」接口。queryType=2 = 租用记录（1 = 装备领用）。
+ *  teamIds 支持一次传多个站点；分页 pageSize=500 实测可用。 */
+async function loadRents(teamIds) {
+  const ids = (teamIds || []).map(num).filter((x) => x > 0);
+  const out = [];
+  let seen = 0;
+  for (let p = 1; p <= RENT_MAX_PAGES; p++) {
+    const j = await postApi(API_RENT_LIST, {
+      params: {
+        goodsBusinessRentQueryDto: {
+          page: p, pageSize: RENT_PAGE_SIZE, teamIds: ids, queryType: QUERY_TYPE
+        }
+      }
+    });
+    if (!okJson(j)) throw new Error("已有租用单：" + msgOf(j));
+    const d = (j && j.result && j.result.data) || {};
+    const list = Array.isArray(d.goodsBusinessRentRecordDtos) ? d.goodsBusinessRentRecordDtos : [];
+    seen += list.length;
+    for (const x of list) {
+      if (num(x.rentType) !== RENT_TYPE) continue;      // 只认租用，装备领用不参与
+      if (!(num(x.startTime) > 0) || !(num(x.endTime) > 0)) continue;  // 脏数据（0 / 空时间戳）
+      const start = ymdFromTs(x.startTime), end = ymdFromTs(x.endTime);
+      if (!start || !end || start > end) continue;
+      out.push({
+        id: num(x.id), knightId: num(x.knightId), knightName: String(x.knightName || ""),
+        categoryId: num(x.categoryId), typeName: String(x.categoryName || typeName(x.categoryId)),
+        start, end, num: num(x.num), status: num(x.status),
+        teamId: String(x.teamId || ""), teamName: String(x.teamName || ""),
+        local: false
+      });
+    }
+    if (!list.length || list.length < RENT_PAGE_SIZE || (num(d.total) && seen >= num(d.total))) break;
+  }
+  return out;
+}
+/** 站点切换 / 刷新后重拉已有租用单；失败只影响防重叠校验，不挡登记表单。 */
+async function loadRentsInto() {
+  if (!state.siteId) return [];
+  if (window.__WB_TEST__ && !window.__RENT_NET_TEST__) return state.rents;
+  const seq = ++state.rentsSeq;
+  state.rentsLoading = true;
+  state.rentsErr = "";
+  renderBind();
+  let list = [], err = "";
+  // 页面上的防重叠校验只按当前站点取数；「全部站点」导出会另外拉全量，不写进这里
+  const ids = [num(state.siteId)];
+  try { list = await loadRents(ids); }
+  catch (e) { err = String(e && e.message ? e.message : e); }
+  if (seq !== state.rentsSeq) return state.rents;
+  state.rents = list;
+  state.rentsErr = err;
+  state.rentsAt = new Date();
+  state.rentsLoading = false;
+  renderBind();
+  return state.rents;
+}
+/** 提交成功后本地立即并入，保证同一批导入里后面的行也能看到刚提交的单。 */
+function addLocalRent(knightId, categoryId, start, end, n, knightName, typeNameStr) {
+  const rec = {
+    id: 0, knightId: num(knightId), knightName: String(knightName || ""),
+    categoryId: num(categoryId), typeName: String(typeNameStr || typeName(categoryId)),
+    start, end, num: num(n), status: 2,
+    teamId: String(state.siteId), teamName: String(state.siteName || ""),
+    local: true
+  };
+  state.rents.push(rec);
+  return rec;
+}
+
+// ---------------------------------------------------------------- 防重叠（纯函数，四处共用）
+const dayDiff = (a, b) => {
+  const [ay, am, ad] = String(a).split("-").map(Number);
+  const [by, bm, bd] = String(b).split("-").map(Number);
+  return Math.round((Date.UTC(by, bm - 1, bd) - Date.UTC(ay, am - 1, ad)) / 86400000);
+};
+const sameRentKey = (r, knightId, categoryId) =>
+  Number(r.knightId) === Number(knightId) && Number(r.categoryId) === Number(categoryId);
+/** 区间重叠：[start,end] 与已有单 [r.start,r.end] 只要有公共日期就算重叠，
+ *  所以已有 11-01~11-03 时，新单 start=11-03 也算冲突，必须 11-04 起。 */
+function findOverlap(knightId, categoryId, start, end, pool) {
+  return (pool || []).filter((r) => sameRentKey(r, knightId, categoryId)
+    && r.start && r.end && !(end < r.start || start > r.end));
+}
+/** 给出能容纳同样天数、且不与任何已有单/批内已计划单重叠的最早起始日（不早于 T-6）。 */
+function suggestStart(knightId, categoryId, start, end, pool) {
+  const span = Math.max(1, dayDiff(start, end) + 1);
+  const minDate = earliestBindDate();
+  let s = start < minDate ? minDate : start;
+  for (let guard = 0; guard < 400; guard++) {
+    const e = shiftDate(s, span - 1);
+    const hit = (pool || []).find((r) => sameRentKey(r, knightId, categoryId)
+      && r.start && r.end && !(e < r.start || s > r.end));
+    if (!hit) return s;
+    s = shiftDate(hit.end, 1);
+  }
+  return "";
+}
+function overlapText(hits, suggested, typeNameStr) {
+  const first = hits[0] || {};
+  const range = first.start ? `${first.start}~${first.end}` : "已有单";
+  return `与已有 ${typeNameStr || ""} 单重叠（${range}${hits.length > 1 ? ` 等 ${hits.length} 张` : ""}）` +
+    (suggested ? `，最早可从 ${suggested} 开始` : "");
+}
 /** 站点接口失败时的兜底：复用看板记住的站点 ID，至少还能切换（名称显示为 ID）。 */
 function fallbackTeams() {
   try {
@@ -284,6 +410,12 @@ function renderTypes() {
     const prev = el.value;
     el.innerHTML = opts || `<option value="">未取到物资类型</option>`;
     if (prev && state.types.some((t) => String(t.id) === String(prev))) el.value = prev;
+  }
+  const bt = $("bind-type");
+  if (bt) {
+    bt.innerHTML = `<option value="all">全部物资</option>` + opts;
+    bt.value = state.bindType === "all" || state.types.some((t) => String(t.id) === String(state.bindType))
+      ? String(state.bindType) : "all";
   }
 }
 function knightLabel(k) {
@@ -357,6 +489,7 @@ function renderStatus() {
     bits.push("骑手 " + state.knights.length);
     bits.push("物资 " + state.types.length);
     bits.push("更新 " + hhmm(state.finishedAt || new Date()));
+    bits.push("已有单 " + state.rents.length);
     bits.push("通道 " + (state.via === "bridge" ? "静默桥接" : "直连"));
     sub.textContent = bits.join(" · ");
   }
@@ -365,7 +498,7 @@ function renderStatus() {
   const foot = $("foot-meta");
   if (foot) {
     foot.textContent = `数据源：getTeamsAll / queryRentType / queryTeamKnightInfo / createRent（rentType=${RENT_TYPE}）` +
-      ` / ehr/staff/knight/list（本月可绑定）` +
+      ` / queryList（已有单，queryType=${QUERY_TYPE}） / ehr/staff/knight/list（在职区间）` +
       ` · 生成 ${hhmm(state.finishedAt || new Date())} · 本机记录 ${state.history.length} 条`;
   }
 }
@@ -387,17 +520,45 @@ function renderHistory() {
   t.innerHTML = head + `<tbody>${body}</tbody>`;
 }
 // ---------------------------------------------------------------- 本月可绑定日期
-const BIND_LABEL = { ok: "可绑定", past: "已过期", before: "未入职", after: "已离职" };
+const BIND_LABEL = {
+  ok: "可绑定", past: "超出补登期", before: "未入职", after: "已离职", busy: "已占用"
+};
 
-/** 单日状态：入职前 / 离职后 / 今天之前都不可绑定，其余可绑定（离职当日仍算可绑定）。 */
-function bindState(rec, day, today) {
+/** 单日状态：入职前 / 离职后 / 早于 T-6 / 已有同类型租用单占用，都不可绑定。
+ *  离职当日仍算可绑定；busy 是已经展开好的按日占用表。 */
+function bindState(rec, day, today, busy) {
   if (rec.entry && day < rec.entry) return "before";
   if (rec.leave && day > rec.leave) return "after";
-  if (day < today) return "past";
+  if (day < earliestBindDate(today)) return "past";
+  if (busy && busy.length) return "busy";
   return "ok";
 }
-/** 按人资名单算「谁在本月哪天可绑定」。默认只留本月还有可绑定日的人，勾了「含已离职」则本月在职过的都留。 */
-function computeBind(list, month, includeLeft) {
+/** 某骑手在所选物资类型下，被已有租用单覆盖的日期 → 占用说明。 */
+function busyMapFor(knightId, typeFilter, pool) {
+  const map = Object.create(null);
+  const tf = String(typeFilter == null ? state.bindType : typeFilter);
+  const src = pool || state.rents;
+  for (const r of src) {
+    if (Number(r.knightId) !== Number(knightId)) continue;
+    if (tf !== "all" && String(r.categoryId) !== tf) continue;
+    let d = r.start;
+    for (let i = 0; i < 400 && d <= r.end; i++) {
+      (map[d] = map[d] || []).push(`${r.typeName} ${r.start}~${r.end}`);
+      d = shiftDate(d, 1);
+    }
+  }
+  return map;
+}
+/** 本月与该骑手（所选类型）有关的已有单，用于导出时写清楚为什么不能绑。 */
+function rentsInMonth(knightId, days, typeFilter, pool) {
+  const first = days[0], last = days[days.length - 1];
+  const tf = String(typeFilter == null ? state.bindType : typeFilter);
+  return (pool || state.rents).filter((r) => Number(r.knightId) === Number(knightId)
+    && (tf === "all" || String(r.categoryId) === tf)
+    && r.start <= last && r.end >= first);
+}
+/** 按人资名单 + 已有租用单算「谁在本月哪天可绑定」。默认只留本月还有可绑定日的人。 */
+function computeBind(list, month, includeLeft, typeFilter, pool) {
   const days = monthDays(month);
   const first = days[0], last = days[days.length - 1];
   const today = todayStr();
@@ -405,16 +566,22 @@ function computeBind(list, month, includeLeft) {
   for (const rec of list || []) {
     const inMonth = (!rec.entry || rec.entry <= last) && (!rec.leave || rec.leave >= first);
     if (includeLeft ? !inMonth : false) continue;
-    const cells = days.map((d) => bindState(rec, d, today));
+    const busy = busyMapFor(rec.id, typeFilter, pool);
+    const cells = days.map((d) => bindState(rec, d, today, busy[d]));
     const okDays = days.filter((d, i) => cells[i] === "ok");
     if (!includeLeft && !okDays.length) continue;
-    out.push({ ...rec, cells, okDays });
+    const ownRents = rentsInMonth(rec.id, days, typeFilter, pool);
+    out.push({
+      ...rec, cells, okDays, busy, ownRents,
+      earliest: okDays.length ? okDays[0] : ""
+    });
   }
   out.sort((a, b) => b.okDays.length - a.okDays.length || String(a.name).localeCompare(String(b.name), "zh"));
   return out;
 }
-function bindRows(month, includeLeft, list) {
-  return computeBind(list || state.roster, month || state.bindMonth, !!includeLeft);
+function bindRows(month, includeLeft, list, typeFilter, pool) {
+  return computeBind(list || state.roster, month || state.bindMonth, !!includeLeft,
+    typeFilter == null ? state.bindType : typeFilter, pool);
 }
 function renderBind() {
   const month = state.bindMonth;
@@ -428,14 +595,17 @@ function renderBind() {
       sum.innerHTML = `<span class="rent-msg error">人资名单没取到：${esc(state.rosterErr)}</span>` +
         ` <button id="bind-retry" class="ghost" style="height:24px;padding:0 10px;">重试</button>`;
       const rb = $("bind-retry");
-      if (rb) rb.addEventListener("click", () => loadRosterInto());
+      if (rb) rb.addEventListener("click", () => { loadRosterInto(); loadRentsInto(); });
     } else {
       const okDays = rows.reduce((s, r) => s + r.okDays.length, 0);
       const people = rows.filter((r) => r.okDays.length).length;
       const left = rows.filter((r) => r.leave && r.leave >= todayStr()).length;
+      const busy = rows.reduce((s, r) => s + r.cells.filter((c) => c === "busy").length, 0);
       sum.innerHTML = `<b>${people}</b> 人本月还有可绑定日 · 合计 <b>${okDays}</b> 个可绑定人日` +
         (left ? ` · <b>${left}</b> 人本月离职` : "") +
-        `<span class="rent-hint">（名单 ${state.roster.length} 人，含已离职；只按在职区间算，未含服务端已有租用单）</span>`;
+        `<span class="rent-hint">（T-${BIND_BACK_DAYS} 起可绑 · 名单 ${state.roster.length} 人 · ` +
+        `已有租用单 ${state.rents.length} 张${state.rentsErr ? "【取数失败，占用未生效】" : ""}` +
+        `${busy ? ` · 占用 ${busy} 人日` : ""}）</span>`;
     }
   }
   const box = $("bind-rows");
@@ -452,7 +622,8 @@ function renderBind() {
     `<span>骑手</span><span>入职</span><span>离职</span><span>可绑定</span>` +
     `<span class="bind-bar">${days.map((d) => `<i>${Number(d.slice(-2))}</i>`).join("")}</span></div>`;
   const body = rows.slice(0, 80).map((r) => {
-    const tip = r.okDays.length ? `${r.okDays[0]} ~ ${r.okDays[r.okDays.length - 1]} 可绑定` : "本月无剩余可绑定日";
+    const tip = (r.okDays.length ? `最早可从 ${r.okDays[0]} 开始` : "本月无剩余可绑定日") +
+      (r.ownRents.length ? ` · 已有单 ${r.ownRents.slice(0, 2).map((x) => `${x.typeName} ${x.start}~${x.end}`).join("；")}` : "");
     return `<div class="bind-row" title="${esc(r.name)}（${r.id}）· ${esc(tip)}">` +
       `<span class="br-name">${esc(r.name || "未命名")}<em>${esc(r.id)}${r.status === "已离职" ? " · 已离职" : ""}</em></span>` +
       `<span class="br-date">${esc(r.entry || "—")}</span>` +
@@ -500,30 +671,40 @@ async function exportBind(kind) {
   const month = state.bindMonth;
   const days = monthDays(month);
   let list = state.roster;
+  let rentPool = state.rents;
   let scopeLabel = state.siteName || String(state.siteId);
   if (state.bindScope === "all") {
     scopeLabel = "全部站点";
     list = await loadAllRoster();
     if (!list.length) { showMsg("bind-msg", "全部站点都没取到名单，无法导出", "error"); return; }
+    showMsg("bind-msg", "正在读取全部站点的已有租用单…", "info");
+    try {
+      rentPool = await loadRents(state.teams.map((t) => num(t.id)));
+    } catch (e) {
+      showMsg("bind-msg", "全部站点已有租用单读取失败，导出的占用列可能不完整：" + String(e && e.message ? e.message : e), "error");
+    }
   } else if (!list.length) {
     showMsg("bind-msg", "当前站点还没有人资名单，先点「重试」", "error");
     return;
   }
-  const rows = bindRows(month, state.bindLeft, list);
+  const rows = bindRows(month, state.bindLeft, list, state.bindType, rentPool);
   if (!rows.length) { showMsg("bind-msg", "这个月没有可导出的骑手", "error"); return; }
   const fileBase = `物资可绑定_${String(scopeLabel).replace(/[\\/:*?"<>|]/g, "_")}_${month}`;
 
   if (kind === "matrix") {
-    const head = ["站点", "骑手姓名", "手机号", "骑士ID", "入职日期", "离职日期", "在职状态", "可绑定天数", "可绑定区间"]
+    const head = ["站点", "骑手姓名", "手机号", "骑士ID", "入职日期", "离职日期", "在职状态",
+      "可绑定天数", "可绑定区间", "最早可绑定起日", "已有单(本月)"]
       .concat(days.map((d) => d.slice(-2)));
     const body = rows.map((r) => [
       r.teamName || scopeLabel, r.name, r.mobile, r.id, r.entry || "", r.leave || "", r.status || "",
       r.okDays.length,
-      r.okDays.length ? `${r.okDays[0]} ~ ${r.okDays[r.okDays.length - 1]}` : ""
+      r.okDays.length ? `${r.okDays[0]} ~ ${r.okDays[r.okDays.length - 1]}` : "",
+      r.earliest || "",
+      r.ownRents.map((x) => `${x.typeName} ${x.start}~${x.end}`).join("；")
     ].concat(r.cells.map((c) => BIND_LABEL[c])));
     downloadCsv(`${fileBase}_日历.csv`, [head].concat(body));
   } else {
-    const head = ["站点", "骑手姓名", "骑士ID", "手机号", "日期", "星期", "状态", "说明"];
+    const head = ["站点", "骑手姓名", "骑士ID", "手机号", "日期", "星期", "状态", "占用单", "说明"];
     const body = [];
     for (const r of rows) {
       for (let i = 0; i < days.length; i++) {
@@ -534,9 +715,11 @@ async function exportBind(kind) {
         else if (c === "ok" && r.leave === days[i]) note = "离职日";
         else if (c === "before") note = "还没入职";
         else if (c === "after") note = "已离职";
-        else if (c === "past") note = "今天之前，不能倒签";
+        else if (c === "past") note = `早于 T-${BIND_BACK_DAYS}，不能补登记`;
+        else if (c === "busy") note = "同类型已有租用单占用，新单须从该单结束次日开始";
+        const busyText = c === "busy" ? (r.busy[days[i]] || []).join("；") : "";
         body.push([r.teamName || scopeLabel, r.name, r.id, r.mobile, days[i], "周" + weekdayOf(days[i]),
-          BIND_LABEL[c], note]);
+          BIND_LABEL[c], busyText, note]);
       }
     }
     if (!body.length) { showMsg("bind-msg", "可绑定明细是空的", "error"); return; }
@@ -564,6 +747,24 @@ function validate(knightId, typeId, n, start, end) {
   if (!start || !end) return "请选择开始 / 结束日期";
   if (start > end) return "开始日期不能晚于结束日期";
   return "";
+}
+/** 时间窗口：不能早于 T-6；人资名单取到时，还要落在在职区间内。 */
+function checkWindow(knightId, start, end) {
+  const minDate = earliestBindDate();
+  if (start < minDate) return `开始日期不能早于 T-${BIND_BACK_DAYS}（${minDate}）`;
+  const rec = state.roster.find((x) => Number(x.id) === Number(knightId));
+  if (!rec) return "";                       // 名单没取到就不硬拦
+  if (rec.entry && start < rec.entry) return `开始日期早于入职日 ${rec.entry}`;
+  if (rec.leave && end > rec.leave) return `结束日期晚于离职日 ${rec.leave}`;
+  return "";
+}
+/** 同骑手 + 同类型不能重叠；命中时给出能容纳同样天数的最早起始日。 */
+function checkOverlap(knightId, typeId, start, end, pool) {
+  const src = pool || state.rents;
+  const hits = findOverlap(knightId, typeId, start, end, src);
+  if (!hits.length) return "";
+  const suggested = suggestStart(knightId, typeId, start, end, src);
+  return overlapText(hits, suggested, typeName(typeId));
 }
 function payloadOf(knightId, typeId, n, start, end) {
   const startTime = new Date(start + "T00:00:00").getTime();
@@ -594,7 +795,9 @@ async function submitOne() {
   const n = Math.trunc(num($("one-num").value));
   const start = $("one-start").value;
   const end = $("one-end").value;
-  const err = validate(knightId, typeId, n, start, end);
+  const err = validate(knightId, typeId, n, start, end)
+    || checkWindow(knightId, start, end)
+    || checkOverlap(knightId, typeId, start, end);
   if (err) { showMsg("one-msg", err, "error"); return { ok: false, msg: err }; }
   const k = currentKnight(knightId);
   const knightName = k ? k.name : String(knightId);
@@ -620,6 +823,8 @@ async function submitOne() {
     typeName: typeName(typeId), num: n, start, end, ok, msg: ok ? "" : msg
   });
   if (ok) {
+    addLocalRent(knightId, typeId, start, end, n, knightName, typeName(typeId));
+    renderBind();
     $("one-knight").value = "";
     $("one-num").value = "1";
   }
@@ -635,8 +840,11 @@ async function submitBatch() {
   const end = $("batch-end").value;
   const err = validate(ids[0], typeId, n, start, end);
   if (err) { showMsg("batch-msg", err, "error"); return { ok: false, msg: err }; }
+  const blocked = ids.filter((id) => checkWindow(id, start, end) || checkOverlap(id, typeId, start, end)).length;
   if (!window.__RENT_NO_CONFIRM__ && !confirm(
-    `确认为 ${ids.length} 位骑手批量登记 ${typeName(typeId)} × ${n}\n${start} ~ ${end}？\n\n每条间隔 ${BATCH_GAP_MS}ms，提交会真实写入租用单。`
+    `确认为 ${ids.length} 位骑手批量登记 ${typeName(typeId)} × ${n}\n${start} ~ ${end}？` +
+    (blocked ? `\n其中 ${blocked} 位因时间重叠 / 超出补登期会被跳过。` : "") +
+    `\n\n每条间隔 ${BATCH_GAP_MS}ms，提交会真实写入租用单。`
   )) return { ok: false, canceled: true };
 
   state.submitting = true;
@@ -650,12 +858,18 @@ async function submitBatch() {
     prog.innerHTML = `正在提交 ${i + 1}/${ids.length} · 成功 ${ok} · 失败 ${bad}` +
       `<div class="rp-bar"><i style="width:${Math.round(i / ids.length * 100)}%"></i></div>`;
     let oneOk = false, msg = "";
-    try {
-      const j = await postApi(API_CREATE, payloadOf(k.id, typeId, n, start, end));
-      oneOk = okJson(j);
-      msg = oneOk ? "" : msgOf(j);
-    } catch (e) {
-      msg = String(e && e.message ? e.message : e);
+    const pre = checkWindow(k.id, start, end) || checkOverlap(k.id, typeId, start, end);
+    if (pre) {
+      msg = pre;                       // 本地拦下，不发请求
+    } else {
+      try {
+        const j = await postApi(API_CREATE, payloadOf(k.id, typeId, n, start, end));
+        oneOk = okJson(j);
+        msg = oneOk ? "" : msgOf(j);
+      } catch (e) {
+        msg = String(e && e.message ? e.message : e);
+      }
+      if (oneOk) addLocalRent(k.id, typeId, start, end, n, k.name, typeName(typeId));
     }
     if (oneOk) ok++; else { bad++; fails.push(`${k.name}（${msg}）`); }
     pushHistory({
@@ -782,17 +996,58 @@ function resolveImportRow(row) {
   return out;
 }
 function resolveImport() {
-  for (const row of state.importRows) row.res = resolveImportRow(row);
-  // 完全相同的行直接拦掉：多半是复制粘贴重复，重复提交会生成两条一样的租用单
+  const planned = [];   // 批内已通过校验的行，后行要避开前行，防止一次导入自己撞自己
   const seen = new Map();
   for (const row of state.importRows) {
+    row.res = resolveImportRow(row);
     if (!row.res.ok) continue;
-    const key = [row.res.knight.id, row.res.typeId, row.res.count, row.res.start, row.res.end].join("|");
+    const r = row.res;
+    const win = checkWindow(r.knight.id, r.start, r.end);
+    if (win) { r.ok = false; r.err = win; r.reason = "window"; continue; }
+    // 完全相同的行直接拦掉：多半是复制粘贴重复，重复提交会生成两条一样的租用单
+    const key = [r.knight.id, r.typeId, r.count, r.start, r.end].join("|");
     if (seen.has(key)) {
-      row.res.ok = false;
-      row.res.err = `与第 ${seen.get(key)} 行完全重复，已跳过`;
-    } else seen.set(key, row.line);
+      r.ok = false;
+      r.err = `与第 ${seen.get(key)} 行完全重复，已跳过`;
+      r.reason = "dup";
+      continue;
+    }
+    const pool = state.rents.concat(planned);
+    const clash = checkOverlap(r.knight.id, r.typeId, r.start, r.end, pool);
+    if (clash) {
+      r.ok = false;
+      r.err = clash;
+      r.reason = "overlap";
+      r.suggested = suggestStart(r.knight.id, r.typeId, r.start, r.end, pool);
+      continue;
+    }
+    seen.set(key, row.line);
+    planned.push({
+      knightId: r.knight.id, categoryId: r.typeId, typeName: r.typeName,
+      start: r.start, end: r.end, teamId: String(state.siteId), teamName: String(state.siteName || ""),
+      local: true
+    });
   }
+}
+/** 把因「区间重叠」被拦下的行，按各自最早可用起始日整体顺延（保持原有天数）。 */
+function shiftOverlapRows() {
+  let n = 0;
+  for (const row of state.importRows) {
+    const r = row.res;
+    if (!r || r.ok || r.reason !== "overlap" || !r.suggested) continue;
+    const span = dayDiff(r.start, r.end);
+    row.startRaw = r.suggested;
+    row.endRaw = shiftDate(r.suggested, span);
+    row.done = false;
+    row.result = null;
+    n++;
+  }
+  if (n) {
+    resolveImport();
+    renderImportPreview();
+    showMsg("import-msg", `已把 ${n} 行顺延到最早可用起始日，请再核对预览后执行`, "info");
+  }
+  return n;
 }
 function importStats() {
   const ok = state.importRows.filter((r) => r.res && r.res.ok && !r.done).length;
@@ -911,12 +1166,20 @@ async function runImport() {
         `<div class="rp-bar"><i style="width:${Math.round(i / todo.length * 100)}%"></i></div>`;
     }
     let oneOk = false, msg = "";
-    try {
-      const j = await postApi(API_CREATE, payloadOf(r.knight.id, r.typeId, r.count, r.start, r.end));
-      oneOk = okJson(j);
-      msg = oneOk ? "" : msgOf(j);
-    } catch (e) {
-      msg = String(e && e.message ? e.message : e);
+    // 执行前再查一次：预览之后可能又提交了别的单，避免照着过期预览写出重叠单
+    const pre = checkWindow(r.knight.id, r.start, r.end)
+      || checkOverlap(r.knight.id, r.typeId, r.start, r.end);
+    if (pre) {
+      msg = pre;
+    } else {
+      try {
+        const j = await postApi(API_CREATE, payloadOf(r.knight.id, r.typeId, r.count, r.start, r.end));
+        oneOk = okJson(j);
+        msg = oneOk ? "" : msgOf(j);
+      } catch (e) {
+        msg = String(e && e.message ? e.message : e);
+      }
+      if (oneOk) addLocalRent(r.knight.id, r.typeId, r.start, r.end, r.count, r.knight.name, r.typeName);
     }
     row.done = true;
     row.result = { ok: oneOk, msg };
@@ -943,6 +1206,8 @@ async function runImport() {
 /** 拉当前站点的人资名单（用于「本月可绑定」），失败只影响这一块。 */
 async function loadRosterInto() {
   if (!state.siteId) return [];
+  // 离线测试用 __SET_RENT__ 直接注入名单，别让异步请求把它覆盖掉
+  if (window.__WB_TEST__ && !window.__RENT_NET_TEST__) return state.roster;
   const seq = ++state.rosterSeq;
   state.rosterLoading = true;
   state.rosterErr = "";
@@ -971,6 +1236,8 @@ async function switchSite(siteId) {
   state.knights = [];
   state.roster = [];
   state.rosterErr = "";
+  state.rents = [];
+  state.rentsErr = "";
   renderSites();
   renderBatchList();
   renderKpis();
@@ -985,6 +1252,7 @@ async function switchSite(siteId) {
   }
   renderAll();
   loadRosterInto();          // 不 await：名单慢一点也不挡主表
+  loadRentsInto();           // 已有租用单，防重叠校验的数据源
 }
 async function loadAll() {
   state.loading = true;
@@ -1077,6 +1345,7 @@ function bind() {
     showMsg("import-msg", "", "");
   });
   $("import-run").addEventListener("click", () => runImport());
+  $("import-shift").addEventListener("click", () => shiftOverlapRows());
   $("import-modal").addEventListener("click", (e) => { if (e.target && e.target.id === "import-modal") closeImport(); });
 
   // ---- 本月可绑定
@@ -1088,7 +1357,18 @@ function bind() {
   $("bind-scope").addEventListener("change", (e) => {
     state.bindScope = e.target.value === "all" ? "all" : "site";
     saveBindOpts();
-    showMsg("bind-msg", state.bindScope === "all" ? "导出时会逐个站点读取人资名单，站点多会慢几秒" : "", "info");
+    showMsg("bind-msg", state.bindScope === "all" ? "导出时会逐个站点读取人资名单与已有租用单，站点多会慢几秒" : "", "info");
+  });
+  $("bind-type").addEventListener("change", (e) => {
+    state.bindType = e.target.value || "all";
+    saveBindOpts();
+    renderBind();
+  });
+  $("bind-refresh").addEventListener("click", async () => {
+    showMsg("bind-msg", "正在重新读取已有租用单…", "info");
+    const list = await loadRentsInto();
+    if (!state.rentsErr) showMsg("bind-msg", `已读取 ${list.length} 张已有租用单`, "success");
+    else showMsg("bind-msg", "读取失败：" + state.rentsErr, "error");
   });
   $("bind-left").addEventListener("change", (e) => {
     state.bindLeft = !!e.target.checked;
@@ -1107,7 +1387,9 @@ function bind() {
 }
 function saveBindOpts() {
   try {
-    localStorage.setItem(LS_BIND, JSON.stringify({ month: state.bindMonth, scope: state.bindScope, left: state.bindLeft }));
+    localStorage.setItem(LS_BIND, JSON.stringify({
+      month: state.bindMonth, scope: state.bindScope, type: state.bindType, left: state.bindLeft
+    }));
   } catch (e) { /* ignore */ }
 }
 
@@ -1131,6 +1413,17 @@ window.__SET_RENT__ = (o) => {
   if (o.bindMonth) state.bindMonth = String(o.bindMonth);
   if (o.bindLeft != null) state.bindLeft = !!o.bindLeft;
   if (o.bindScope) state.bindScope = String(o.bindScope);
+  if (o.bindType != null) state.bindType = String(o.bindType);
+  if (Array.isArray(o.rents)) state.rents = o.rents.map((r) => ({
+    id: num(r.id), knightId: num(r.knightId == null ? r.kid : r.knightId),
+    knightName: String(r.knightName || ""),
+    categoryId: num(r.categoryId == null ? r.typeId : r.categoryId),
+    typeName: String(r.typeName || typeName(r.categoryId == null ? r.typeId : r.categoryId)),
+    start: ymd(r.start), end: ymd(r.end), num: num(r.num) || 1,
+    status: num(r.status) || 2,
+    teamId: String(r.teamId || state.siteId), teamName: String(r.teamName || ""),
+    local: !!r.local
+  }));
   if (Array.isArray(o.importRows)) {
     state.importRows = o.importRows.map((r) => ({
       line: num(r.line) || 1, name: String(r.name || ""), mobile: String(r.mobile || ""),
@@ -1147,12 +1440,15 @@ window.__SET_RENT__ = (o) => {
 };
 window.__RENT__ = {
   state, postApi, getApi, loadAll, loadTeams, loadTypes, loadKnights, switchSite,
-  loadRoster, loadRosterInto, computeBind, bindRows, bindState, monthDays, ymd, exportBind,
-  parseCsv, mapTable, resolveImportRow, resolveImport, setImportRows, runImport,
+  loadRoster, loadRosterInto, loadRents, loadRentsInto, addLocalRent,
+  findOverlap, suggestStart, checkOverlap, checkWindow, overlapText, dayDiff, earliestBindDate,
+  computeBind, bindRows, bindState, busyMapFor, monthDays, ymd, exportBind,
+  parseCsv, mapTable, resolveImportRow, resolveImport, shiftOverlapRows, setImportRows, runImport,
   downloadTemplate, importStats, downloadCsv, csvCell, saveBindOpts,
   submitOne, submitBatch, validate, payloadOf, renderAll, renderHistory, renderBind, renderImportPreview,
-  API_TEAMS, API_TYPES, API_KNIGHTS, API_CREATE, API_STAFF, RENT_TYPE, BATCH_GAP_MS, HISTORY_MAX,
-  STAFF_PAGE_SIZE, IMPORT_MAX_ROWS
+  API_TEAMS, API_TYPES, API_KNIGHTS, API_CREATE, API_RENT_LIST, API_STAFF,
+  RENT_TYPE, QUERY_TYPE, BATCH_GAP_MS, HISTORY_MAX, BIND_BACK_DAYS,
+  STAFF_PAGE_SIZE, RENT_PAGE_SIZE, IMPORT_MAX_ROWS
 };
 
 (async function init() {
@@ -1172,12 +1468,14 @@ window.__RENT__ = {
     if (o && typeof o === "object") {
       if (o.month) state.bindMonth = String(o.month);
       if (o.scope === "all") state.bindScope = "all";
+      if (o.type) state.bindType = String(o.type);
       state.bindLeft = !!o.left;
     }
   } catch (e) { /* ignore */ }
-  const bm = $("bind-month"), bs = $("bind-scope"), bl = $("bind-left");
+  const bm = $("bind-month"), bs = $("bind-scope"), bt = $("bind-type"), bl = $("bind-left");
   if (bm) bm.value = state.bindMonth;
   if (bs) bs.value = state.bindScope;
+  if (bt) bt.value = state.bindType;
   if (bl) bl.checked = state.bindLeft;
   try {
     const m = chrome.runtime.getManifest && chrome.runtime.getManifest();

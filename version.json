@@ -1,6 +1,6 @@
 {
-  "version": "3.22.0",
-  "notes": "物资租用加「批量执行（表格导入）」：模板 CSV / xlsx / 粘贴 Excel 区域都能识别，逐行校验骑手、物资类型、数量、日期并拦重复行，只执行通过的行；新增「本月可绑定日期」，用人资名单的入职 / 离职时间 × 本月日历算出每人哪天能绑定，页面画月度条形图，可导出日历矩阵与逐日明细 CSV（当前站点或全部站点）",
-  "download": "https://github.com/hubiqi/fengshen-ext/releases/download/v3.22.0/fengshen-ext-v3.22.0.zip",
+  "version": "3.23.0",
+  "notes": "物资租用接入已有租用单 queryList/1.0：同一骑手 + 同一类型区间不能重叠（11-01~11-03 已有单 → 新单最早 11-04），逐条 / 批量 / 表格导入统一拦截并给建议起始日，导入防批内重叠、可一键顺延；可绑定窗口改为 T-6 到未来，入职前 / 离职后 / 已有单占用日不可绑，日历按物资类型筛选占用，导出新增最早可绑定起日与已有单 / 占用单列",
+  "download": "https://github.com/hubiqi/fengshen-ext/releases/download/v3.23.0/fengshen-ext-v3.23.0.zip",
   "published_at": "2026-11-10"
 }
