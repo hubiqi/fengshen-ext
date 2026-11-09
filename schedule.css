@@ -80,8 +80,55 @@ body[data-show="pct"] .sch-cell .v-frac,
 body[data-show="frac"] .sch-cell .v-gap,
 body[data-show="frac"] .sch-cell .v-pct { display: none !important; }
 
-/* 纯净看板：工具条等不进画面 */
+/* ---------- v3.19.0「时段排班率」加权列 ---------- */
+table.tbl.sch th.sch-rate, table.tbl.sch td.sch-rate { min-width: 96px; background: #F8FAFF; }
+table.tbl.sch tbody tr:nth-child(even) td.sch-rate { background: #F2F6FF; }
+table.tbl.sch tbody tr.sch-total td.sch-rate { background: #E6EEFC; }
+table.tbl.sch td.sch-rate > span { display: block; line-height: 1.45; white-space: nowrap; }
+table.tbl.sch td.sch-rate .rate-main { font-size: 15px; font-weight: 700; }
+table.tbl.sch td.sch-rate .rate-sub { font-size: 10.5px; color: #9CA3AF; }
+table.tbl.sch td.sch-rate .pct-good { color: #15803D; }
+table.tbl.sch td.sch-rate .pct-bad { color: #B91C1C; }
+table.tbl.sch td.sch-rate .pct-mid { color: #374151; }
+
+/* ---------- v3.19.0 时段权重配置弹窗 ---------- */
+.sch-weight-overlay { position: fixed; inset: 0; z-index: 9999;
+  background: rgba(15, 23, 42, .45); display: flex; align-items: center; justify-content: center;
+  padding: 20px; }
+.sch-weight-overlay[hidden] { display: none; }
+.sch-weight-modal { width: 430px; max-width: 100%; max-height: min(86vh, 760px);
+  display: flex; flex-direction: column; background: #FFFFFF; border-radius: 12px;
+  box-shadow: 0 18px 50px rgba(15, 23, 42, .3); padding: 18px 20px 16px; }
+.sch-weight-head { display: flex; align-items: center; justify-content: space-between;
+  padding-bottom: 12px; border-bottom: 1px solid #E5E7EB; }
+.sch-weight-head strong { font-size: 16px; color: #1F2937; }
+.sch-weight-head button { border: 0; background: transparent; font-size: 20px; line-height: 1;
+  color: #6B7280; padding: 0 4px; cursor: pointer; }
+.sch-weight-desc { font-size: 12px; line-height: 1.8; color: #4B5563;
+  background: #F8FAFF; border: 1px solid #DCE6F7; border-radius: 6px;
+  padding: 9px 11px; margin: 12px 0 10px; }
+.sch-weight-list { overflow-y: auto; flex: 1 1 auto; }
+.sch-weight-row { display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; padding: 6px 4px; border-bottom: 1px solid #F1F5F9; font-size: 13px; color: #374151; }
+.sch-weight-row:last-child { border-bottom: 0; }
+.sch-weight-row label { flex: 1 1 auto; }
+.sch-weight-box { display: inline-flex; align-items: center; gap: 6px; }
+.sch-weight-box input { width: 82px; height: 30px; text-align: right; font-size: 13px;
+  font-family: inherit; color: #1F2937; background: #FFFFFF;
+  border: 1px solid #D1D5DB; border-radius: 6px; padding: 0 8px; }
+.sch-weight-box input:focus { outline: 2px solid #BFDBFE; border-color: #3B82F6; }
+.sch-weight-box input.bad { border-color: #DC2626; background: #FEF2F2; }
+.sch-weight-box span { font-size: 12px; color: #6B7280; }
+.sch-weight-sum { font-size: 13px; color: #374151; padding: 10px 2px 12px; }
+.sch-weight-sum b { font-size: 15px; color: #1D4ED8; }
+.sch-weight-sum #weight-warn { font-size: 11.5px; color: #B45309; margin-left: 10px; }
+.sch-weight-foot { display: flex; gap: 10px; justify-content: flex-end; padding-top: 12px;
+  border-top: 1px solid #E5E7EB; }
+.sch-weight-foot button { font-size: 13px; padding: 7px 18px; border-radius: 6px; }
+
+/* 纯净看板：工具条 / 弹窗都不进画面 */
 body.clean.sch-page .toolbar,
 body.clean.sch-page .notice,
 body.clean.sch-page .progress-wrap,
-body.clean.sch-page .foot-meta { display: none !important; }
+body.clean.sch-page .foot-meta,
+body.clean.sch-page .sch-weight-overlay { display: none !important; }

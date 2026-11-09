@@ -15,9 +15,12 @@
  *   分数   = 排班人数 / 应排人数
  *   全天   = 排班统计里的「全天」行；时段列按当天实际排班动态生成（按 KPI 11 时段顺序）
  *   4排班占比 = 当天排了 ≥4 个班次的骑手数 / 该组「全天」排班人数
- *   总计   = 各列求和（4排班占比分子分母分别求和后再算）
+ *   时段排班率 = Σ(min(排班人数/应排人数, 100%) × 该时段权重)（v3.19.0）
+ *              应排为 0 或当天没有的班次按 100% 计；权重可在「时段权重」面板改
+ *   总计   = 各列求和（4排班占比分子分母分别求和后再算；时段排班率按总计行的
+ *              各时段总应排 / 总排班重新加权算，不是对各组结果求平均）
  *
- * 站点勾选 / 站点↔商圈片 / 显示方式切换都只在本机重算，0 额外请求；
+ * 站点勾选 / 站点↔商圈片 / 显示方式 / 权重修改都只在本机重算，0 额外请求；
  * 切日期才重新导出，结果按日期缓存在内存。
  * 与另外三个页面一样：直连优先、失败自动切「静默桥接」，跟随当前浏览器登录态。
  */
@@ -84,6 +87,33 @@ const fmtPct = (v) => {
 };
 const SHOW_LABEL = { all: "全部", gap: "缺口", pct: "排班率(百分比)", frac: "排班率(分数)" };
 
+// v3.19.0 时段权重默认值（对齐手机端「时段权重配置」截图）：
+// 截图可见 9 项 4/4/4/4/4/30/7/7/20 = 84%，滚动区下面没拍到的夜宵1/夜宵2
+// 按「合计 100%」补足各 8%；两值都能在面板里改。
+const DEFAULT_WEIGHTS = Object.freeze({
+  "凌晨1": 4, "凌晨2": 4, "凌晨3": 4, "早餐1": 4, "早餐2": 4,
+  "午高峰": 30, "下午茶1": 7, "下午茶2": 7, "晚高峰": 20,
+  "夜宵1": 8, "夜宵2": 8
+});
+const LS_WEIGHTS = "wb_sch_weights";
+function loadWeights() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(LS_WEIGHTS) || "null");
+    if (raw && typeof raw === "object") {
+      const out = {};
+      for (const p of PERIOD_ORDER) {
+        const v = Number(raw[p]);
+        out[p] = Number.isFinite(v) && v >= 0 && v <= 100 ? v : DEFAULT_WEIGHTS[p];
+      }
+      return out;
+    }
+  } catch (e) { /* 偏好损坏则用默认 */ }
+  return { ...DEFAULT_WEIGHTS };
+}
+function weightSum(w) {
+  return PERIOD_ORDER.reduce((a, p) => a + num(w[p]), 0);
+}
+
 const savedDate = localStorage.getItem("wb_sch_date");
 const savedShow = localStorage.getItem("wb_sch_show");
 const state = {
@@ -91,6 +121,7 @@ const state = {
   date: validDate(savedDate) ? savedDate : shiftDate(todayStr(), 1),   // 默认 T+1（明天）
   view: localStorage.getItem("wb_sch_view") === "site" ? "site" : "area",
   show: SHOW_LABEL[savedShow] ? savedShow : "all",
+  weights: loadWeights(),      // v3.19.0：11 个时段权重，面板可改、localStorage 记忆
   selected: new Set(),
   inited: false,
   allSites: [],
@@ -244,6 +275,26 @@ function cellParts(c) {
     fracTxt: real + "/" + due
   };
 }
+/**
+ * v3.19.0 时段排班率：Σ(该时段完成率 × 该时段权重) / 100。
+ *  - 完成率 = min(排班人数 / 应排人数 × 100, 100)，多排不奖励；
+ *  - 某时段应排为 0，或当天压根没有这个班次（cells 里没有该行）→ 按 100% 计；
+ *  - 权重合计建议 100%，不强制；合计不是 100% 时结果按实际合计缩放，
+ *    合计为 0 时返回 null（单元格显示「—」，不给出误导性的 0%）。
+ */
+function periodRate(cells, w) {
+  const weights = w || state.weights;
+  let sum = 0, sumW = 0;
+  for (const p of PERIOD_ORDER) {
+    const wp = num(weights[p]);
+    const c = cells && cells.get(p);
+    const due = c ? num(c.due) : 0, real = c ? num(c.real) : 0;
+    const rate = due <= 0 ? 100 : Math.min(real / due * 100, 100);
+    sum += rate * wp;
+    sumW += wp;
+  }
+  return { value: sumW > 0 ? sum / 100 : null, wsum: sumW };
+}
 function compute() {
   const stat = XLSX_READER.pickSheet(state.sheets, ["团队名称", "日期", "时段", "应排人数", "排班人数"]);
   if (!stat) throw new Error("排班导出里找不到「排班统计」表（含 团队名称 / 日期 / 时段 / 应排人数 / 排班人数）");
@@ -314,7 +365,7 @@ function compute() {
   };
 
   const list = [...groups.values()].sort((a, b) => a.name.localeCompare(b.name, "zh"));
-  for (const g of list) g.four = four(g.name);
+  for (const g of list) { g.four = four(g.name); g.rate = periodRate(g.cells); }
   const total = { name: "总计", cells: new Map(), four: { due: 0, real: 0, hasLine: !!line } };
   for (const per of cols) {
     let due = 0, real = 0;
@@ -322,8 +373,11 @@ function compute() {
     total.cells.set(per, { due, real });
   }
   for (const g of list) { total.four.due += g.four.due; total.four.real += g.four.real; }
+  // 总计行按所有站点逐时段汇总后的总应排 / 总排班重新加权，不对各组结果求平均
+  total.rate = periodRate(total.cells);
 
-  state.data = { date, cols, groups: list, total, sites: state.allSites, selected: state.selected, view: state.view };
+  state.data = { date, cols, groups: list, total, sites: state.allSites, selected: state.selected, view: state.view,
+    weightSum: weightSum(state.weights) };
   return state.data;
 }
 
@@ -336,27 +390,39 @@ function cellHtml(c, four) {
     `<span class="v-pct ${p.pctCls}">${esc(p.pctTxt)}</span>` +
     `<span class="v-frac">${esc(p.fracTxt)}</span></td>`;
 }
+/** 加权列单独渲染，不复用 .sch-cell，避免影响「缺口/百分比/分数」三行切换 */
+function rateCellHtml(r) {
+  if (!r || r.value == null) return `<td class="sch-rate" title="权重合计为 0，暂不计算">—</td>`;
+  const cls = r.value >= 100 ? "pct-good" : r.value < 80 ? "pct-bad" : "pct-mid";
+  const tip = `Σ(min(排班人数/应排人数, 100%) × 时段权重)；当前权重合计 ${fmtPct(r.wsum)}；应排为 0 或当天无该班次按 100% 计`;
+  return `<td class="sch-rate" title="${esc(tip)}">` +
+    `<span class="rate-main ${cls}">${esc(fmtPct(r.value))}</span>` +
+    `<span class="rate-sub">权重 ${esc(fmtPct(r.wsum))}</span></td>`;
+}
 function renderTable() {
   const d = state.data;
   const head = `<thead><tr><th class="sch-name">团队名称</th>` +
     d.cols.map((p) => `<th>${esc(p)}</th>`).join("") +
-    `<th class="sch-four">4排班占比</th></tr></thead>`;
+    `<th class="sch-four">4排班占比</th>` +
+    `<th class="sch-rate">时段排班率</th></tr></thead>`;
   const rowHtml = (g, isTotal) => `<tr${isTotal ? ' class="sch-total"' : ""}>` +
     `<td class="sch-name">${esc(g.name)}</td>` +
     d.cols.map((p) => cellHtml(g.cells.get(p))).join("") +
-    cellHtml(g.four, true) + `</tr>`;
+    cellHtml(g.four, true) + rateCellHtml(g.rate) + `</tr>`;
   const body = `<tbody>` + (d.groups.length
     ? d.groups.map((g) => rowHtml(g, false)).join("") + rowHtml(d.total, true)
-    : `<tr><td class="sch-name" colspan="${d.cols.length + 2}">— 未选中任何站点 —</td></tr>`) + `</tbody>`;
+    : `<tr><td class="sch-name" colspan="${d.cols.length + 3}">— 未选中任何站点 —</td></tr>`) + `</tbody>`;
   $("sch-table").innerHTML = head + body;
 }
 function renderSummary() {
   const d = state.data, t = d.total.cells.get("全天") || { due: 0, real: 0 };
   const p = cellParts(t), f = cellParts(d.total.four);
+  const rateVal = d.total.rate && d.total.rate.value != null ? fmtPct(d.total.rate.value) : "—";
   const cards = [
     ["站点", `${d.selected.size}/${d.sites.length}`],
     ["全天应排", String(p.due)], ["全天排班", String(p.real)],
-    ["全天缺口", p.gapTxt], ["全天排班率", p.pctTxt], ["4排班占比", f.pctTxt]
+    ["全天缺口", p.gapTxt], ["全天排班率", p.pctTxt], ["4排班占比", f.pctTxt],
+    ["时段排班率", rateVal]
   ];
   $("sch-summary").innerHTML = cards.map(([k, v]) => {
     const cls = (k === "全天缺口" ? p.gapCls : "");
@@ -364,6 +430,7 @@ function renderSummary() {
   }).join("");
   $("sch-note").textContent = `统计维度：${state.view === "site" ? "站点" : "商圈片"} · 显示方式：${SHOW_LABEL[state.show]}` +
     ` · 已选 ${d.selected.size}/${d.sites.length} 个站点 · 时段列按 ${d.date} 实际排班动态生成（${d.cols.length - 1} 个）` +
+    ` · 时段权重合计 ${fmtPct(d.weightSum)}${Math.abs(d.weightSum - 100) > 0.001 ? "（建议调到 100%）" : ""}` +
     (state.dataNote ? ` · ${state.dataNote}` : "");
 }
 function renderSitePop() {
@@ -449,7 +516,7 @@ function exportCsv() {
   if (!d) { showNotice("暂无排班数据可导出。"); return; }
   const head = ["团队名称"];
   for (const p of d.cols) head.push(`${p}缺口`, `${p}排班率`, `${p}分数`);
-  head.push("4排班占比", "4排班分数");
+  head.push("4排班占比", "4排班分数", "时段排班率");
   const lineOf = (g) => {
     const out = [g.name];
     for (const p of d.cols) {
@@ -457,7 +524,8 @@ function exportCsv() {
       out.push(c ? c.gapTxt : "—", c ? c.pctTxt : "—", c ? c.fracTxt : "—");
     }
     const f = cellParts(g.four);
-    out.push(f ? f.pctTxt : "—", f ? f.fracTxt : "—");
+    out.push(f ? f.pctTxt : "—", f ? f.fracTxt : "—",
+      g.rate && g.rate.value != null ? fmtPct(g.rate.value) : "—");
     return out.map((x) => `"${String(x).replace(/"/g, '""')}"`).join(",");
   };
   const csv = "\uFEFF" + [head.map((x) => `"${x}"`).join(","), ...d.groups.map(lineOf), lineOf(d.total)].join("\r\n");
@@ -468,6 +536,48 @@ function exportCsv() {
   document.body.appendChild(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(a.href), 2000);
   showNotice(`已导出 ${d.date} 排班 CSV（${d.groups.length + 1} 行 × ${head.length} 列）。`, "blue");
+}
+
+// ---------------------------------------------------------------- v3.19.0 时段权重配置面板
+const fmtW = (v) => String(Math.round(num(v) * 100) / 100);   // 支持小数，最多显示两位
+function weightInputs() { return [...$("weight-list").querySelectorAll("input[data-period]")]; }
+function renderWeightList() {
+  $("weight-list").innerHTML = PERIOD_ORDER.map((p) =>
+    `<div class="sch-weight-row"><label for="w-${esc(p)}">${esc(p)}</label>` +
+    `<div class="sch-weight-box"><input type="number" id="w-${esc(p)}" data-period="${esc(p)}"` +
+    ` min="0" max="100" step="0.1" inputmode="decimal" value="${esc(state.weights[p])}">` +
+    `<span>%</span></div></div>`).join("");
+  updateWeightSum();
+}
+function updateWeightSum() {
+  let sum = 0, bad = 0;
+  for (const inp of weightInputs()) {
+    const raw = String(inp.value).trim(), v = Number(raw);
+    const okv = raw !== "" && Number.isFinite(v) && v >= 0 && v <= 100;
+    inp.classList.toggle("bad", !okv);
+    if (!okv) bad++; else sum += v;
+  }
+  $("weight-sum").textContent = fmtW(sum);
+  $("weight-warn").textContent = bad ? "有输入不合法（0~100）"
+    : Math.abs(sum - 100) > 0.001 ? `建议合计 100%（当前 ${fmtW(sum)}%）` : "";
+  return { sum, bad };
+}
+function openWeightPop() { renderWeightList(); $("weight-overlay").hidden = false; }
+function closeWeightPop() { $("weight-overlay").hidden = true; }
+function saveWeights(silent) {
+  const { sum, bad } = updateWeightSum();
+  if (bad) { showNotice("权重必须是 0~100 的数字，请修正红色输入框后再保存。"); return false; }
+  const next = {};
+  for (const inp of weightInputs()) next[inp.dataset.period] = Number(String(inp.value).trim());
+  state.weights = next;
+  try { localStorage.setItem(LS_WEIGHTS, JSON.stringify(next)); } catch (e) { /* ignore */ }
+  reloadLocal();                 // 只重算，0 额外请求
+  if (!silent) showNotice(`时段权重已保存（合计 ${fmtW(sum)}%），宽表已按新权重重算。`, "blue");
+  return true;
+}
+function resetWeights() {
+  for (const inp of weightInputs()) inp.value = DEFAULT_WEIGHTS[inp.dataset.period];
+  saveWeights(false);           // 恢复默认即生效，不必再点保存
 }
 
 // ---------------------------------------------------------------- 事件绑定
@@ -524,6 +634,17 @@ $("mode-seg").addEventListener("click", (e) => {
   syncControls(); render();
 });
 $("btn-refresh").addEventListener("click", () => loadAll(true));
+$("btn-weight").addEventListener("click", (e) => {
+  e.stopPropagation();
+  $("weight-overlay").hidden ? openWeightPop() : closeWeightPop();
+});
+$("btn-weight-close").addEventListener("click", closeWeightPop);
+$("weight-overlay").addEventListener("click", (e) => {
+  if (e.target && e.target.id === "weight-overlay") closeWeightPop();
+});
+$("weight-list").addEventListener("input", updateWeightSum);
+$("btn-weight-save").addEventListener("click", () => { if (saveWeights(false)) closeWeightPop(); });
+$("btn-weight-reset").addEventListener("click", resetWeights);
 $("btn-export-csv").addEventListener("click", exportCsv);
 $("btn-copy-image").addEventListener("click", async (e) => {
   const btn = $("btn-copy-image");
@@ -546,6 +667,7 @@ $("btn-copy-image").addEventListener("click", async (e) => {
   } finally { btn.disabled = false; btn.textContent = label; }
 });
 $("btn-clean").addEventListener("click", () => {
+  closeWeightPop();
   const on = document.body.classList.toggle("clean");
   $("btn-clean").textContent = on ? "退出纯净看板" : "纯净看板";
   if (!on) return;
@@ -558,7 +680,7 @@ $("btn-clean").addEventListener("click", () => {
   document.body.appendChild(b);
 });
 window.addEventListener("keydown", (e) => {
-  if (e.key === "Escape") { clearNotice(); $("site-pop").hidden = true; }
+  if (e.key === "Escape") { clearNotice(); $("site-pop").hidden = true; closeWeightPop(); }
 });
 
 // ---------------------------------------------------------------- 测试钩子
@@ -571,6 +693,9 @@ window.__SET_SCHEDULE__ = (sheets, opts) => {
   if (o.show) state.show = o.show;
   if (o.selected) { state.selected = new Set(o.selected.map(String)); state.inited = true; }
   if (o.resetSelected) { state.selected = new Set(); state.inited = false; }
+  // 真机回归显式指定权重，避免上一次跑留下的 localStorage 偏好干扰
+  if (o.weights === "default") state.weights = { ...DEFAULT_WEIGHTS };
+  else if (o.weights && typeof o.weights === "object") state.weights = { ...DEFAULT_WEIGHTS, ...o.weights };
   state.finishedAt = new Date();
   try { compute(); render(); setProgress(1, 1, "done"); }
   catch (err) { state.errors = [String(err.message || err)]; state.data = null; render(); }
@@ -580,7 +705,10 @@ window.__SET_SCHEDULE__ = (sheets, opts) => {
 window.__SCH__ = { state, compute, render, renderTable, renderSummary, syncControls, exportCsv,
   loadAll, reloadLocal, buildExportPayload, buildTeamProbePayload, resolveTeamIds,
   cellParts, splitShifts, groupName, shortArea, shortSite, areaOf, fmtPct,
-  SITE_TO_AREA, PERIOD_ORDER, MIN_SHIFTS_FOR_4, AGENCY_NAME };
+  SITE_TO_AREA, PERIOD_ORDER, MIN_SHIFTS_FOR_4, AGENCY_NAME,
+  // v3.19.0 时段排班率 / 权重配置
+  periodRate, rateCellHtml, DEFAULT_WEIGHTS, LS_WEIGHTS, loadWeights, weightSum,
+  renderWeightList, updateWeightSum, openWeightPop, closeWeightPop, saveWeights, resetWeights };
 
 // ---------------------------------------------------------------- 初始化
 (async function init() {

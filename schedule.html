@@ -48,6 +48,7 @@
       <button type="button" data-show="frac">排班率(分数)</button>
     </div>
 
+    <button id="btn-weight" class="ghost" title="配置 11 个时段的权重，改完即时重算，0 额外请求">时段权重</button>
     <button id="btn-refresh" class="primary">立即刷新</button>
     <button id="btn-export-csv" class="ghost" title="导出当前宽表为 CSV（UTF-8 BOM）">导出 CSV</button>
     <button id="btn-copy-image" class="primary" title="把排班模块画面复制为高清 PNG；按住 Shift 点击则另存为 PNG 文件">复制图片</button>
@@ -66,7 +67,7 @@
 <main class="sheet" id="sheet">
   <div class="doc-title" id="doc-title">排班</div>
   <div class="doc-sub" id="doc-sub">日期 —&nbsp;&nbsp;&nbsp;&nbsp;生成时间 —</div>
-  <div class="doc-note" id="doc-note">数据源：排班查询 → 导出排班数据（exportSchedule/1.0，一次请求返回所选日与次日两天）。缺口 = 排班人数 − 应排人数；排班率 = 排班人数 / 应排人数；分数 = 排班人数 / 应排人数。全天为排班统计的「全天」行，时段列按当日实际排班动态生成。</div>
+  <div class="doc-note" id="doc-note">数据源：排班查询 → 导出排班数据（exportSchedule/1.0，一次请求返回所选日与次日两天）。缺口 = 排班人数 − 应排人数；排班率 = 排班人数 / 应排人数；分数 = 排班人数 / 应排人数。全天为排班统计的「全天」行，时段列按当日实际排班动态生成；「时段排班率」= 各时段排班完成率（上限 100%）× 该时段权重求和。</div>
 
   <div class="sch-summary" id="sch-summary"></div>
   <div class="sch-note" id="sch-note"></div>
@@ -76,10 +77,27 @@
   </div>
 
   <div class="doc-foot">一行 = 一个商圈片（切「站点」后一行 = 一个站点）；最后一行「总计」为各列求和。正数缺口为绿色、负数缺口为红色；排班率 ≥100% 绿色、&lt;80% 红色。4排班占比 = 当天排了 ≥4 个班次的骑手数 / 全天排班人数。</div>
-  <div class="doc-foot small" id="doc-foot-small">站点勾选、维度切换、显示方式切换都只在本机重算，不额外请求接口；日期切换会重新导出该日排班。T 为所选日期，T+1 指所选日期的次日。</div>
+  <div class="doc-foot small" id="doc-foot-small">时段排班率 = Σ(min(排班人数/应排人数, 100%) × 时段权重)；某时段应排为 0 或当天无该班次时按 100% 计，权重默认合计 100%、可在「时段权重」里改（0~100、支持小数），权重合计不为 100% 时结果按实际合计缩放。站点勾选、维度切换、显示方式切换、权重修改都只在本机重算，不额外请求接口；日期切换会重新导出该日排班。T 为所选日期，T+1 指所选日期的次日。</div>
 </main>
 
 <footer id="foot-meta" class="foot-meta"></footer>
+
+<!-- 时段权重配置：挂在 body 上、不属于 #sheet，因此不会出现在复制图片里 -->
+<div class="sch-weight-overlay" id="weight-overlay" hidden>
+  <div class="sch-weight-modal" role="dialog" aria-modal="true" aria-labelledby="weight-title">
+    <div class="sch-weight-head">
+      <strong id="weight-title">时段权重配置</strong>
+      <button id="btn-weight-close" type="button" title="关闭">×</button>
+    </div>
+    <div class="sch-weight-desc">「时段排班率」= Σ(min(排班人数 / 应排人数, 100%) × 权重)。某时段应排为 0 或当天无该班次时按 100% 计。各时段权重 0~100、支持小数，合计建议为 100%。</div>
+    <div class="sch-weight-list" id="weight-list"></div>
+    <div class="sch-weight-sum">当前合计 <b id="weight-sum">100</b> % <span id="weight-warn"></span></div>
+    <div class="sch-weight-foot">
+      <button id="btn-weight-reset" type="button">恢复默认</button>
+      <button id="btn-weight-save" class="primary" type="button">保存</button>
+    </div>
+  </div>
+</div>
 
 <script src="capture.js"></script>
 <script src="xlsx.js"></script>

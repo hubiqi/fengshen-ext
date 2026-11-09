@@ -1,6 +1,6 @@
 {
-  "version": "3.18.0",
-  "notes": "运力模块表头支持点击排序（升序/降序/取消）与每列唯一值多选筛选，表头纵向冻结、左侧列可自定义冻结一列或几列并本机记忆；排序与筛选同步作用于页面、导出CSV与复制图片，全部纯前端重算、0 额外请求",
-  "download": "https://github.com/hubiqi/fengshen-ext/releases/download/v3.18.0/fengshen-ext-v3.18.0.zip",
+  "version": "3.19.0",
+  "notes": "排班模块新增「时段排班率」列：Σ(min(排班人数/应排人数,100%)×时段权重)，应排为0或当天无该班次按100%计；新增时段权重配置面板（11时段默认权重合计100%、可改0~100支持小数、恢复默认、本机记忆），改权重/切站点/切维度全部本机重算、0 额外请求",
+  "download": "https://github.com/hubiqi/fengshen-ext/releases/download/v3.19.0/fengshen-ext-v3.19.0.zip",
   "published_at": "2026-11-09"
 }

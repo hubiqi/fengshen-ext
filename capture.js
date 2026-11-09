@@ -78,6 +78,8 @@
     // 滚动裁剪会把完全滚进冻结区的列临时 hidden，导出图必须还原所有列
     rules.push(`table.tbl.wf th,table.tbl.wf td { visibility:visible !important; }`);
     rules.push(`.wf-pop { display:none !important; }`);
+    // v3.19.0：排班模块的「时段权重配置」弹窗也不能混进导出图
+    rules.push(`.sch-weight-overlay { display:none !important; }`);
     if (WIDTH > BASE_WIDTH) {
       // 画布加宽时，标题 / 说明等原本锁 1218px 的块跟着铺满，固定宽的达成矩阵居中
       rules.push(`.att-kpi,.att-note,.att-switch,.att-block-title,.fr-head,.fr-title,.fr-note,` +
