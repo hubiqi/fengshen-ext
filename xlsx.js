@@ -144,7 +144,27 @@ const XLSX_READER = (() => {
 
 // ---------------------------------------------------------------- 写入侧
 const XLSX_WRITER = (() => {
-  const enc = new TextEncoder();
+  // 延迟创建：某些沙箱 / 老环境没有全局 TextEncoder，构造时不该直接抛错
+  let _enc = null;
+  const utf8 = (s) => {
+    if (!_enc && typeof TextEncoder === "function") _enc = new TextEncoder();
+    if (_enc) return _enc.encode(String(s == null ? "" : s));
+    // 兜底：手写 UTF-8 编码，保证没有 TextEncoder 时也能写文件
+    const str = String(s == null ? "" : s);
+    const out = [];
+    for (let i = 0; i < str.length; i++) {
+      let c = str.charCodeAt(i);
+      if (c >= 0xD800 && c <= 0xDBFF && i + 1 < str.length) {
+        const d = str.charCodeAt(i + 1);
+        if (d >= 0xDC00 && d <= 0xDFFF) { c = ((c - 0xD800) << 10) + (d - 0xDC00) + 0x10000; i++; }
+      }
+      if (c < 0x80) out.push(c);
+      else if (c < 0x800) out.push(0xC0 | (c >> 6), 0x80 | (c & 0x3F));
+      else if (c < 0x10000) out.push(0xE0 | (c >> 12), 0x80 | ((c >> 6) & 0x3F), 0x80 | (c & 0x3F));
+      else out.push(0xF0 | (c >> 18), 0x80 | ((c >> 12) & 0x3F), 0x80 | ((c >> 6) & 0x3F), 0x80 | (c & 0x3F));
+    }
+    return new Uint8Array(out);
+  };
   const DOS_DATE = 0x5C21;              // 1980 起算的固定时间戳（2026-01-01），避免 0 日期
 
   /** 样式索引：rent.js 生成 styles 矩阵时直接用这些常量。 */
@@ -173,7 +193,7 @@ const XLSX_WRITER = (() => {
     const locals = [], centrals = [];
     let offset = 0;
     for (const f of files) {
-      const name = enc.encode(f.name);
+      const name = utf8(f.name);
       const data = f.data;
       const crc = crc32(data);
       const local = new Uint8Array(30 + name.length + data.length);
@@ -322,7 +342,7 @@ const XLSX_WRITER = (() => {
     const files = [
       {
         name: "[Content_Types].xml",
-        data: enc.encode(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        data: utf8(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
 <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
 <Default Extension="xml" ContentType="application/xml"/>
@@ -333,27 +353,27 @@ ${overrides}
       },
       {
         name: "_rels/.rels",
-        data: enc.encode(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        data: utf8(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
 <Relationship Id="rId1" Type="${REL_NS}/officeDocument" Target="xl/workbook.xml"/>
 </Relationships>`)
       },
       {
         name: "xl/workbook.xml",
-        data: enc.encode(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        data: utf8(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <workbook xmlns="${NS}" xmlns:r="${REL_NS}"><sheets>${sheetTags}</sheets></workbook>`)
       },
       {
         name: "xl/_rels/workbook.xml.rels",
-        data: enc.encode(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        data: utf8(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
 ${sheetRels}<Relationship Id="rId${n + 1}" Type="${REL_NS}/styles" Target="styles.xml"/>
 </Relationships>`)
       },
-      { name: "xl/styles.xml", data: enc.encode(STYLES_XML) }
+      { name: "xl/styles.xml", data: utf8(STYLES_XML) }
     ];
     sheets.forEach((s, i) => files.push({
-      name: `xl/worksheets/sheet${i + 1}.xml`, data: enc.encode(sheetXml(s))
+      name: `xl/worksheets/sheet${i + 1}.xml`, data: utf8(sheetXml(s))
     }));
     return zipStore(files);
   }

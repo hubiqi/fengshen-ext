@@ -49,6 +49,7 @@ const IMPORT_MAX_ROWS = 200;         // 一次导入最多执行 200 行
 const LS_SITE = "wb_rent_site";
 const LS_HISTORY = "wb_rent_history";
 const LS_BIND = "wb_rent_bind";
+const LS_DEDUCT = "wb_rent_deduct";
 const HISTORY_MAX = 100;
 
 const $ = (id) => document.getElementById(id);
@@ -135,7 +136,13 @@ const state = {
   bindLeft: false,
   bindRowsCache: [],
   importRows: [],             // [{line,name,mobile,knightId,...,res:{ok,err,...},done,result}]
-  importName: ""
+  importName: "",
+  deductType: "",             // 按金额反算：整批统一的物资类型
+  deductFees: {},             // { typeId: 月扣款 }，按类型分别记忆
+  deductInput: "",
+  deductRows: [],             // 预览 / 执行结果行
+  deductSubmitting: false,
+  deductCaps: {}              // { item: 单项封顶元, total: 合计封顶元 }，本机记忆
 };
 
 function extMsg(msg) {
@@ -404,12 +411,16 @@ function renderSites() {
 }
 function renderTypes() {
   const opts = state.types.map((t) => `<option value="${t.id}">${esc(t.name)}</option>`).join("");
-  for (const id of ["one-type", "batch-type"]) {
+  for (const id of ["one-type", "batch-type", "deduct-type"]) {
     const el = $(id);
     if (!el) continue;
     const prev = el.value;
     el.innerHTML = opts || `<option value="">未取到物资类型</option>`;
     if (prev && state.types.some((t) => String(t.id) === String(prev))) el.value = prev;
+  }
+  const dt = $("deduct-type");
+  if (dt && state.deductType && state.types.some((t) => String(t.id) === String(state.deductType))) {
+    dt.value = String(state.deductType);
   }
   const bt = $("bind-type");
   if (bt) {
@@ -790,6 +801,222 @@ function renderAll() {
   renderStatus();
   renderHistory();
   renderBind();
+  renderDeduct();
+}
+
+// ---------------------------------------------------------------- 按金额反算（纯函数层，不碰 DOM）
+// 口径（v3.25.0）：
+//   日扣款 = 月扣款 ÷ 当月实际天数
+//   目标天次 T = floor(金额 ÷ 月扣款 × 当月天数) = floor(金额 ÷ 日扣款)
+//   窗口 = 该骑手该类型「最早可绑定日 → 今天」的第一段连续可绑定日期（截止 T0，不取未来）
+//   匹配 = 天数从最大往下降、数量从 1 往上升，取第一个 |T − 天数×数量| ≤ 1 的组合
+const DEDUCT_QTY_MAX = 99;          // 单张单数量上限，与 validate 保持一致
+const DEDUCT_DEFAULT_FEE = 1000;    // 月扣款默认值，按物资类型可在页面上改
+const DEDUCT_CAP_ITEM = 500;        // 单项目封顶（元）：一张单（单个物资类型）最多扣这么多
+const DEDUCT_CAP_TOTAL = 1000;      // 合计封顶（元）：同一骑手各类型加起来最多扣这么多
+
+/** 今天所在月的实际天数。 */
+function deductMonthDays(today) {
+  return monthDays(String(today || todayStr()).slice(0, 7)).length;
+}
+/** 日扣款 = 月扣款 ÷ 当月天数。 */
+const deductDailyFee = (monthlyFee, daysInMonth) =>
+  num(daysInMonth) > 0 ? num(monthlyFee) / num(daysInMonth) : 0;
+/** 金额 → 目标天次（向下取整）。加极小 eps 抵消浮点误差，避免 8.999999 被截成 8。 */
+function deductTarget(amount, monthlyFee, daysInMonth) {
+  const a = num(amount), f = num(monthlyFee), d = num(daysInMonth);
+  if (!(a > 0) || !(f > 0) || !(d > 0)) return 0;
+  return Math.floor((a * d) / f + 1e-9);
+}
+
+/** 该骑手该类型在 [T-6, 今天] 内，从「最早的未占用日期」开始的第一段连续可绑定日期。
+ *  起点取 max(T-6, 入职日)；前置的已绑定 / 离职后日期跳过，一旦开始遇到阻断就截断（一张单必须连续）。 */
+function deductWindow(knightId, typeId, today, roster, rents) {
+  const t0 = today || todayStr();
+  const first = earliestBindDate(t0);
+  const rec = (roster || []).find((x) => Number(x.id) === Number(knightId));
+  const entry = rec && rec.entry ? rec.entry : "";
+  const leave = rec && rec.leave ? rec.leave : "";
+  let from = first;
+  if (entry && entry > from) from = entry;
+
+  const busy = Object.create(null);
+  for (const r of (rents || [])) {
+    if (Number(r.knightId) !== Number(knightId)) continue;
+    if (String(r.categoryId) !== String(typeId)) continue;
+    let d = r.start;
+    for (let i = 0; i < 400 && d <= r.end; i++) { busy[d] = 1; d = shiftDate(d, 1); }
+  }
+  const dayOk = (d) => !(entry && d < entry) && !(leave && d > leave) && !busy[d];
+  let start = "", end = "", maxDays = 0;
+  for (let d = from, i = 0; i < 400 && d <= t0; i++, d = shiftDate(d, 1)) {
+    if (!dayOk(d)) { if (start) break; else continue; }
+    if (!start) start = d;
+    end = d; maxDays++;
+  }
+  let reason = "";
+  if (maxDays < 1) {
+    reason = from > t0
+      ? `最早可登记日 ${from} 晚于今天`
+      : `${first} ~ ${t0} 没有可绑定的连续日期（入职前 / 离职后 / 已绑定）`;
+  }
+  return { start, end, maxDays, first, entry, leave, reason };
+}
+
+/** 最优匹配：天数由高到低、数量由低到高，返回第一个误差 ≤ 1 的组合。
+ *  q 递增时 total 单调增，一旦 total > T+1 就不必再试更大的 q（对应「误差变大就减少天数」）。
+ *  maxTotal > 0 时只接受 total ≤ maxTotal（金额封顶算出来的天次上限），避免匹配结果反超封顶。 */
+function planDeduction(target, maxDays, qtyMax, maxTotal) {
+  const T = Math.floor(num(target));
+  const M = Math.floor(num(maxDays));
+  const Q = Math.max(1, Math.min(DEDUCT_QTY_MAX, Math.floor(num(qtyMax) || DEDUCT_QTY_MAX)));
+  const MT = num(maxTotal) > 0 ? Math.floor(num(maxTotal)) : 0;
+  if (T < 1 || M < 1) return null;
+  for (let d = M; d >= 1; d--) {
+    for (let q = 1; q <= Q; q++) {
+      const total = d * q, diff = T - total;
+      if (MT > 0 && total > MT) break;
+      if (Math.abs(diff) <= 1) return { days: d, qty: q, total, diff, absDiff: Math.abs(diff) };
+      if (total > T + 1) break;
+    }
+  }
+  return null;
+}
+
+/** 封顶口径：一张单最多能承载多少天次 = ⌊单项封顶 ÷ 日扣款⌋。 */
+function capMaxTotal(capItem, dailyFee) {
+  const c = num(capItem), f = num(dailyFee);
+  if (!(c > 0) || !(f > 0)) return 0;
+  return Math.floor(c / f + 1e-9);
+}
+/** 今天本机已成功提交的反算金额（同一骑手、各类型合计），用于合计封顶。 */
+function todayDeductFee(knightId, history) {
+  const today = todayStr();
+  let sum = 0;
+  for (const h of history || []) {
+    if (!h || !h.ok || !(num(h.fee) > 0)) continue;
+    if (String(h.knightId) !== String(knightId)) continue;
+    if (ymdFromTs(h.at) !== today) continue;
+    sum += num(h.fee);
+  }
+  return sum;
+}
+
+/** 单行计划。ctx = { typeId, typeName, monthlyFee, capItem, capTotal, today, roster, rents, knights }，只读不写 state。 */
+function planDeductRow(input, ctx) {
+  const daysInMonth = deductMonthDays(ctx.today);
+  const dailyFee = deductDailyFee(ctx.monthlyFee, daysInMonth);
+  const target = deductTarget(input.amount, ctx.monthlyFee, daysInMonth);
+  const row = {
+    line: input.line, knightId: num(input.knightId), knightName: "",
+    amount: num(input.amount), target, daysInMonth, monthlyFee: num(ctx.monthlyFee), dailyFee,
+    typeId: num(ctx.typeId), typeName: String(ctx.typeName || typeName(ctx.typeId)),
+    earliest: "", start: "", end: "", days: 0, qty: 0, total: 0,
+    diff: target, absDiff: target, actualFee: 0,
+    capItem: num(ctx.capItem), capTotal: num(ctx.capTotal), capHit: "",
+    err: "", merged: false, pick: false, done: false, result: null
+  };
+  const k = (ctx.knights || []).find((x) => Number(x.id) === Number(row.knightId));
+  if (k) row.knightName = k.name;
+  if (!(row.amount > 0)) { row.err = "金额需大于 0"; return row; }
+  if (!k) { row.err = `当前站点没有骑士ID ${row.knightId}`; return row; }
+  if (!(row.monthlyFee > 0)) { row.err = "月扣款需大于 0"; return row; }
+  if (target < 1) { row.err = `金额不足 1 个天次（日扣款 ${dailyFee.toFixed(2)} 元）`; return row; }
+
+  // 封顶先判：金额本身超过单项封顶时，怎么配天数×数量都装不下，直接拦下
+  const mt = row.capItem > 0 ? capMaxTotal(row.capItem, dailyFee) : 0;
+  if (row.capItem > 0 && mt < 1) {
+    row.capHit = "item";
+    row.err = `日扣款 ¥${dailyFee.toFixed(2)} 已高于单项目封顶 ¥${row.capItem}`;
+    return row;
+  }
+  if (row.capItem > 0 && target > mt) {
+    row.capHit = "item";
+    row.err = `需扣 ¥${row.amount}（${target} 天次）超过单项目封顶 ¥${row.capItem}：` +
+      `一张单最多 ${mt} 天次 ≈ ¥${(mt * dailyFee).toFixed(2)}，请调小金额或分多次登记`;
+    return row;
+  }
+
+  const win = deductWindow(row.knightId, row.typeId, ctx.today, ctx.roster, ctx.rents);
+  row.earliest = win.start || win.first;
+  if (win.maxDays < 1) { row.err = win.reason || "没有可补登记的日期"; return row; }
+  const plan = planDeduction(target, win.maxDays, DEDUCT_QTY_MAX, mt);
+  if (!plan) {
+    row.err = `需 ${target} 天次，但 ${win.maxDays} 天 × 数量上限 ${DEDUCT_QTY_MAX} 都匹配不到误差 1 以内`;
+    return row;
+  }
+  row.days = plan.days; row.qty = plan.qty; row.total = plan.total;
+  row.diff = plan.diff; row.absDiff = plan.absDiff;
+  row.start = win.start; row.end = shiftDate(win.start, plan.days - 1);
+  row.actualFee = plan.total * dailyFee;
+  if (row.capItem > 0 && row.actualFee > row.capItem + 1e-6) {
+    row.capHit = "item";
+    row.err = `预计扣款 ¥${row.actualFee.toFixed(2)} 超过单项目封顶 ¥${row.capItem}（${plan.days} 天 × ${plan.qty}）`;
+    return row;
+  }
+  row.err = validate(row.knightId, row.typeId, row.qty, row.start, row.end)
+    || checkWindow(row.knightId, row.start, row.end, ctx.roster)
+    || checkOverlap(row.knightId, row.typeId, row.start, row.end, ctx.rents);
+  row.pick = !row.err;
+  return row;
+}
+
+/** 多行：同一骑士ID 的金额先合并（一个人只出一张单），再逐行生成计划；
+ *  最后做「合计封顶」：同一骑手本批各行 + 今天本机已成功提交的反算金额相加，超合计封顶即拦下。 */
+function planDeductRows(inputs, ctx) {
+  const merged = new Map();
+  for (const it of inputs || []) {
+    const id = num(it.knightId);
+    const prev = merged.get(id);
+    if (prev) { prev.amount += num(it.amount); prev.lines.push(it.line); }
+    else merged.set(id, { knightId: id, amount: num(it.amount), line: it.line, lines: [it.line] });
+  }
+  const rows = [...merged.values()].map((it) => {
+    const row = planDeductRow(it, ctx);
+    row.line = it.lines.join("+");
+    row.merged = it.lines.length > 1;
+    return row;
+  });
+  const capTotal = num(ctx.capTotal);
+  if (capTotal > 0) {
+    const batchFee = new Map();
+    for (const r of rows) {
+      if (r.capHit || r.err || !(r.actualFee > 0)) continue;
+      const key = String(r.knightId);
+      batchFee.set(key, (batchFee.get(key) || 0) + r.actualFee);
+    }
+    for (const r of rows) {
+      if (r.capHit || r.err) continue;
+      const key = String(r.knightId);
+      const mine = batchFee.get(key) || 0;
+      const before = todayDeductFee(r.knightId, ctx.history);
+      if (mine + before > capTotal + 1e-6) {
+        r.capHit = "total";
+        r.err = `合计扣款 ¥${(mine + before).toFixed(2)}（本批 ¥${mine.toFixed(2)}` +
+          (before > 0 ? ` + 今天已登记 ¥${before.toFixed(2)}` : "") +
+          `）超过合计封顶 ¥${capTotal}`;
+        r.pick = false;
+      }
+    }
+  }
+  return rows;
+}
+
+/** 每行「骑士ID 金额」，支持空格 / 制表符 / 逗号分隔，金额可带 ¥ 元。 */
+function parseDeductInput(text) {
+  const rows = [], errs = [];
+  String(text == null ? "" : text).split(/\r?\n/).forEach((raw, i) => {
+    const line = i + 1;
+    const s = String(raw).trim();
+    if (!s || /^#/.test(s)) return;
+    const parts = s.split(/[\s,，\t;；]+/).filter(Boolean);
+    if (parts.length < 2) { errs.push(`第 ${line} 行：需要「骑士ID 金额」两列`); return; }
+    if (!/^\d+$/.test(parts[0])) { errs.push(`第 ${line} 行：骑士ID 不是数字（${parts[0]}）`); return; }
+    const amount = Number(String(parts[1]).replace(/[¥￥元,]/g, ""));
+    if (!Number.isFinite(amount) || !(amount > 0)) { errs.push(`第 ${line} 行：金额不是正数（${parts[1]}）`); return; }
+    rows.push({ line, knightId: Number(parts[0]), amount });
+  });
+  return { rows, errs };
 }
 
 // ---------------------------------------------------------------- 业务
@@ -802,10 +1029,10 @@ function validate(knightId, typeId, n, start, end) {
   return "";
 }
 /** 时间窗口：不能早于 T-6；人资名单取到时，还要落在在职区间内。 */
-function checkWindow(knightId, start, end) {
+function checkWindow(knightId, start, end, roster) {
   const minDate = earliestBindDate();
   if (start < minDate) return `开始日期不能早于 T-${BIND_BACK_DAYS}（${minDate}）`;
-  const rec = state.roster.find((x) => Number(x.id) === Number(knightId));
+  const rec = (roster || state.roster).find((x) => Number(x.id) === Number(knightId));
   if (!rec) return "";                       // 名单没取到就不硬拦
   if (rec.entry && start < rec.entry) return `开始日期早于入职日 ${rec.entry}`;
   if (rec.leave && end > rec.leave) return `结束日期晚于离职日 ${rec.leave}`;
@@ -1279,6 +1506,188 @@ async function loadRosterInto() {
   renderBind();
   return state.roster;
 }
+// ---------------------------------------------------------------- 按金额反算（控制器 / 视图）
+function loadDeductOpts() {
+  try {
+    const o = JSON.parse(localStorage.getItem(LS_DEDUCT) || "null");
+    if (!o || typeof o !== "object") return;
+    if (o.fees && typeof o.fees === "object") state.deductFees = o.fees;
+    if (o.type) state.deductType = String(o.type);
+    if (o.input) state.deductInput = String(o.input);
+    if (o.caps && typeof o.caps === "object") state.deductCaps = o.caps;
+  } catch (e) { /* ignore */ }
+}
+function saveDeductOpts() {
+  try {
+    localStorage.setItem(LS_DEDUCT, JSON.stringify({
+      fees: state.deductFees, type: state.deductType, input: state.deductInput, caps: state.deductCaps
+    }));
+  } catch (e) { /* ignore */ }
+}
+function currentDeductType() {
+  const el = $("deduct-type");
+  if (el && num(el.value) > 0) return num(el.value);
+  return state.types.length ? num(state.types[0].id) : 0;
+}
+function currentDeductFee() {
+  const el = $("deduct-fee");
+  const v = el ? num(el.value) : 0;
+  return v > 0 ? v : DEDUCT_DEFAULT_FEE;
+}
+/** 单项目封顶（元）：输入框优先，其次本机记忆，最后默认 500。0 表示不封顶。 */
+function currentDeductCapItem() {
+  const el = $("deduct-cap-item");
+  if (el) {
+    const v = num(el.value);
+    return Number.isFinite(v) && v >= 0 ? v : DEDUCT_CAP_ITEM;
+  }
+  const s = num(state.deductCaps.item);
+  return s >= 0 && state.deductCaps.item != null ? s : DEDUCT_CAP_ITEM;
+}
+/** 合计封顶（元）：输入框优先，其次本机记忆，最后默认 1000。0 表示不封顶。 */
+function currentDeductCapTotal() {
+  const el = $("deduct-cap-total");
+  if (el) {
+    const v = num(el.value);
+    return Number.isFinite(v) && v >= 0 ? v : DEDUCT_CAP_TOTAL;
+  }
+  const s = num(state.deductCaps.total);
+  return s >= 0 && state.deductCaps.total != null ? s : DEDUCT_CAP_TOTAL;
+}
+function deductCtx() {
+  const typeId = currentDeductType();
+  return {
+    typeId, typeName: typeName(typeId), monthlyFee: currentDeductFee(),
+    capItem: currentDeductCapItem(), capTotal: currentDeductCapTotal(),
+    today: todayStr(), roster: state.roster, rents: state.rents, knights: state.knights,
+    history: state.history
+  };
+}
+function renderDeduct() {
+  const info = $("deduct-fee-info");
+  if (info) {
+    const dm = deductMonthDays();
+    const fee = deductDailyFee(currentDeductFee(), dm);
+    const capI = currentDeductCapItem(), capT = currentDeductCapTotal();
+    const capTxt = `单项封顶 ${capI > 0 ? "¥" + capI : "不限"} / 合计 ${capT > 0 ? "¥" + capT : "不限"}` +
+      (capI > 0 ? `（单张单最多 ${capMaxTotal(capI, fee)} 天次）` : "");
+    info.textContent = `按 ${todayStr().slice(0, 7)}（${dm} 天）折算 · 日扣款 ${fee.toFixed(2)} 元/天次 · ${capTxt}`;
+  }
+  const t = $("deduct-preview");
+  if (!t) return;
+  const rows = state.deductRows;
+  const head = `<thead><tr><th></th><th>行</th><th>骑手</th><th>金额</th><th>目标天次</th>` +
+    `<th>最早可绑</th><th>起止日期</th><th>天数</th><th>数量</th><th>实际天次</th>` +
+    `<th>误差</th><th>预计扣款</th><th>状态</th></tr></thead>`;
+  if (!rows.length) {
+    t.innerHTML = head + `<tbody><tr><td colspan="13" class="rent-empty">每行写「骑士ID 金额」，点「生成预览」</td></tr></tbody>`;
+  } else {
+    const body = rows.map((r, i) => {
+      const st = r.done
+        ? (r.result && r.result.ok
+          ? `<span style="color:#16A34A">已登记</span>`
+          : `<span style="color:#DC2626">失败：${esc((r.result && r.result.msg) || "")}</span>`)
+        : (r.err ? `<span style="color:#DC2626">${esc(r.err)}</span>` : `<span style="color:#16A34A">可执行</span>`);
+      const pick = `<input type="checkbox" class="deduct-pick" data-i="${i}"` +
+        `${r.pick && !r.done && !r.err ? " checked" : ""}${r.done || r.err ? " disabled" : ""}>`;
+      const diffTxt = r.days ? (r.diff === 0 ? "0" : (r.diff > 0 ? `少 ${r.diff}` : `多 ${-r.diff}`)) : "—";
+      const bad = !!r.err || !!(r.done && r.result && !r.result.ok);
+      return `<tr${bad ? ' class="deduct-bad"' : ""}>` +
+        `<td>${pick}</td><td>${esc(r.line)}</td>` +
+        `<td>${esc(r.knightName || r.knightId)}${r.merged ? "<em>（金额已合并）</em>" : ""}</td>` +
+        `<td>¥${r.amount}</td><td>${r.target}</td><td>${esc(r.earliest || "—")}</td>` +
+        `<td>${r.start && r.end ? `${r.start} ~ ${r.end}` : "—"}</td>` +
+        `<td>${r.days || "—"}</td><td>${r.qty || "—"}</td><td>${r.total || "—"}</td>` +
+        `<td>${diffTxt}</td><td>${r.actualFee ? "¥" + r.actualFee.toFixed(2) : "—"}</td>` +
+        `<td>${st}</td></tr>`;
+    }).join("");
+    t.innerHTML = head + `<tbody>${body}</tbody>`;
+  }
+  const n = rows.filter((r) => r.pick && !r.err && !r.done).length;
+  const btn = $("deduct-run");
+  if (btn) btn.textContent = `执行 ${n} 条`;
+}
+/** 解析输入 → 生成预览（不提交）。 */
+function generateDeduct() {
+  const el = $("deduct-input");
+  const text = el ? String(el.value || "") : "";
+  state.deductInput = text;
+  state.deductType = String(currentDeductType());
+  state.deductFees[state.deductType] = currentDeductFee();
+  state.deductCaps = { item: currentDeductCapItem(), total: currentDeductCapTotal() };
+  const parsed = parseDeductInput(text);
+  state.deductRows = planDeductRows(parsed.rows, deductCtx());
+  saveDeductOpts();
+  renderDeduct();
+  const okN = state.deductRows.filter((r) => !r.err).length;
+  const msg = parsed.errs.length
+    ? `已生成 ${state.deductRows.length} 行 · ${parsed.errs.length} 行输入有误：${parsed.errs.slice(0, 2).join("；")}`
+    : (okN ? `已生成 ${okN} 行可执行 · 请核对起止日期与数量后执行` : "没有可执行的行，检查骑士ID / 金额 / 可绑定窗口");
+  showMsg("deduct-msg", msg, parsed.errs.length || !okN ? "error" : "info");
+  return { rows: state.deductRows, errs: parsed.errs };
+}
+/** 勾选行逐条提交：执行前二次校验、150ms 间隔、成功并入已有单池与本机历史。 */
+async function runDeduct() {
+  if (state.deductSubmitting) return { ok: 0, bad: 0, msg: "正在提交中" };
+  const rows = state.deductRows.filter((r) => r.pick && !r.err && !r.done);
+  if (!rows.length) { showMsg("deduct-msg", "没有可执行的行（先点「生成预览」）", "error"); return { ok: 0, bad: 0 }; }
+  const list = rows.map((r) =>
+    `${r.knightName || r.knightId} ¥${r.amount} → ${r.start} ~ ${r.end} × ${r.qty}（${r.total} 天次）`).join("\n");
+  if (!window.__RENT_NO_CONFIRM__ && !confirm(
+    `确认按以下计划登记 ${rows.length} 张租用单？\n\n${list}\n\n提交会真实写入租用单，每条间隔 ${BATCH_GAP_MS}ms。`
+  )) return { ok: 0, bad: 0, canceled: true };
+
+  state.deductSubmitting = true;
+  const btn = $("deduct-run");
+  if (btn) btn.disabled = true;
+  let ok = 0, bad = 0;
+  const fails = [];
+  for (const r of rows) {
+    // 执行前二次校验：名单 / 已有单 / 封顶可能已变，避免照过期预览提交
+    const capI = currentDeductCapItem(), capT = currentDeductCapTotal();
+    const capErr = (capI > 0 && r.actualFee > capI + 1e-6)
+      ? `预计扣款 ¥${r.actualFee.toFixed(2)} 超过单项目封顶 ¥${capI}`
+      : (capT > 0 && r.actualFee + todayDeductFee(r.knightId, state.history) > capT + 1e-6
+        ? `合计扣款 ¥${(r.actualFee + todayDeductFee(r.knightId, state.history)).toFixed(2)} 超过合计封顶 ¥${capT}`
+        : "");
+    const pre = capErr
+      || validate(r.knightId, r.typeId, r.qty, r.start, r.end)
+      || checkWindow(r.knightId, r.start, r.end)
+      || checkOverlap(r.knightId, r.typeId, r.start, r.end);
+    if (pre) {
+      r.done = true; r.result = { ok: false, msg: pre };
+      bad++; fails.push(`${r.knightName || r.knightId}（${pre}）`);
+    } else {
+      let oneOk = false, msg = "";
+      try {
+        const j = await postApi(API_CREATE, payloadOf(r.knightId, r.typeId, r.qty, r.start, r.end));
+        oneOk = okJson(j);
+        msg = oneOk ? "" : msgOf(j);
+      } catch (e) { msg = String(e && e.message ? e.message : e); }
+      r.done = true; r.result = { ok: oneOk, msg };
+      pushHistory({
+        at: Date.now(), site: state.siteName || String(state.siteId),
+        knightId: r.knightId, knightName: r.knightName || String(r.knightId),
+        typeId: r.typeId, typeName: r.typeName, num: r.qty, start: r.start, end: r.end,
+        fee: r.actualFee, ok: oneOk, msg
+      });
+      if (oneOk) {
+        ok++;
+        addLocalRent(r.knightId, r.typeId, r.start, r.end, r.qty, r.knightName, r.typeName);
+      } else { bad++; fails.push(`${r.knightName || r.knightId}（${msg}）`); }
+    }
+    renderDeduct();
+    showMsg("deduct-msg", `执行中 ${ok + bad}/${rows.length}…`, "info");
+    if (ok + bad < rows.length) await sleep(BATCH_GAP_MS);
+  }
+  state.deductSubmitting = false;
+  if (btn) btn.disabled = false;
+  renderBind();
+  const text = `执行完成：成功 ${ok} 条 / 失败 ${bad} 条` + (fails.length ? ` · ${fails.slice(0, 3).join("；")}` : "");
+  showMsg("deduct-msg", text, bad ? "error" : "success");
+  return { ok, bad, msg: text };
+}
+
 // ---------------------------------------------------------------- 事件
 async function switchSite(siteId) {
   state.siteId = String(siteId || "");
@@ -1370,6 +1779,50 @@ function bind() {
     renderBatchList();
   });
   $("batch-submit").addEventListener("click", () => submitBatch());
+
+  // ---- 按金额反算登记
+  $("deduct-type").addEventListener("change", () => {
+    state.deductType = String($("deduct-type").value);
+    const saved = num(state.deductFees[state.deductType]);
+    if (saved > 0) $("deduct-fee").value = saved;
+    saveDeductOpts();
+    renderDeduct();
+  });
+  $("deduct-fee").addEventListener("input", () => {
+    state.deductFees[String(currentDeductType())] = num($("deduct-fee").value);
+    saveDeductOpts();
+    renderDeduct();
+  });
+  for (const [id, key] of [["deduct-cap-item", "item"], ["deduct-cap-total", "total"]]) {
+    const el = $(id);
+    if (!el) continue;
+    el.addEventListener("input", () => {
+      state.deductCaps[key] = num(el.value);
+      saveDeductOpts();
+      renderDeduct();
+    });
+  }
+  $("deduct-input").addEventListener("input", () => {
+    state.deductInput = String($("deduct-input").value || "");
+    saveDeductOpts();
+  });
+  $("deduct-generate").addEventListener("click", () => generateDeduct());
+  $("deduct-run").addEventListener("click", () => runDeduct());
+  $("deduct-clear").addEventListener("click", () => {
+    $("deduct-input").value = "";
+    state.deductInput = "";
+    state.deductRows = [];
+    saveDeductOpts();
+    renderDeduct();
+    showMsg("deduct-msg", "", "info");
+  });
+  $("deduct-preview").addEventListener("change", (e) => {
+    const el = e.target;
+    if (!el || !el.classList || !el.classList.contains("deduct-pick")) return;
+    const i = num(el.dataset.i);
+    if (state.deductRows[i]) state.deductRows[i].pick = !!el.checked;
+    renderDeduct();
+  });
 
   // ---- 批量执行（表格导入）
   const openImport = () => { const m = $("import-modal"); if (m) m.hidden = false; };
@@ -1485,6 +1938,42 @@ window.__SET_RENT__ = (o) => {
     }));
     resolveImport();
   }
+  if (o.deductType != null) {
+    state.deductType = String(o.deductType);
+    const el = $("deduct-type"); if (el) el.value = state.deductType;
+  }
+  if (o.deductFee != null) {
+    const el = $("deduct-fee");
+    if (el) el.value = num(o.deductFee);
+    state.deductFees[String(currentDeductType())] = num(o.deductFee);
+  }
+  if (o.capItem != null) {
+    state.deductCaps.item = num(o.capItem);
+    const el = $("deduct-cap-item"); if (el) el.value = num(o.capItem);
+  }
+  if (o.capTotal != null) {
+    state.deductCaps.total = num(o.capTotal);
+    const el = $("deduct-cap-total"); if (el) el.value = num(o.capTotal);
+  }
+  if (o.deductInput != null) {
+    state.deductInput = String(o.deductInput);
+    const el = $("deduct-input"); if (el) el.value = state.deductInput;
+  }
+  if (Array.isArray(o.deductRows)) {
+    state.deductRows = o.deductRows.map((r) => ({
+      line: String(r.line || 1), knightId: num(r.knightId), knightName: String(r.knightName || ""),
+      amount: num(r.amount), target: num(r.target), daysInMonth: num(r.daysInMonth) || deductMonthDays(),
+      monthlyFee: num(r.monthlyFee) || currentDeductFee(),
+      dailyFee: num(r.dailyFee) || deductDailyFee(currentDeductFee(), deductMonthDays()),
+      typeId: num(r.typeId) || currentDeductType(),
+      typeName: String(r.typeName || typeName(currentDeductType())),
+      earliest: String(r.earliest || ""), start: String(r.start || ""), end: String(r.end || ""),
+      days: num(r.days), qty: num(r.qty), total: num(r.total),
+      diff: num(r.diff), absDiff: num(r.absDiff), actualFee: num(r.actualFee),
+      err: String(r.err || ""), merged: !!r.merged,
+      pick: r.pick == null ? !r.err : !!r.pick, done: !!r.done, result: r.result || null
+    }));
+  }
   const t = state.teams.find((x) => String(x.id) === String(state.siteId));
   state.siteName = t ? t.name : String(state.siteId || "");
   state.finishedAt = new Date();
@@ -1501,9 +1990,15 @@ window.__RENT__ = {
   parseCsv, mapTable, resolveImportRow, resolveImport, shiftOverlapRows, setImportRows, runImport,
   downloadTemplate, importStats, downloadCsv, csvCell, saveBindOpts,
   submitOne, submitBatch, validate, payloadOf, renderAll, renderHistory, renderBind, renderImportPreview,
+  deductMonthDays, deductDailyFee, deductTarget, deductWindow, planDeduction,
+  planDeductRow, planDeductRows, parseDeductInput, deductCtx,
+  generateDeduct, runDeduct, renderDeduct, loadDeductOpts, saveDeductOpts,
   API_TEAMS, API_TYPES, API_KNIGHTS, API_CREATE, API_RENT_LIST, API_STAFF,
   RENT_TYPE, QUERY_TYPE, BATCH_GAP_MS, HISTORY_MAX, BIND_BACK_DAYS,
-  STAFF_PAGE_SIZE, RENT_PAGE_SIZE, IMPORT_MAX_ROWS
+  STAFF_PAGE_SIZE, RENT_PAGE_SIZE, IMPORT_MAX_ROWS,
+  DEDUCT_QTY_MAX, DEDUCT_DEFAULT_FEE, LS_DEDUCT,
+  DEDUCT_CAP_ITEM, DEDUCT_CAP_TOTAL, capMaxTotal, todayDeductFee, planDeduction,
+  currentDeductCapItem, currentDeductCapTotal
 };
 
 (async function init() {
@@ -1532,6 +2027,14 @@ window.__RENT__ = {
   if (bs) bs.value = state.bindScope;
   if (bt) bt.value = state.bindType;
   if (bl) bl.checked = state.bindLeft;
+  loadDeductOpts();
+  const di = $("deduct-input"), df = $("deduct-fee");
+  if (di) di.value = state.deductInput;
+  if (df) df.value = num(state.deductFees[state.deductType]) > 0
+    ? num(state.deductFees[state.deductType]) : DEDUCT_DEFAULT_FEE;
+  const ci = $("deduct-cap-item"), ct = $("deduct-cap-total");
+  if (ci) ci.value = state.deductCaps.item != null ? num(state.deductCaps.item) : DEDUCT_CAP_ITEM;
+  if (ct) ct.value = state.deductCaps.total != null ? num(state.deductCaps.total) : DEDUCT_CAP_TOTAL;
   try {
     const m = chrome.runtime.getManifest && chrome.runtime.getManifest();
     if (m && m.version) $("tb-ver").textContent = "v" + m.version;

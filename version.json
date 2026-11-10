@@ -1,6 +1,6 @@
 {
-  "version": "3.24.0",
-  "notes": "物资租用可绑定导出改 Excel 双 Sheet：日历与逐日明细都输出 .xlsx（住宿 / 租车 两个工作表，各自按本类型已有单算占用），日期表头写完整年月日，已绑定格内换行显示「已绑定」+ 具体租用单，状态上色并冻结表头与左侧信息列；xlsx.js 新增零依赖 XLSX_WRITER（store ZIP + CRC32 + inlineStr），导入模板 CSV 保持不变",
-  "download": "https://github.com/hubiqi/fengshen-ext/releases/download/v3.24.0/fengshen-ext-v3.24.0.zip",
+  "version": "3.25.0",
+  "notes": "物资租用新增「按金额反算登记」：只填骑士ID与金额，按月扣款÷当月实际天数算出目标天次，从最早可绑定日（T-6 起）到今天取第一段连续可绑日期，按天数由高到低、数量由低到高匹配到误差≤1天次，自动生成起止日期与数量；并有金额封顶——一张单预计扣款 ≤ 单项封顶（默认500元）、同一骑手各类型合计（本批+今天已登记）≤ 合计封顶（默认1000元），超出直接拦下，两个值页面可改、填0不封顶、执行前再校验一次；支持多行输入、同骑手金额合并、月扣款按类型记忆、预览勾选后二次确认提交",
+  "download": "https://github.com/hubiqi/fengshen-ext/releases/download/v3.25.0/fengshen-ext-v3.25.0.zip",
   "published_at": "2026-11-10"
 }

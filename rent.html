@@ -94,6 +94,48 @@
 
   <section class="rent-card">
     <div class="rent-card-head">
+      <h2>按金额反算登记</h2>
+      <span class="rent-hint">骑士ID + 金额 → 自动算天数与数量 · 从最早可绑定日排到今天 · 误差 ≤ 1 天次</span>
+      <span class="rent-head-right">
+        <button id="deduct-clear" class="ghost rent-head-btn">清空</button>
+      </span>
+    </div>
+    <div class="deduct-top">
+      <label class="rent-field">物资类型
+        <select id="deduct-type" class="rent-select"></select>
+      </label>
+      <label class="rent-field">月扣款（元/月）
+        <input id="deduct-fee" class="rent-input deduct-fee" type="number" min="1" step="1" value="1000">
+      </label>
+      <label class="rent-field" title="一张单（单个物资类型）最多能扣多少钱，超了直接拦下；填 0 表示不封顶">
+        单项目封顶（元）
+        <input id="deduct-cap-item" class="rent-input deduct-cap" type="number" min="0" step="50" value="500">
+      </label>
+      <label class="rent-field" title="同一骑手住宿 + 租车合计最多能扣多少钱（含今天本机已登记的反算金额）；填 0 表示不封顶">
+        合计封顶（元）
+        <input id="deduct-cap-total" class="rent-input deduct-cap" type="number" min="0" step="100" value="1000">
+      </label>
+      <span id="deduct-fee-info" class="rent-hint"></span>
+    </div>
+    <div class="deduct-body">
+      <div class="deduct-left">
+        <div class="rent-hint">每行一个骑手：<code>骑士ID 金额</code>（空格 / 逗号 / 制表符分隔，可直接粘 Excel 两列；同一骑手多行金额会合并）</div>
+        <textarea id="deduct-input" class="deduct-input" spellcheck="false" placeholder="1001 300&#10;1002 150&#10;1003,450"></textarea>
+      </div>
+      <div class="deduct-right">
+        <button id="deduct-generate" class="primary">生成预览</button>
+        <button id="deduct-run" class="ghost">执行 0 条</button>
+        <div id="deduct-msg" class="rent-msg"></div>
+        <div class="rent-hint">算法：目标天次 = ⌊金额 ÷ 月扣款 × 当月天数⌋；天数由高到低、数量由低到高，取第一个 |目标 − 天数×数量| ≤ 1 的组合。窗口只取「最早可绑定日 → 今天」的第一段连续可绑日期，遇到已绑定日即截止。<b>金额受封顶约束：一张单 ≤ 单项封顶，同一骑手各类型合计 ≤ 合计封顶（含今天已登记），超了直接拦下不提交。</b></div>
+      </div>
+    </div>
+    <div class="deduct-preview-wrap">
+      <table class="tbl deduct-table" id="deduct-preview"></table>
+    </div>
+  </section>
+
+  <section class="rent-card">
+    <div class="rent-card-head">
       <h2>本月可绑定日期</h2>
       <span class="rent-hint">T-6 起可绑 · 入职前 / 离职后 / 已绑定日不可绑 · 导出 Excel 分「住宿 / 租车」两个 Sheet</span>
       <span class="rent-head-right">
