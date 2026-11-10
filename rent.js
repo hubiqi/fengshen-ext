@@ -889,7 +889,28 @@ function capMaxTotal(capItem, dailyFee) {
   if (!(c > 0) || !(f > 0)) return 0;
   return Math.floor(c / f + 1e-9);
 }
-/** 今天本机已成功提交的反算金额（同一骑手、各类型合计），用于合计封顶。 */
+/** 某骑手某类型在本月「已绑」的天数：把本月范围内的租用单按天累加（同类型不重叠，直接相加）。 */
+function boundDaysInMonth(knightId, typeId, month, rents) {
+  const days = monthDays(String(month || todayStr()).slice(0, 7));
+  const first = days[0], last = days[days.length - 1];
+  let n = 0;
+  for (const r of rents || []) {
+    if (Number(r.knightId) !== Number(knightId)) continue;
+    if (String(r.categoryId) !== String(typeId)) continue;
+    const s = r.start > first ? r.start : first;
+    const e = r.end < last ? r.end : last;
+    if (!s || !e || s > e) continue;
+    n += dayDiff(s, e) + 1;
+  }
+  return n;
+}
+/** 本月已绑折算金额：天数 × 该类型日单价（该类型月扣款 ÷ 当月天数）。 */
+function boundFeeByType(knightId, typeId, month, rents, feeOfType) {
+  const d = boundDaysInMonth(knightId, typeId, month, rents);
+  const fee = num(feeOfType && feeOfType(typeId));
+  return { days: d, fee: d * fee };
+}
+/** 今天本机已成功提交的反算金额（同一骑手、各类型合计），仅用于核对，不参与封顶（已绑单里已含）。 */
 function todayDeductFee(knightId, history) {
   const today = todayStr();
   let sum = 0;
@@ -902,7 +923,7 @@ function todayDeductFee(knightId, history) {
   return sum;
 }
 
-/** 单行计划。ctx = { typeId, typeName, monthlyFee, capItem, capTotal, today, roster, rents, knights }，只读不写 state。 */
+/** 单行计划。ctx = { typeId, typeName, monthlyFee, capItem, capTotal, today, roster, rents, knights, typeIds, feeOfType }，只读不写 state。 */
 function planDeductRow(input, ctx) {
   const daysInMonth = deductMonthDays(ctx.today);
   const dailyFee = deductDailyFee(ctx.monthlyFee, daysInMonth);
@@ -914,6 +935,7 @@ function planDeductRow(input, ctx) {
     earliest: "", start: "", end: "", days: 0, qty: 0, total: 0,
     diff: target, absDiff: target, actualFee: 0,
     capItem: num(ctx.capItem), capTotal: num(ctx.capTotal), capHit: "",
+    boundDays: 0, boundFee: 0, boundDaysTotal: 0, boundFeeTotal: 0, allow: 0, allowMax: 0,
     err: "", merged: false, pick: false, done: false, result: null
   };
   const k = (ctx.knights || []).find((x) => Number(x.id) === Number(row.knightId));
@@ -921,19 +943,46 @@ function planDeductRow(input, ctx) {
   if (!(row.amount > 0)) { row.err = "金额需大于 0"; return row; }
   if (!k) { row.err = `当前站点没有骑士ID ${row.knightId}`; return row; }
   if (!(row.monthlyFee > 0)) { row.err = "月扣款需大于 0"; return row; }
+
+  // 本月已绑 = 该骑手本类型（以及住宿+租车合计）在服务端已有单里的天数 × 各自日单价
+  const month = String(ctx.today || todayStr()).slice(0, 7);
+  const feeOfType = ctx.feeOfType || (() => dailyFee);
+  const mine = boundFeeByType(row.knightId, row.typeId, month, ctx.rents, feeOfType);
+  row.boundDays = mine.days;
+  row.boundFee = mine.fee;
+  const ids = (ctx.typeIds && ctx.typeIds.length) ? ctx.typeIds
+    : [...new Set((ctx.rents || []).map((r) => num(r.categoryId)).filter(Boolean))];
+  let bd = 0, bf = 0;
+  for (const tid of (ids.length ? ids : [row.typeId])) {
+    const one = boundFeeByType(row.knightId, tid, month, ctx.rents, feeOfType);
+    bd += one.days; bf += one.fee;
+  }
+  row.boundDaysTotal = bd;
+  row.boundFeeTotal = bf;
+
   if (target < 1) { row.err = `金额不足 1 个天次（日扣款 ${dailyFee.toFixed(2)} 元）`; return row; }
 
-  // 封顶先判：金额本身超过单项封顶时，怎么配天数×数量都装不下，直接拦下
-  const mt = row.capItem > 0 ? capMaxTotal(row.capItem, dailyFee) : 0;
-  if (row.capItem > 0 && mt < 1) {
-    row.capHit = "item";
-    row.err = `日扣款 ¥${dailyFee.toFixed(2)} 已高于单项目封顶 ¥${row.capItem}`;
+  // 封顶余量 = 封顶 − 本月已绑折算金额；单项与合计各算一次，取更紧的那个
+  const allowItem = row.capItem > 0 ? row.capItem - row.boundFee : Infinity;
+  const allowTotal = row.capTotal > 0 ? row.capTotal - row.boundFeeTotal : Infinity;
+  const allow = Math.min(allowItem, allowTotal);
+  const mt = allow === Infinity ? 0 : (dailyFee > 0 ? Math.floor(allow / dailyFee + 1e-9) : 0);
+  row.allow = allow === Infinity ? 0 : allow;
+  row.allowMax = mt;
+  const boundTxt = `本月${row.typeName}已绑 ${row.boundDays} 天 ≈ ¥${row.boundFee.toFixed(2)}` +
+    (row.boundDaysTotal !== row.boundDays
+      ? `，住宿+租车合计 ${row.boundDaysTotal} 天 ≈ ¥${row.boundFeeTotal.toFixed(2)}` : "");
+
+  if (allow !== Infinity && allow < dailyFee - 1e-9) {
+    row.capHit = allowItem <= allowTotal ? "item" : "total";
+    row.err = `封顶余量不足 1 个天次（日扣款 ¥${dailyFee.toFixed(2)}）：${boundTxt}，` +
+      `${row.capHit === "item" ? `单项封顶 ¥${row.capItem}` : `合计封顶 ¥${row.capTotal}`} 只剩 ¥${Math.max(0, allow).toFixed(2)}`;
     return row;
   }
-  if (row.capItem > 0 && target > mt) {
-    row.capHit = "item";
-    row.err = `需扣 ¥${row.amount}（${target} 天次）超过单项目封顶 ¥${row.capItem}：` +
-      `一张单最多 ${mt} 天次 ≈ ¥${(mt * dailyFee).toFixed(2)}，请调小金额或分多次登记`;
+  if (allow !== Infinity && target > mt) {
+    row.capHit = allowItem <= allowTotal ? "item" : "total";
+    row.err = `需扣 ¥${row.amount}（${target} 天次）超过封顶余量：${boundTxt}，` +
+      `只剩 ¥${allow.toFixed(2)}（≈${mt} 天次），请调小金额或分多次登记`;
     return row;
   }
 
@@ -949,9 +998,9 @@ function planDeductRow(input, ctx) {
   row.diff = plan.diff; row.absDiff = plan.absDiff;
   row.start = win.start; row.end = shiftDate(win.start, plan.days - 1);
   row.actualFee = plan.total * dailyFee;
-  if (row.capItem > 0 && row.actualFee > row.capItem + 1e-6) {
-    row.capHit = "item";
-    row.err = `预计扣款 ¥${row.actualFee.toFixed(2)} 超过单项目封顶 ¥${row.capItem}（${plan.days} 天 × ${plan.qty}）`;
+  if (allow !== Infinity && row.actualFee > allow + 1e-6) {
+    row.capHit = allowItem <= allowTotal ? "item" : "total";
+    row.err = `预计扣款 ¥${row.actualFee.toFixed(2)} 超过封顶余量 ¥${allow.toFixed(2)}（${boundTxt}）`;
     return row;
   }
   row.err = validate(row.knightId, row.typeId, row.qty, row.start, row.end)
@@ -961,8 +1010,8 @@ function planDeductRow(input, ctx) {
   return row;
 }
 
-/** 多行：同一骑士ID 的金额先合并（一个人只出一张单），再逐行生成计划；
- *  最后做「合计封顶」：同一骑手本批各行 + 今天本机已成功提交的反算金额相加，超合计封顶即拦下。 */
+/** 多行：同一骑士ID 的金额先合并（一个人只出一张单），再逐行生成计划。
+ *  封顶在 planDeductRow 里按「本月已绑（住宿 / 租车各自天数 × 日单价）」算余量，这里只做合并。 */
 function planDeductRows(inputs, ctx) {
   const merged = new Map();
   for (const it of inputs || []) {
@@ -971,35 +1020,12 @@ function planDeductRows(inputs, ctx) {
     if (prev) { prev.amount += num(it.amount); prev.lines.push(it.line); }
     else merged.set(id, { knightId: id, amount: num(it.amount), line: it.line, lines: [it.line] });
   }
-  const rows = [...merged.values()].map((it) => {
+  return [...merged.values()].map((it) => {
     const row = planDeductRow(it, ctx);
     row.line = it.lines.join("+");
     row.merged = it.lines.length > 1;
     return row;
   });
-  const capTotal = num(ctx.capTotal);
-  if (capTotal > 0) {
-    const batchFee = new Map();
-    for (const r of rows) {
-      if (r.capHit || r.err || !(r.actualFee > 0)) continue;
-      const key = String(r.knightId);
-      batchFee.set(key, (batchFee.get(key) || 0) + r.actualFee);
-    }
-    for (const r of rows) {
-      if (r.capHit || r.err) continue;
-      const key = String(r.knightId);
-      const mine = batchFee.get(key) || 0;
-      const before = todayDeductFee(r.knightId, ctx.history);
-      if (mine + before > capTotal + 1e-6) {
-        r.capHit = "total";
-        r.err = `合计扣款 ¥${(mine + before).toFixed(2)}（本批 ¥${mine.toFixed(2)}` +
-          (before > 0 ? ` + 今天已登记 ¥${before.toFixed(2)}` : "") +
-          `）超过合计封顶 ¥${capTotal}`;
-        r.pick = false;
-      }
-    }
-  }
-  return rows;
 }
 
 /** 每行「骑士ID 金额」，支持空格 / 制表符 / 逗号分隔，金额可带 ¥ 元。 */
@@ -1556,11 +1582,19 @@ function currentDeductCapTotal() {
 }
 function deductCtx() {
   const typeId = currentDeductType();
+  const dm = deductMonthDays();
+  /** 某类型的日单价 = 该类型月扣款 ÷ 当月天数（没配过就用默认 1000 元/月）。 */
+  const feeOfType = (tid) => {
+    if (Number(tid) === Number(typeId)) return deductDailyFee(currentDeductFee(), dm);
+    const saved = num(state.deductFees[String(tid)]);
+    return deductDailyFee(saved > 0 ? saved : DEDUCT_DEFAULT_FEE, dm);
+  };
   return {
     typeId, typeName: typeName(typeId), monthlyFee: currentDeductFee(),
     capItem: currentDeductCapItem(), capTotal: currentDeductCapTotal(),
     today: todayStr(), roster: state.roster, rents: state.rents, knights: state.knights,
-    history: state.history
+    history: state.history, feeOfType,
+    typeIds: (state.types || []).map((t) => num(t.id)).filter(Boolean)
   };
 }
 function renderDeduct() {
@@ -1578,9 +1612,9 @@ function renderDeduct() {
   const rows = state.deductRows;
   const head = `<thead><tr><th></th><th>行</th><th>骑手</th><th>金额</th><th>目标天次</th>` +
     `<th>最早可绑</th><th>起止日期</th><th>天数</th><th>数量</th><th>实际天次</th>` +
-    `<th>误差</th><th>预计扣款</th><th>状态</th></tr></thead>`;
+    `<th>误差</th><th>预计扣款</th><th>本月已绑<br><i>本类 · 天数/金额</i></th><th>本月合计<br><i>住宿+租车</i></th><th>状态</th></tr></thead>`;
   if (!rows.length) {
-    t.innerHTML = head + `<tbody><tr><td colspan="13" class="rent-empty">每行写「骑士ID 金额」，点「生成预览」</td></tr></tbody>`;
+    t.innerHTML = head + `<tbody><tr><td colspan="15" class="rent-empty">每行写「骑士ID 金额」，点「生成预览」</td></tr></tbody>`;
   } else {
     const body = rows.map((r, i) => {
       const st = r.done
@@ -1599,6 +1633,8 @@ function renderDeduct() {
         `<td>${r.start && r.end ? `${r.start} ~ ${r.end}` : "—"}</td>` +
         `<td>${r.days || "—"}</td><td>${r.qty || "—"}</td><td>${r.total || "—"}</td>` +
         `<td>${diffTxt}</td><td>${r.actualFee ? "¥" + r.actualFee.toFixed(2) : "—"}</td>` +
+        `<td class="deduct-bound">${r.boundDays ? `${r.boundDays} 天<br>¥${r.boundFee.toFixed(2)}` : "0 天"}</td>` +
+        `<td class="deduct-bound">${r.boundDaysTotal ? `${r.boundDaysTotal} 天<br>¥${r.boundFeeTotal.toFixed(2)}` : "0 天"}</td>` +
         `<td>${st}</td></tr>`;
     }).join("");
     t.innerHTML = head + `<tbody>${body}</tbody>`;
@@ -1643,13 +1679,25 @@ async function runDeduct() {
   let ok = 0, bad = 0;
   const fails = [];
   for (const r of rows) {
-    // 执行前二次校验：名单 / 已有单 / 封顶可能已变，避免照过期预览提交
-    const capI = currentDeductCapItem(), capT = currentDeductCapTotal();
-    const capErr = (capI > 0 && r.actualFee > capI + 1e-6)
-      ? `预计扣款 ¥${r.actualFee.toFixed(2)} 超过单项目封顶 ¥${capI}`
-      : (capT > 0 && r.actualFee + todayDeductFee(r.knightId, state.history) > capT + 1e-6
-        ? `合计扣款 ¥${(r.actualFee + todayDeductFee(r.knightId, state.history)).toFixed(2)} 超过合计封顶 ¥${capT}`
-        : "");
+    // 执行前二次校验：名单 / 已有单 / 封顶余量可能已变（上一条提交成功后本月已绑就多了），避免照过期预览提交
+    const ctx = deductCtx();
+    const month = String(ctx.today).slice(0, 7);
+    const capErr = (() => {
+      if (!(ctx.capItem > 0) && !(ctx.capTotal > 0)) return "";
+      const mine = boundFeeByType(r.knightId, r.typeId, month, ctx.rents, ctx.feeOfType);
+      let totalFee = 0;
+      for (const tid of (ctx.typeIds.length ? ctx.typeIds : [r.typeId])) {
+        totalFee += boundFeeByType(r.knightId, tid, month, ctx.rents, ctx.feeOfType).fee;
+      }
+      const allowI = ctx.capItem > 0 ? ctx.capItem - mine.fee : Infinity;
+      const allowT = ctx.capTotal > 0 ? ctx.capTotal - totalFee : Infinity;
+      const allow = Math.min(allowI, allowT);
+      if (allow === Infinity) return "";
+      return r.actualFee > allow + 1e-6
+        ? `预计扣款 ¥${r.actualFee.toFixed(2)} 超过封顶余量 ¥${allow.toFixed(2)}` +
+          `（本月${r.typeName}已绑 ¥${mine.fee.toFixed(2)}，住宿+租车 ¥${totalFee.toFixed(2)}）`
+        : "";
+    })();
     const pre = capErr
       || validate(r.knightId, r.typeId, r.qty, r.start, r.end)
       || checkWindow(r.knightId, r.start, r.end)
@@ -1998,6 +2046,7 @@ window.__RENT__ = {
   STAFF_PAGE_SIZE, RENT_PAGE_SIZE, IMPORT_MAX_ROWS,
   DEDUCT_QTY_MAX, DEDUCT_DEFAULT_FEE, LS_DEDUCT,
   DEDUCT_CAP_ITEM, DEDUCT_CAP_TOTAL, capMaxTotal, todayDeductFee, planDeduction,
+  boundDaysInMonth, boundFeeByType,
   currentDeductCapItem, currentDeductCapTotal
 };
 
