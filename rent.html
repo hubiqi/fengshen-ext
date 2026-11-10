@@ -95,7 +95,7 @@
   <section class="rent-card">
     <div class="rent-card-head">
       <h2>本月可绑定日期</h2>
-      <span class="rent-hint">T-6 起可绑 · 入职前 / 离职后 / 同类型已有单占用日不可绑</span>
+      <span class="rent-hint">T-6 起可绑 · 入职前 / 离职后 / 已绑定日不可绑 · 导出 Excel 分「住宿 / 租车」两个 Sheet</span>
       <span class="rent-head-right">
         <input type="month" id="bind-month" class="rent-input rent-month" title="选择月份">
         <select id="bind-scope" class="rent-select rent-mini" title="导出范围">
@@ -107,14 +107,14 @@
           <input type="checkbox" id="bind-left"> 含已离职
         </label>
         <button id="bind-refresh" class="ghost rent-head-btn" title="重新读取服务端已有租用单">刷新已有单</button>
-        <button id="bind-export-matrix" class="ghost rent-head-btn">导出日历 CSV</button>
-        <button id="bind-export-detail" class="ghost rent-head-btn">导出逐日明细</button>
+        <button id="bind-export-matrix" class="ghost rent-head-btn" title="导出 .xlsx，含「住宿」「租车」两个 Sheet，日期表头写完整年月日">导出日历 Excel</button>
+        <button id="bind-export-detail" class="ghost rent-head-btn" title="导出 .xlsx，含「住宿」「租车」两个 Sheet，一人一天一行">导出逐日明细 Excel</button>
       </span>
     </div>
     <div id="bind-sum" class="rent-bind-sum"></div>
     <div class="bind-legend">
       <span><i style="background:#22C55E"></i>可绑定</span>
-      <span><i style="background:#F97316"></i>已有单占用</span>
+      <span><i style="background:#F97316"></i>已绑定</span>
       <span><i style="background:#CBD5E1"></i>早于 T-6</span>
       <span><i style="background:#FDE68A"></i>未入职</span>
       <span><i style="background:#FCA5A5"></i>已离职</span>
@@ -141,6 +141,8 @@
     <b>同一骑手 + 同一物资类型的租用单时间不能重叠</b>：已有 11-01~11-03 时，新单最早只能从 11-04 开始；
     逐条 / 批量 / 表格导入都会先按服务端已有单校验，重叠行直接拦下并给出建议起始日（可在导入弹层一键顺延）。
     可绑定窗口为 <b>T-6 到未来</b>（可补登记最近 6 天），入职前、离职后、以及已有同类型租用单占用的日期都不能绑定。
+    「本月可绑定日期」两个导出按钮都生成 <b>.xlsx 工作簿</b>，固定分「住宿」「租车」两个 Sheet，各自只按本类型的已有单算占用；
+    日期表头写完整年月日（<code>2026-11-01</code>），已被占用的格子写「已绑定」并在下一行列出具体租用单，颜色与上方图例一致。
   </div>
 </main>
 

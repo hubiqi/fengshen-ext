@@ -521,7 +521,7 @@ function renderHistory() {
 }
 // ---------------------------------------------------------------- 本月可绑定日期
 const BIND_LABEL = {
-  ok: "可绑定", past: "超出补登期", before: "未入职", after: "已离职", busy: "已占用"
+  ok: "可绑定", past: "超出补登期", before: "未入职", after: "已离职", busy: "已绑定"
 };
 
 /** 单日状态：入职前 / 离职后 / 早于 T-6 / 已有同类型租用单占用，都不可绑定。
@@ -632,10 +632,12 @@ function renderBind() {
       `<span class="bind-bar">${r.cells.map((c) => `<i class="${c}"></i>`).join("")}</span></div>`;
   }).join("");
   box.innerHTML = head + body +
-    (rows.length > 80 ? `<div class="rent-empty">只显示前 80 人（共 ${rows.length} 人），导出 CSV 看全部</div>` : "");
+    (rows.length > 80 ? `<div class="rent-empty">只显示前 80 人（共 ${rows.length} 人），导出 Excel 看全部</div>` : "");
 }
 
-// ---------------------------------------------------------------- CSV 导出
+// ---------------------------------------------------------------- 文件下载（导入模板 CSV）
+// 可绑定日历 / 逐日明细已改为 Excel（.xlsx）双 Sheet，见下方「导出 Excel」段；
+// 这里的 CSV 只用于「批量执行」弹层里的导入模板。
 function csvCell(v) {
   const s = String(v == null ? "" : v);
   return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
@@ -666,10 +668,91 @@ async function loadAllRoster() {
   showMsg("bind-msg", fails.length ? `部分站点没取到：${fails.slice(0, 3).join("；")}` : "", fails.length ? "error" : "");
   return all;
 }
-/** kind = matrix（日历矩阵）/ detail（逐日明细） */
-async function exportBind(kind) {
-  const month = state.bindMonth;
+// ---------------------------------------------------------------- 导出 Excel（住宿 / 租车 双 Sheet）
+/** 两个 Sheet 各自只按本类型的已有单判占用，所以「可绑定天数 / 最早起日」会不一样。 */
+const EXPORT_GROUPS = [
+  { key: "rent", sheet: "租车", match: /电动车|租车|车辆|车/, fallback: 10001 },
+  { key: "lodging", sheet: "住宿", match: /住宿|宿舍/, fallback: 10002 }
+];
+/** 优先按服务端物资类型名找 categoryId，取不到时退回内置 id（电动车 10001 / 住宿 10002）。 */
+function groupTypeId(g) {
+  const t = state.types.find((x) => g.match.test(String(x.name || "")));
+  return String(t ? t.id : g.fallback);
+}
+/** 「已绑定」下方那行：最多 2 张单，日期缩成 MM-DD，避免撑爆日期列。 */
+function boundDetail(list) {
+  const arr = (list || []).slice(0, 2)
+    .map((s) => String(s).replace(/\d{4}-\d{2}-\d{2}/g, (m) => m.slice(5)));
+  if ((list || []).length > 2) arr.push("…");
+  return arr.join("\n");
+}
+const BIND_BASE_HEAD = ["站点", "骑手姓名", "手机号", "骑士ID", "入职日期", "离职日期", "在职状态",
+  "可绑定天数", "可绑定区间", "最早可绑定起日", "已有单(本月)"];
+
+function matrixSheet(group, month, list, pool, scopeLabel) {
+  const S = XLSX_WRITER.STYLE;
   const days = monthDays(month);
+  const rows = bindRows(month, state.bindLeft, list, groupTypeId(group), pool);
+  const head = BIND_BASE_HEAD.concat(days);            // 日期列写完整 YYYY-MM-DD，不再只写日号
+  const out = [head], styles = [head.map(() => S.head)];
+  for (const r of rows) {
+    const base = [
+      r.teamName || scopeLabel, r.name, r.mobile, r.id, r.entry || "", r.leave || "", r.status || "",
+      r.okDays.length,
+      r.okDays.length ? `${r.okDays[0]} ~ ${r.okDays[r.okDays.length - 1]}` : "",
+      r.earliest || "",
+      r.ownRents.map((x) => `${x.typeName} ${x.start}~${x.end}`).join("；")
+    ];
+    const texts = r.cells.map((c, i) =>
+      c === "busy" ? `已绑定\n${boundDetail(r.busy[days[i]])}` : BIND_LABEL[c]);
+    out.push(base.concat(texts));
+    styles.push(base.map(() => S.info).concat(r.cells.map((c) => S[c] == null ? S.base : S[c])));
+  }
+  return {
+    name: group.sheet, rows: out, styles,
+    widths: [16, 12, 14, 14, 13, 13, 10, 12, 26, 17, 38].concat(days.map(() => 18)),
+    freeze: { rows: 1, cols: BIND_BASE_HEAD.length },
+    headHeight: 30, rowHeight: 36, people: rows.length
+  };
+}
+
+function detailSheet(group, month, list, pool, scopeLabel) {
+  const S = XLSX_WRITER.STYLE;
+  const days = monthDays(month);
+  const rows = bindRows(month, state.bindLeft, list, groupTypeId(group), pool);
+  const head = ["站点", "骑手姓名", "骑士ID", "手机号", "日期", "星期", "状态", "占用单", "说明"];
+  const out = [head], styles = [head.map(() => S.head)];
+  for (const r of rows) {
+    for (let i = 0; i < days.length; i++) {
+      const c = r.cells[i], d = days[i];
+      // 不勾「含已离职」时只留可绑定 + 已绑定两种日期，其余（未入职 / 已离职 / 超出补登期）略过
+      if (state.bindLeft === false && c !== "ok" && c !== "busy") continue;
+      let note = "";
+      if (c === "ok" && r.entry === d) note = "入职日";
+      else if (c === "ok" && r.leave === d) note = "离职日";
+      else if (c === "before") note = "还没入职";
+      else if (c === "after") note = "已离职";
+      else if (c === "past") note = `早于 T-${BIND_BACK_DAYS}，不能补登记`;
+      else if (c === "busy") note = "同类型已有租用单，新单须从该单结束次日开始";
+      const busyText = c === "busy" ? (r.busy[d] || []).join("；") : "";
+      out.push([r.teamName || scopeLabel, r.name, r.id, r.mobile, d, "周" + weekdayOf(d),
+        BIND_LABEL[c], busyText, note]);
+      styles.push([S.info, S.info, S.info, S.info, S.info, S.info, S[c] == null ? S.base : S[c], S.info, S.info]);
+    }
+  }
+  return {
+    name: group.sheet, rows: out, styles,
+    widths: [16, 12, 14, 14, 14, 8, 12, 40, 34],
+    freeze: { rows: 1, cols: 4 }, headHeight: 30, rowHeight: 22, people: rows.length
+  };
+}
+
+/** kind = matrix（日历矩阵）/ detail（逐日明细）。两个导出都是 .xlsx，含「住宿」「租车」两个 Sheet。 */
+async function exportBind(kind) {
+  if (typeof XLSX_WRITER === "undefined") {
+    showMsg("bind-msg", "Excel 写入器没加载，刷新页面后重试", "error"); return;
+  }
+  const month = state.bindMonth;
   let list = state.roster;
   let rentPool = state.rents;
   let scopeLabel = state.siteName || String(state.siteId);
@@ -681,51 +764,21 @@ async function exportBind(kind) {
     try {
       rentPool = await loadRents(state.teams.map((t) => num(t.id)));
     } catch (e) {
-      showMsg("bind-msg", "全部站点已有租用单读取失败，导出的占用列可能不完整：" + String(e && e.message ? e.message : e), "error");
+      showMsg("bind-msg", "全部站点已有租用单读取失败，导出的已绑定列可能不完整：" + String(e && e.message ? e.message : e), "error");
     }
   } else if (!list.length) {
     showMsg("bind-msg", "当前站点还没有人资名单，先点「重试」", "error");
     return;
   }
-  const rows = bindRows(month, state.bindLeft, list, state.bindType, rentPool);
-  if (!rows.length) { showMsg("bind-msg", "这个月没有可导出的骑手", "error"); return; }
-  const fileBase = `物资可绑定_${String(scopeLabel).replace(/[\\/:*?"<>|]/g, "_")}_${month}`;
-
-  if (kind === "matrix") {
-    const head = ["站点", "骑手姓名", "手机号", "骑士ID", "入职日期", "离职日期", "在职状态",
-      "可绑定天数", "可绑定区间", "最早可绑定起日", "已有单(本月)"]
-      .concat(days.map((d) => d.slice(-2)));
-    const body = rows.map((r) => [
-      r.teamName || scopeLabel, r.name, r.mobile, r.id, r.entry || "", r.leave || "", r.status || "",
-      r.okDays.length,
-      r.okDays.length ? `${r.okDays[0]} ~ ${r.okDays[r.okDays.length - 1]}` : "",
-      r.earliest || "",
-      r.ownRents.map((x) => `${x.typeName} ${x.start}~${x.end}`).join("；")
-    ].concat(r.cells.map((c) => BIND_LABEL[c])));
-    downloadCsv(`${fileBase}_日历.csv`, [head].concat(body));
-  } else {
-    const head = ["站点", "骑手姓名", "骑士ID", "手机号", "日期", "星期", "状态", "占用单", "说明"];
-    const body = [];
-    for (const r of rows) {
-      for (let i = 0; i < days.length; i++) {
-        const c = r.cells[i];
-        if (state.bindLeft === false && c !== "ok") continue;   // 不导出已离职时只留可绑定的日期
-        let note = "";
-        if (c === "ok" && r.entry === days[i]) note = "入职日";
-        else if (c === "ok" && r.leave === days[i]) note = "离职日";
-        else if (c === "before") note = "还没入职";
-        else if (c === "after") note = "已离职";
-        else if (c === "past") note = `早于 T-${BIND_BACK_DAYS}，不能补登记`;
-        else if (c === "busy") note = "同类型已有租用单占用，新单须从该单结束次日开始";
-        const busyText = c === "busy" ? (r.busy[days[i]] || []).join("；") : "";
-        body.push([r.teamName || scopeLabel, r.name, r.id, r.mobile, days[i], "周" + weekdayOf(days[i]),
-          BIND_LABEL[c], busyText, note]);
-      }
-    }
-    if (!body.length) { showMsg("bind-msg", "可绑定明细是空的", "error"); return; }
-    downloadCsv(`${fileBase}_逐日明细.csv`, [head].concat(body));
+  const build = kind === "matrix" ? matrixSheet : detailSheet;
+  const sheets = EXPORT_GROUPS.map((g) => build(g, month, list, rentPool, scopeLabel));
+  if (sheets.every((s) => s.rows.length === 1)) {
+    showMsg("bind-msg", "这个月没有可导出的骑手 / 日期", "error"); return;
   }
-  showMsg("bind-msg", `已导出 ${rows.length} 位骑手 · ${kind === "matrix" ? "日历矩阵" : "逐日明细"}`, "success");
+  const label = kind === "matrix" ? "日历" : "逐日明细";
+  const fileName = `物资可绑定_${String(scopeLabel).replace(/[\\/:*?"<>|]/g, "_")}_${month}_${label}.xlsx`;
+  XLSX_WRITER.download(fileName, sheets);
+  showMsg("bind-msg", `已导出 ${fileName} · 住宿 ${sheets[1].people} 人 / 租车 ${sheets[0].people} 人（两个 Sheet）`, "success");
 }
 
 function renderAll() {
@@ -1443,6 +1496,8 @@ window.__RENT__ = {
   loadRoster, loadRosterInto, loadRents, loadRentsInto, addLocalRent,
   findOverlap, suggestStart, checkOverlap, checkWindow, overlapText, dayDiff, earliestBindDate,
   computeBind, bindRows, bindState, busyMapFor, monthDays, ymd, exportBind,
+  EXPORT_GROUPS, groupTypeId, boundDetail, BIND_LABEL, matrixSheet, detailSheet,
+  XLSX_WRITER: (typeof XLSX_WRITER === "undefined" ? null : XLSX_WRITER),
   parseCsv, mapTable, resolveImportRow, resolveImport, shiftOverlapRows, setImportRows, runImport,
   downloadTemplate, importStats, downloadCsv, csvCell, saveBindOpts,
   submitOne, submitBatch, validate, payloadOf, renderAll, renderHistory, renderBind, renderImportPreview,

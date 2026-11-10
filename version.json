@@ -1,6 +1,6 @@
 {
-  "version": "3.23.0",
-  "notes": "物资租用接入已有租用单 queryList/1.0：同一骑手 + 同一类型区间不能重叠（11-01~11-03 已有单 → 新单最早 11-04），逐条 / 批量 / 表格导入统一拦截并给建议起始日，导入防批内重叠、可一键顺延；可绑定窗口改为 T-6 到未来，入职前 / 离职后 / 已有单占用日不可绑，日历按物资类型筛选占用，导出新增最早可绑定起日与已有单 / 占用单列",
-  "download": "https://github.com/hubiqi/fengshen-ext/releases/download/v3.23.0/fengshen-ext-v3.23.0.zip",
+  "version": "3.24.0",
+  "notes": "物资租用可绑定导出改 Excel 双 Sheet：日历与逐日明细都输出 .xlsx（住宿 / 租车 两个工作表，各自按本类型已有单算占用），日期表头写完整年月日，已绑定格内换行显示「已绑定」+ 具体租用单，状态上色并冻结表头与左侧信息列；xlsx.js 新增零依赖 XLSX_WRITER（store ZIP + CRC32 + inlineStr），导入模板 CSV 保持不变",
+  "download": "https://github.com/hubiqi/fengshen-ext/releases/download/v3.24.0/fengshen-ext-v3.24.0.zip",
   "published_at": "2026-11-10"
 }
