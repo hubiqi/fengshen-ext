@@ -5,6 +5,36 @@ body.rent-page { background: #F3F4F6; }
 
 .rent-site { min-width: 210px; max-width: 300px; font-size: 12px; padding: 5px 7px; }
 
+/* ---- 站点多选（v3.26.0） ---- */
+.site-pick { position: relative; display: inline-flex; }
+.site-pick-btn { min-width: 210px; max-width: 320px; height: 28px; padding: 0 10px;
+  display: inline-flex; align-items: center; gap: 8px; border: 1px solid #CBD5E1; border-radius: 6px;
+  background: #FFFFFF; font-size: 12px; color: #1F2937; cursor: pointer; }
+.site-pick-btn:hover { border-color: #93C5FD; }
+.site-pick-btn[aria-expanded="true"] { border-color: #3B82F6; box-shadow: 0 0 0 2px #DBEAFE; }
+.site-pick-btn #site-label { flex: 1 1 auto; text-align: left; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis; }
+.site-caret { color: #9CA3AF; font-size: 10px; line-height: 1; }
+.site-pop { position: absolute; top: 33px; left: 0; z-index: 80; width: 400px; padding: 8px;
+  background: #FFFFFF; border: 1px solid #DCE6F7; border-radius: 8px;
+  box-shadow: 0 14px 34px rgba(15, 23, 42, .18); }
+.site-pop[hidden] { display: none; }
+.site-pop-head { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+.site-pop-head .rent-input { flex: 1 1 auto; min-width: 0; height: 26px; font-size: 12px; }
+.site-pop-head .ghost { height: 26px; padding: 0 8px; font-size: 12px; white-space: nowrap; }
+.site-pop-list { max-height: 296px; overflow: auto; border: 1px solid #F1F5F9; border-radius: 6px; padding: 2px; }
+.site-row { display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-radius: 5px;
+  font-size: 12.5px; color: #374151; cursor: pointer; }
+.site-row:hover { background: #F1F5F9; }
+.site-row.on { background: #EFF6FF; }
+.site-row input { margin: 0; }
+.site-row .sr-name { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.site-row .sr-id { color: #9CA3AF; font-size: 11px; font-variant-numeric: tabular-nums; }
+.site-pop-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 8px; }
+.site-pop-foot .primary { height: 26px; padding: 0 14px; font-size: 12px; }
+.rent-scope { font-size: 11.5px; color: #6B7280; white-space: nowrap; }
+.rent-scope b { color: #2F5597; }
+
 .rent-wrap { width: 1218px; max-width: calc(100% - 36px); margin: 16px auto 26px; }
 
 .rent-kpis { display: flex; flex-wrap: wrap; gap: 10px; margin: 0 0 14px; }
@@ -14,6 +44,9 @@ body.rent-page { background: #F3F4F6; }
 .rent-kpi b { display: block; font-size: 20px; line-height: 1.3; color: #2F5597;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .rent-kpi span { display: block; font-size: 11.5px; color: #6B7280; margin-top: 2px; }
+/* 站点范围可能是「福州台江区茶亭站-UB 等 3 个站点」，给它更宽的格子并允许折成两行 */
+.rent-kpi.wide { flex: 2 1 268px; }
+.rent-kpi.wide b { white-space: normal; font-size: 15px; line-height: 1.3; word-break: break-all; }
 
 .rent-card { background: #FFFFFF; border: 1px solid #E5E7EB; border-radius: 10px;
   padding: 14px 16px 16px; margin-bottom: 14px; box-shadow: 0 1px 2px rgba(15, 23, 42, .04); }
@@ -145,6 +178,8 @@ body.clean.rent-page .rent-wrap { margin-top: 24px; }
   .rent-form .rent-field:nth-child(1) { flex: 1 1 100%; }
   .deduct-body { flex-direction: column; }
   .deduct-left { flex: 1 1 auto; width: 100%; }
+  .site-pop { width: min(360px, calc(100vw - 30px)); }
+  .site-pick-btn { min-width: 180px; max-width: 240px; }
 }
 
 /* ---- 按金额反算登记（v3.25.0） ---- */

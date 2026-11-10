@@ -12,7 +12,25 @@
 <header class="toolbar" id="toolbar">
   <div class="tb-left">
     <strong>物资租用</strong>
-    <select id="site-select" class="rent-site" title="切换站点后重新加载物资类型与骑手"></select>
+    <div class="site-pick" id="site-pick">
+      <button id="site-btn" class="site-pick-btn" type="button" aria-haspopup="true" aria-expanded="false"
+        title="选择站点：可多选、可一键全选">
+        <span id="site-label">读取站点…</span><span class="site-caret">▾</span>
+      </button>
+      <div class="site-pop" id="site-pop" hidden>
+        <div class="site-pop-head">
+          <input id="site-search" class="rent-input" placeholder="搜索站点名称 / ID" autocomplete="off">
+          <button id="site-all" class="ghost" type="button" title="勾选全部站点">全选</button>
+          <button id="site-none" class="ghost" type="button" title="取消全部勾选">清空</button>
+        </div>
+        <div class="site-pop-list" id="site-pop-list" role="group" aria-label="站点多选"></div>
+        <div class="site-pop-foot">
+          <span id="site-pop-count" class="rent-hint"></span>
+          <button id="site-apply" class="primary" type="button">应用</button>
+        </div>
+      </div>
+      <select id="site-select" class="rent-site" hidden aria-hidden="true" tabindex="-1"></select>
+    </div>
     <button id="btn-refresh" class="primary">立即刷新</button>
     <button id="btn-channel" class="ghost">通道：直连</button>
     <button id="btn-clean" class="ghost" title="隐藏工具条与说明，只留登记区">纯净看板</button>
@@ -97,6 +115,9 @@
       <h2>按金额反算登记</h2>
       <span class="rent-hint">骑士ID + 金额 → 自动算天数与数量 · 从最早可绑定日排到今天 · 误差 ≤ 1 天次</span>
       <span class="rent-head-right">
+        <span id="deduct-scope" class="rent-scope" title="按金额反算只在当前选中的站点范围里找骑手；要跨全部站点就点右边按钮"></span>
+        <button id="deduct-all-sites" class="ghost rent-head-btn" type="button"
+          title="把页面站点范围切到「全部站点」后重新生成，可登记任意站点的骑手">读全部站点</button>
         <button id="deduct-clear" class="ghost rent-head-btn">清空</button>
       </span>
     </div>
@@ -126,7 +147,7 @@
         <button id="deduct-generate" class="primary">生成预览</button>
         <button id="deduct-run" class="ghost">执行 0 条</button>
         <div id="deduct-msg" class="rent-msg"></div>
-        <div class="rent-hint">算法：目标天次 = ⌊金额 ÷ 月扣款 × 当月天数⌋；天数由高到低、数量由低到高，取第一个 |目标 − 天数×数量| ≤ 1 的组合。窗口只取「最早可绑定日 → 今天」的第一段连续可绑日期，遇到已绑定日即截止。<b>金额受封顶约束：一张单 ≤ 单项封顶，同一骑手各类型合计 ≤ 合计封顶（含今天已登记），超了直接拦下不提交。</b></div>
+        <div class="rent-hint">算法：目标天次 = ⌊金额 ÷ 月扣款 × 当月天数⌋；天数由高到低、数量由低到高，取第一个 |目标 − 天数×数量| ≤ 1 的组合。窗口只取「最早可绑定日 → 今天」的第一段连续可绑日期，遇到已绑定日即截止。<b>金额受封顶约束：一张单 ≤ 单项封顶，同一骑手各类型合计 ≤ 合计封顶（含今天已登记），超了直接拦下不提交。</b><br>骑手范围跟页面左上角的站点选择走：想登记别的站点的人，先在上方勾上那个站点（或点「读全部站点」）。</div>
       </div>
     </div>
     <div class="deduct-preview-wrap">
@@ -185,6 +206,8 @@
     可绑定窗口为 <b>T-6 到未来</b>（可补登记最近 6 天），入职前、离职后、以及已有同类型租用单占用的日期都不能绑定。
     「本月可绑定日期」两个导出按钮都生成 <b>.xlsx 工作簿</b>，固定分「住宿」「租车」两个 Sheet，各自只按本类型的已有单算占用；
     日期表头写完整年月日（<code>2026-11-01</code>），已被占用的格子写「已绑定」并在下一行列出具体租用单，颜色与上方图例一致。
+    <b>站点支持多选</b>：点左上角站点按钮可以勾多个站点或一键全选，骑手列表、可绑定名单、已有单、按金额反算都会合并这些站点；
+    提交时按<b>骑手自己所属的站点</b>写单（不再按单一的「当前站点」），所以一次能跨站点登记。
   </div>
 </main>
 

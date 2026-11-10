@@ -1,5 +1,4 @@
 /* 物资租用（v3.21.0，第五个独立入口；v3.22.0 加表格导入批量执行 + 本月可绑定导出）
- *
  * 复刻原 FengshenMonitor「物资租用登记」：站点 → 物资类型（电动车 / 住宿）→ 骑手 → 开始/结束日期。
  * 数据源（全部沿用原插件接口，不新增后端）：
  *   getTeamsAll                 站点列表
@@ -27,6 +26,14 @@
  *      （例：已有 11-01~11-03，则新单最早 11-04 开始）。数据源是风神物资租用页的
  *      queryList/1.0（queryType=2），逐条 / 批量 / 表格导入 / 可绑定日历四处共用同一套校验。
  *   2) 可绑定窗口由「今天起」放宽到「T-6 起」（可补登记最近 6 天），但入职前 / 离职后仍不可绑。
+ *
+ * v3.26.0 站点多选：
+ *   1) 左上角站点由单选改成多选（全选 / 清空 / 搜索 / 勾选后「应用」），骑手列表、人资名单、
+ *      已有租用单三份数据都按选中站点合并；选中多个站点时骑手会带上站点名，避免同名混淆。
+ *   2) 提交时 teamId 取「骑手自己所属的站点」（骑手列表 → 人资名单 → 主站点依次兜底），
+ *      不再一律用当前站点，所以一次能跨站点登记；「最近提交」也记骑手所在站点。
+ *   3) 「按金额反算登记」跟站点范围联动：骑士ID 不在所选范围时直接提示，并给「读全部站点」
+ *      一键切到全部站点后重新生成预览。
  */
 
 const XT = "https://httpizza.ele.me/xtop/";
@@ -46,7 +53,10 @@ const RENT_PAGE_SIZE = 500;          // 已有租用单每页条数（实测 500
 const RENT_MAX_PAGES = 20;           // 最多 20 页 = 10000 条
 const BIND_BACK_DAYS = 6;            // 可补登记窗口：T-6 起（含）到未来
 const IMPORT_MAX_ROWS = 200;         // 一次导入最多执行 200 行
-const LS_SITE = "wb_rent_site";
+const SITE_FETCH_GAP_MS = 90;        // 多站点串行取数间隔（每个站点 1~2 个请求）
+const LS_SITE = "wb_rent_site";           // 兼容旧键：只存主站点 id
+const LS_SITES = "wb_rent_sites";         // 选中站点数组（JSON）
+const LS_SITES_ALL = "wb_rent_sites_all"; // "1" = 全部站点模式（站点列表刷新后自动含新增站点）
 const LS_HISTORY = "wb_rent_history";
 const LS_BIND = "wb_rent_bind";
 const LS_DEDUCT = "wb_rent_deduct";
@@ -112,8 +122,13 @@ const weekdayOf = (day) => {
 const state = {
   via: localStorage.getItem("wb_via") || "direct",
   teams: [], types: [], knights: [],
-  siteId: localStorage.getItem(LS_SITE) || "",
-  siteName: "",
+  siteIds: [],                // 选中的站点 id（可多选；空 = 还没选 / 站点没取到）
+  siteAll: false,             // 「全部站点」模式：站点列表刷新后自动包含新增站点
+  siteDraft: [],              // 弹层里正在勾的站点，点「应用」才生效
+  siteId: "",                 // 主站点 = siteIds[0]，仅作 teamId 兜底
+  siteName: "",               // 站点范围标签（单站点名 / 「A 等 3 个站点」/「全部站点（12）」）
+  siteSeq: 0,                 // 站点范围切换防串号
+  loadText: "",               // 多站点取数进度，显示在状态栏
   selected: new Set(),
   history: [],
   submitting: false,
@@ -298,17 +313,17 @@ async function loadRents(teamIds) {
   }
   return out;
 }
-/** 站点切换 / 刷新后重拉已有租用单；失败只影响防重叠校验，不挡登记表单。 */
+/** 站点切换 / 刷新后重拉已有租用单；失败只影响防重叠校验，不挡登记表单。
+ *  v3.26.0：一次把选中站点全部传进 teamIds，多站点只发一轮请求。 */
 async function loadRentsInto() {
-  if (!state.siteId) return [];
+  const ids = state.siteIds.map(num).filter(Boolean);
+  if (!ids.length) return [];
   if (window.__WB_TEST__ && !window.__RENT_NET_TEST__) return state.rents;
   const seq = ++state.rentsSeq;
   state.rentsLoading = true;
   state.rentsErr = "";
   renderBind();
   let list = [], err = "";
-  // 页面上的防重叠校验只按当前站点取数；「全部站点」导出会另外拉全量，不写进这里
-  const ids = [num(state.siteId)];
   try { list = await loadRents(ids); }
   catch (e) { err = String(e && e.message ? e.message : e); }
   if (seq !== state.rentsSeq) return state.rents;
@@ -320,12 +335,13 @@ async function loadRentsInto() {
   return state.rents;
 }
 /** 提交成功后本地立即并入，保证同一批导入里后面的行也能看到刚提交的单。 */
-function addLocalRent(knightId, categoryId, start, end, n, knightName, typeNameStr) {
+function addLocalRent(knightId, categoryId, start, end, n, knightName, typeNameStr, teamId) {
+  const tid = num(teamId) || teamIdOfKnight(knightId);
   const rec = {
     id: 0, knightId: num(knightId), knightName: String(knightName || ""),
     categoryId: num(categoryId), typeName: String(typeNameStr || typeName(categoryId)),
     start, end, num: num(n), status: 2,
-    teamId: String(state.siteId), teamName: String(state.siteName || ""),
+    teamId: String(tid), teamName: teamNameOf(tid),
     local: true
   };
   state.rents.push(rec);
@@ -374,6 +390,104 @@ function fallbackTeams() {
   } catch (e) { return []; }
 }
 
+// ---------------------------------------------------------------- 站点范围（v3.26.0 多选）
+/** 当前选中的站点，按站点列表顺序返回。 */
+function selectedTeams() {
+  const ids = new Set(state.siteIds.map(String));
+  return state.teams.filter((t) => ids.has(String(t.id)));
+}
+/** 站点范围标签：单站点名 / 「A 等 3 个站点」/「全部站点（12）」。 */
+function siteLabel() {
+  const sel = selectedTeams();
+  if (state.siteAll && state.teams.length) return `全部站点（${state.teams.length}）`;
+  if (!sel.length) return state.teams.length ? "选择站点" : "未取到站点";
+  if (sel.length === 1) return sel[0].name;
+  return `${sel[0].name} 等 ${sel.length} 个站点`;
+}
+/** siteId / siteName 都从 siteIds 派生，别在别处直接赋值。 */
+function syncSiteMeta() {
+  const sel = selectedTeams();
+  state.siteId = sel.length ? String(sel[0].id) : "";
+  state.siteName = siteLabel();
+}
+function teamNameOf(teamId) {
+  const t = state.teams.find((x) => String(x.id) === String(teamId));
+  return t ? t.name : String(teamId || "");
+}
+/** 骑手属于哪个站点：骑手列表 → 人资名单 → 主站点。多站点提交时 teamId 就取这个。 */
+function teamIdOfKnight(knightId) {
+  const k = state.knights.find((x) => Number(x.id) === Number(knightId));
+  if (k && num(k.teamId) > 0) return num(k.teamId);
+  const r = state.roster.find((x) => Number(x.id) === Number(knightId));
+  if (r && num(r.teamId) > 0) return num(r.teamId);
+  return num(state.siteId);
+}
+function teamNameOfKnight(knightId) {
+  const k = state.knights.find((x) => Number(x.id) === Number(knightId));
+  if (k && k.teamName) return k.teamName;
+  return teamNameOf(teamIdOfKnight(knightId));
+}
+function saveSiteIds() {
+  try {
+    localStorage.setItem(LS_SITES, JSON.stringify(state.siteIds));
+    localStorage.setItem(LS_SITES_ALL, state.siteAll ? "1" : "0");
+    localStorage.setItem(LS_SITE, state.siteId);   // 兼容旧键（其他地方可能读）
+  } catch (e) { /* 无痕模式忽略 */ }
+}
+/** 读回上次的站点范围：新键优先，读不到再退回旧的单站点键。 */
+function loadSiteIds() {
+  let ids = [], all = false;
+  try {
+    const raw = JSON.parse(localStorage.getItem(LS_SITES) || "[]");
+    if (Array.isArray(raw)) ids = raw.map(String).filter(Boolean);
+    all = localStorage.getItem(LS_SITES_ALL) === "1";
+  } catch (e) { ids = []; all = false; }
+  if (!ids.length) {
+    const one = localStorage.getItem(LS_SITE);
+    if (one) ids = [String(one)];
+  }
+  state.siteIds = [...new Set(ids)];
+  state.siteAll = !!all;
+  state.siteDraft = state.siteIds.slice();
+}
+/** 骑手列表按站点逐个取（queryTeamKnightInfo 只认单个 teamId），去重后带上站点名。 */
+async function loadKnightsMulti(ids, seq) {
+  const out = [], seen = new Set(), fails = [];
+  for (let i = 0; i < ids.length; i++) {
+    const id = String(ids[i]);
+    const name = teamNameOf(id);
+    if (ids.length > 1) {
+      state.loadText = `骑手 ${i + 1}/${ids.length}`;
+      renderStatus();
+    }
+    try {
+      const list = await loadKnights(id);
+      for (const k of list) {
+        if (seen.has(k.id)) continue;
+        seen.add(k.id);
+        out.push({ id: k.id, name: k.name, mobile: k.mobile, teamId: num(id), teamName: name });
+      }
+    } catch (e) {
+      fails.push(`${name}（${String(e && e.message ? e.message : e)}）`);
+    }
+    if (seq != null && seq !== state.siteSeq) return { list: out, fails };
+    if (ids.length > 1 && i < ids.length - 1) await sleep(SITE_FETCH_GAP_MS);
+  }
+  return { list: out, fails };
+}
+/** 跨站点合并人资名单：同一骑士只留一条，优先在职、其次入职更晚。 */
+function mergeRoster(list) {
+  const byId = new Map();
+  for (const rec of list || []) {
+    const prev = byId.get(rec.id);
+    if (!prev) { byId.set(rec.id, rec); continue; }
+    const better = (rec.status === "在职" && prev.status !== "在职") ||
+      (rec.status === prev.status && String(rec.entry) > String(prev.entry));
+    if (better) byId.set(rec.id, rec);
+  }
+  return [...byId.values()];
+}
+
 // ---------------------------------------------------------------- 渲染
 function currentTeam() {
   return state.teams.find((t) => String(t.id) === String(state.siteId)) || null;
@@ -398,16 +512,85 @@ function showNotice(text, kind) {
   el.className = "notice" + (kind === "bad" ? "" : " blue");
   el.hidden = !text;
 }
+/** 站点多选：按钮文字 + 隐藏的原生 select（兼容旧脚本）+ 弹层勾选列表。 */
 function renderSites() {
-  const sel = $("site-select");
-  if (!sel) return;
-  if (!state.teams.length) {
-    sel.innerHTML = `<option value="">未取到站点</option>`;
-    return;
+  const label = $("site-label");
+  if (label) {
+    label.textContent = siteLabel();
+    if (label.parentNode) {
+      label.parentNode.title = state.teams.length
+        ? `已选 ${selectedTeams().length}/${state.teams.length} 个站点 · 点这里多选 / 全选`
+        : "站点没取到，点「立即刷新」重试";
+    }
   }
-  sel.innerHTML = state.teams.map((t) =>
-    `<option value="${esc(t.id)}"${String(t.id) === String(state.siteId) ? " selected" : ""}>${esc(t.name)}</option>`
-  ).join("");
+  const sel = $("site-select");
+  if (sel) {
+    sel.innerHTML = state.teams.length
+      ? state.teams.map((t) => `<option value="${esc(t.id)}">${esc(t.name)}</option>`).join("")
+      : `<option value="">未取到站点</option>`;
+    if (state.siteId) sel.value = String(state.siteId);
+  }
+  const bs = $("bind-scope");
+  if (bs && bs.options && bs.options.length) {
+    const n = selectedTeams().length;
+    bs.options[0].textContent = n > 1 ? `选中站点（${n}）` : "当前站点";
+  }
+  renderSiteList();
+}
+/** 弹层列表：只画站点，不碰 state.siteIds（那是点「应用」才生效的）。 */
+function renderSiteList() {
+  const box = $("site-pop-list");
+  if (!box) return;
+  const q = String(($("site-search") && $("site-search").value) || "").trim().toLowerCase();
+  const draft = new Set(state.siteDraft.map(String));
+  const list = state.teams.filter((t) => !q
+    || String(t.name).toLowerCase().includes(q) || String(t.id).includes(q));
+  if (!list.length) {
+    box.innerHTML = `<div class="rent-empty">${state.teams.length ? "没有匹配的站点" : "站点没取到，点「立即刷新」重试"}</div>`;
+  } else {
+    box.innerHTML = list.map((t) => {
+      const on = draft.has(String(t.id));
+      return `<label class="site-row${on ? " on" : ""}" title="${esc(t.name)}">` +
+        `<input type="checkbox" data-site-id="${esc(t.id)}"${on ? " checked" : ""}>` +
+        `<span class="sr-name">${esc(t.name)}</span>` +
+        `<span class="sr-id">${esc(t.id)}</span></label>`;
+    }).join("");
+    box.querySelectorAll("input[data-site-id]").forEach((inp) => {
+      inp.addEventListener("change", () => {
+        const id = String(inp.dataset.siteId);
+        const set = new Set(state.siteDraft.map(String));
+        if (inp.checked) set.add(id); else set.delete(id);
+        state.siteDraft = [...set];
+        const row = inp.closest(".site-row");
+        if (row) row.classList.toggle("on", inp.checked);
+        renderSiteCount();
+      });
+    });
+  }
+  renderSiteCount();
+}
+function renderSiteCount() {
+  const el = $("site-pop-count");
+  const total = state.teams.length;
+  if (el) {
+    const n = state.siteDraft.length;
+    el.textContent = !total ? "站点没取到，点「立即刷新」重试"
+      : (n ? `已选 ${n} / ${total} 个站点` : `未选站点（共 ${total} 个）`);
+  }
+  const ap = $("site-apply");
+  if (ap) ap.disabled = !state.siteDraft.length || !total;
+}
+/** 打开 / 关闭站点弹层；打开时把当前范围拷进草稿，不改状态。 */
+function openSitePop(open) {
+  const pop = $("site-pop"), btn = $("site-btn");
+  if (!pop) return;
+  pop.hidden = !open;
+  if (btn) btn.setAttribute("aria-expanded", open ? "true" : "false");
+  if (!open) return;
+  state.siteDraft = state.siteAll ? state.teams.map((t) => String(t.id)) : state.siteIds.slice();
+  const s = $("site-search");
+  if (s) s.value = "";
+  renderSiteList();
 }
 function renderTypes() {
   const opts = state.types.map((t) => `<option value="${t.id}">${esc(t.name)}</option>`).join("");
@@ -430,7 +613,8 @@ function renderTypes() {
   }
 }
 function knightLabel(k) {
-  return k.name + (k.mobile ? " · " + k.mobile : "") + "（" + k.id + "）";
+  const base = k.name + (k.mobile ? " · " + k.mobile : "") + "（" + k.id + "）";
+  return state.siteIds.length > 1 && k.teamName ? base + " · " + k.teamName : base;
 }
 function renderKnightSelect() {
   const sel = $("one-knight");
@@ -450,7 +634,7 @@ function renderBatchList() {
   const list = state.knights.filter((k) => !q
     || k.name.toLowerCase().includes(q) || k.mobile.includes(q) || String(k.id).includes(q));
   if (!list.length) {
-    box.innerHTML = `<div class="rent-empty">${state.knights.length ? "没有匹配的骑手" : "当前站点暂无骑手"}</div>`;
+    box.innerHTML = `<div class="rent-empty">${state.knights.length ? "没有匹配的骑手" : "所选站点暂无骑手"}</div>`;
     updateBatchCount();
     return;
   }
@@ -459,7 +643,8 @@ function renderBatchList() {
     return `<label class="rent-check${on ? " checked" : ""}">` +
       `<input type="checkbox" data-knight-id="${k.id}"${on ? " checked" : ""}>` +
       `<span class="rc-name">${esc(k.name || "未命名")}</span>` +
-      `<span class="rc-meta">${esc(k.id)}${k.mobile ? " · " + esc(k.mobile) : ""}</span></label>`;
+      `<span class="rc-meta">${esc(k.id)}${k.mobile ? " · " + esc(k.mobile) : ""}` +
+      `${state.siteIds.length > 1 && k.teamName ? " · " + esc(k.teamName) : ""}</span></label>`;
   }).join("");
   box.querySelectorAll("input[data-knight-id]").forEach((inp) => {
     inp.addEventListener("change", () => {
@@ -483,14 +668,16 @@ function renderKpis() {
   if (!box) return;
   const ok = state.history.filter((h) => h.ok).length;
   const bad = state.history.length - ok;
+  const sel = selectedTeams();
   box.innerHTML = [
-    ["当前站点", currentTeam() ? currentTeam().name : "—"],
-    ["站点数", String(state.teams.length)],
-    ["当前站点骑手", String(state.knights.length)],
+    ["站点范围", siteLabel()],
+    ["站点数", state.teams.length ? `${sel.length}/${state.teams.length}` : "—"],
+    ["范围内骑手", String(state.knights.length)],
     ["物资类型", String(state.types.length)],
     ["本机登记成功", String(ok)],
     ["本机登记失败", String(bad)]
-  ].map(([k, v]) => `<div class="rent-kpi"><b title="${esc(v)}">${esc(v)}</b><span>${esc(k)}</span></div>`).join("");
+  ].map(([k, v], i) => `<div class="rent-kpi${i === 0 ? " wide" : ""}">` +
+    `<b title="${esc(v)}">${esc(v)}</b><span>${esc(k)}</span></div>`).join("");
 }
 function renderStatus() {
   const sub = $("sub");
@@ -501,6 +688,7 @@ function renderStatus() {
     bits.push("物资 " + state.types.length);
     bits.push("更新 " + hhmm(state.finishedAt || new Date()));
     bits.push("已有单 " + state.rents.length);
+    if (state.loadText) bits.push("读取中 " + state.loadText);
     bits.push("通道 " + (state.via === "bridge" ? "静默桥接" : "直连"));
     sub.textContent = bits.join(" · ");
   }
@@ -601,8 +789,8 @@ function renderBind() {
   state.bindRowsCache = rows;
   const sum = $("bind-sum");
   if (sum) {
-    if (state.rosterLoading) sum.innerHTML = `<span class="rent-msg info">正在读取人资名单…</span>`;
-    else if (state.rosterErr) {
+    if (state.rosterLoading) sum.innerHTML = `<span class="rent-msg info">正在读取人资名单…${esc(state.loadText || "")}</span>`;
+    else if (state.rosterErr && !rows.length) {
       sum.innerHTML = `<span class="rent-msg error">人资名单没取到：${esc(state.rosterErr)}</span>` +
         ` <button id="bind-retry" class="ghost" style="height:24px;padding:0 10px;">重试</button>`;
       const rb = $("bind-retry");
@@ -614,9 +802,10 @@ function renderBind() {
       const busy = rows.reduce((s, r) => s + r.cells.filter((c) => c === "busy").length, 0);
       sum.innerHTML = `<b>${people}</b> 人本月还有可绑定日 · 合计 <b>${okDays}</b> 个可绑定人日` +
         (left ? ` · <b>${left}</b> 人本月离职` : "") +
-        `<span class="rent-hint">（T-${BIND_BACK_DAYS} 起可绑 · 名单 ${state.roster.length} 人 · ` +
+        `<span class="rent-hint">（${esc(siteLabel())} · T-${BIND_BACK_DAYS} 起可绑 · 名单 ${state.roster.length} 人 · ` +
         `已有租用单 ${state.rents.length} 张${state.rentsErr ? "【取数失败，占用未生效】" : ""}` +
-        `${busy ? ` · 占用 ${busy} 人日` : ""}）</span>`;
+        `${busy ? ` · 占用 ${busy} 人日` : ""}）</span>` +
+        (state.rosterErr ? `<span class="rent-msg error">（${esc(state.rosterErr)}）</span>` : "");
     }
   }
   const box = $("bind-rows");
@@ -634,9 +823,11 @@ function renderBind() {
     `<span class="bind-bar">${days.map((d) => `<i>${Number(d.slice(-2))}</i>`).join("")}</span></div>`;
   const body = rows.slice(0, 80).map((r) => {
     const tip = (r.okDays.length ? `最早可从 ${r.okDays[0]} 开始` : "本月无剩余可绑定日") +
+      (r.teamName ? ` · ${r.teamName}` : "") +
       (r.ownRents.length ? ` · 已有单 ${r.ownRents.slice(0, 2).map((x) => `${x.typeName} ${x.start}~${x.end}`).join("；")}` : "");
+    const siteTag = state.siteIds.length > 1 && r.teamName ? ` · ${r.teamName}` : "";
     return `<div class="bind-row" title="${esc(r.name)}（${r.id}）· ${esc(tip)}">` +
-      `<span class="br-name">${esc(r.name || "未命名")}<em>${esc(r.id)}${r.status === "已离职" ? " · 已离职" : ""}</em></span>` +
+      `<span class="br-name">${esc(r.name || "未命名")}<em>${esc(r.id)}${esc(siteTag)}${r.status === "已离职" ? " · 已离职" : ""}</em></span>` +
       `<span class="br-date">${esc(r.entry || "—")}</span>` +
       `<span class="br-date">${esc(r.leave || "—")}</span>` +
       `<span class="br-day">${r.okDays.length} 天</span>` +
@@ -936,12 +1127,23 @@ function planDeductRow(input, ctx) {
     diff: target, absDiff: target, actualFee: 0,
     capItem: num(ctx.capItem), capTotal: num(ctx.capTotal), capHit: "",
     boundDays: 0, boundFee: 0, boundDaysTotal: 0, boundFeeTotal: 0, allow: 0, allowMax: 0,
+    teamId: 0, teamName: "",
     err: "", merged: false, pick: false, done: false, result: null
   };
   const k = (ctx.knights || []).find((x) => Number(x.id) === Number(row.knightId));
-  if (k) row.knightName = k.name;
+  if (k) {
+    row.knightName = k.name;
+    row.teamId = num(k.teamId) || num(ctx.defaultTeamId);
+    row.teamName = String(k.teamName || "") || teamNameOf(row.teamId);
+  }
   if (!(row.amount > 0)) { row.err = "金额需大于 0"; return row; }
-  if (!k) { row.err = `当前站点没有骑士ID ${row.knightId}`; return row; }
+  if (!k) {
+    // v3.26.0：范围是多选出来的，提示里写清楚「所选几个站点」，并告诉用户怎么放开
+    const scope = num(ctx.siteCount) > 1 ? `所选 ${num(ctx.siteCount)} 个站点` : `站点「${ctx.siteLabel || ""}」`;
+    row.err = `${scope}里没有骑士ID ${row.knightId}` +
+      (ctx.canExpand ? "（可点右上「读全部站点」）" : "（确认 ID 是否正确 / 是否在职）");
+    return row;
+  }
   if (!(row.monthlyFee > 0)) { row.err = "月扣款需大于 0"; return row; }
 
   // 本月已绑 = 该骑手本类型（以及住宿+租车合计）在服务端已有单里的天数 × 各自日单价
@@ -1072,13 +1274,15 @@ function checkOverlap(knightId, typeId, start, end, pool) {
   const suggested = suggestStart(knightId, typeId, start, end, src);
   return overlapText(hits, suggested, typeName(typeId));
 }
-function payloadOf(knightId, typeId, n, start, end) {
+function payloadOf(knightId, typeId, n, start, end, teamId) {
   const startTime = new Date(start + "T00:00:00").getTime();
   const endTime = new Date(end + "T23:59:59").getTime();
+  // v3.26.0：多站点时按骑手自己所属的站点写单，不再一律用主站点
+  const tid = num(teamId) || teamIdOfKnight(knightId) || num(state.siteId);
   return {
     params: {
       goodsBusinessRentCreateDto: {
-        teamId: num(state.siteId),
+        teamId: tid,
         knightId: num(knightId),
         categoryList: [{ categoryId: num(typeId), startTime, endTime, num: num(n) }],
         rentType: RENT_TYPE
@@ -1107,15 +1311,16 @@ async function submitOne() {
   if (err) { showMsg("one-msg", err, "error"); return { ok: false, msg: err }; }
   const k = currentKnight(knightId);
   const knightName = k ? k.name : String(knightId);
+  const teamId = (k && num(k.teamId)) || teamIdOfKnight(knightId);
   if (!window.__RENT_NO_CONFIRM__ && !confirm(
-    `确认为「${knightName}」登记 ${typeName(typeId)} × ${n}\n${start} ~ ${end}？\n\n提交会真实写入租用单。`
+    `确认为「${knightName}」（${teamNameOf(teamId)}）登记 ${typeName(typeId)} × ${n}\n${start} ~ ${end}？\n\n提交会真实写入租用单。`
   )) return { ok: false, canceled: true };
   state.submitting = true;
   $("one-submit").disabled = true;
   showMsg("one-msg", "提交中…", "info");
   let ok = false, msg = "";
   try {
-    const j = await postApi(API_CREATE, payloadOf(knightId, typeId, n, start, end));
+    const j = await postApi(API_CREATE, payloadOf(knightId, typeId, n, start, end, teamId));
     ok = okJson(j);
     msg = ok ? "success" : msgOf(j);
   } catch (e) {
@@ -1125,11 +1330,11 @@ async function submitOne() {
   $("one-submit").disabled = false;
   showMsg("one-msg", ok ? `登记成功：${knightName} · ${typeName(typeId)} × ${n}` : `登记失败：${msg}`, ok ? "success" : "error");
   pushHistory({
-    at: Date.now(), site: state.siteName || String(state.siteId), knightId, knightName,
+    at: Date.now(), site: teamNameOf(teamId), knightId, knightName,
     typeName: typeName(typeId), num: n, start, end, ok, msg: ok ? "" : msg
   });
   if (ok) {
-    addLocalRent(knightId, typeId, start, end, n, knightName, typeName(typeId));
+    addLocalRent(knightId, typeId, start, end, n, knightName, typeName(typeId), teamId);
     renderBind();
     $("one-knight").value = "";
     $("one-num").value = "1";
@@ -1169,17 +1374,17 @@ async function submitBatch() {
       msg = pre;                       // 本地拦下，不发请求
     } else {
       try {
-        const j = await postApi(API_CREATE, payloadOf(k.id, typeId, n, start, end));
+        const j = await postApi(API_CREATE, payloadOf(k.id, typeId, n, start, end, k.teamId));
         oneOk = okJson(j);
         msg = oneOk ? "" : msgOf(j);
       } catch (e) {
         msg = String(e && e.message ? e.message : e);
       }
-      if (oneOk) addLocalRent(k.id, typeId, start, end, n, k.name, typeName(typeId));
+      if (oneOk) addLocalRent(k.id, typeId, start, end, n, k.name, typeName(typeId), k.teamId);
     }
     if (oneOk) ok++; else { bad++; fails.push(`${k.name}（${msg}）`); }
     pushHistory({
-      at: Date.now(), site: state.siteName || String(state.siteId), knightId: k.id, knightName: k.name,
+      at: Date.now(), site: k.teamName || teamNameOfKnight(k.id), knightId: k.id, knightName: k.name,
       typeName: typeName(typeId), num: n, start, end, ok: oneOk, msg
     });
     if (i < ids.length - 1) await sleep(BATCH_GAP_MS);
@@ -1275,7 +1480,9 @@ function resolveImportRow(row) {
     else if (hits.length > 1) { out.err = "姓名重名，请补手机号或骑士ID"; return out; }
   }
   if (!k) {
-    out.err = (kid || row.mobile || row.name) ? "当前站点没有这位骑手（先切站点）" : "缺少骑手姓名 / 手机号 / 骑士ID";
+    out.err = (kid || row.mobile || row.name)
+      ? `当前站点没有这位骑手（先切站点 / 勾上他的站点，共 ${state.siteIds.length} 个）`
+      : "缺少骑手姓名 / 手机号 / 骑士ID";
     return out;
   }
   out.knight = k;
@@ -1330,7 +1537,9 @@ function resolveImport() {
     seen.set(key, row.line);
     planned.push({
       knightId: r.knight.id, categoryId: r.typeId, typeName: r.typeName,
-      start: r.start, end: r.end, teamId: String(state.siteId), teamName: String(state.siteName || ""),
+      start: r.start, end: r.end,
+      teamId: String(num(r.knight.teamId) || teamIdOfKnight(r.knight.id)),
+      teamName: String(r.knight.teamName || teamNameOfKnight(r.knight.id)),
       local: true
     });
   }
@@ -1479,19 +1688,19 @@ async function runImport() {
       msg = pre;
     } else {
       try {
-        const j = await postApi(API_CREATE, payloadOf(r.knight.id, r.typeId, r.count, r.start, r.end));
+        const j = await postApi(API_CREATE, payloadOf(r.knight.id, r.typeId, r.count, r.start, r.end, r.knight.teamId));
         oneOk = okJson(j);
         msg = oneOk ? "" : msgOf(j);
       } catch (e) {
         msg = String(e && e.message ? e.message : e);
       }
-      if (oneOk) addLocalRent(r.knight.id, r.typeId, r.start, r.end, r.count, r.knight.name, r.typeName);
+      if (oneOk) addLocalRent(r.knight.id, r.typeId, r.start, r.end, r.count, r.knight.name, r.typeName, r.knight.teamId);
     }
     row.done = true;
     row.result = { ok: oneOk, msg };
     if (oneOk) ok++; else { bad++; fails.push(`${r.knight.name}（${msg}）`); }
     pushHistory({
-      at: Date.now(), site: state.siteName || String(state.siteId), knightId: r.knight.id,
+      at: Date.now(), site: r.knight.teamName || teamNameOfKnight(r.knight.id), knightId: r.knight.id,
       knightName: r.knight.name, typeName: r.typeName, num: r.count, start: r.start, end: r.end,
       ok: oneOk, msg
     });
@@ -1509,27 +1718,40 @@ async function runImport() {
   return { ok: bad === 0, success: ok, fail: bad };
 }
 
-/** 拉当前站点的人资名单（用于「本月可绑定」），失败只影响这一块。 */
+/** 拉选中站点的人资名单（用于「本月可绑定」），失败只影响这一块。
+ *  v3.26.0：多站点逐个站点拉、按 knightId 合并；个别站点失败不阻断其余站点。 */
 async function loadRosterInto() {
-  if (!state.siteId) return [];
+  const ids = state.siteIds.slice();
+  if (!ids.length) return [];
   // 离线测试用 __SET_RENT__ 直接注入名单，别让异步请求把它覆盖掉
   if (window.__WB_TEST__ && !window.__RENT_NET_TEST__) return state.roster;
   const seq = ++state.rosterSeq;
   state.rosterLoading = true;
   state.rosterErr = "";
   renderBind();
-  let list = [], err = "";
-  try {
-    list = await loadRoster(state.siteId, state.siteName);
-  } catch (e) {
-    err = String(e && e.message ? e.message : e);
+  const all = [], fails = [];
+  for (let i = 0; i < ids.length; i++) {
+    const id = String(ids[i]);
+    const name = teamNameOf(id);
+    if (ids.length > 1) {
+      state.loadText = `名单 ${i + 1}/${ids.length}`;
+      renderBind();
+    }
+    try {
+      all.push(...await loadRoster(id, name));
+    } catch (e) {
+      fails.push(`${name}（${String(e && e.message ? e.message : e)}）`);
+    }
+    if (seq !== state.rosterSeq) return state.roster;   // 期间又改了站点范围，丢弃这次结果
+    if (ids.length > 1 && i < ids.length - 1) await sleep(SITE_FETCH_GAP_MS);
   }
-  if (seq !== state.rosterSeq) return state.roster;   // 期间又切了站点，丢弃这次结果
-  state.roster = list;
-  state.rosterErr = err;
+  state.loadText = "";
+  state.roster = mergeRoster(all);
+  state.rosterErr = fails.length ? `有 ${fails.length} 个站点名单没取到：${fails.slice(0, 3).join("；")}` : "";
   state.rosterAt = new Date();
   state.rosterLoading = false;
   renderBind();
+  renderDeduct();
   return state.roster;
 }
 // ---------------------------------------------------------------- 按金额反算（控制器 / 视图）
@@ -1594,8 +1816,41 @@ function deductCtx() {
     capItem: currentDeductCapItem(), capTotal: currentDeductCapTotal(),
     today: todayStr(), roster: state.roster, rents: state.rents, knights: state.knights,
     history: state.history, feeOfType,
-    typeIds: (state.types || []).map((t) => num(t.id)).filter(Boolean)
+    typeIds: (state.types || []).map((t) => num(t.id)).filter(Boolean),
+    siteCount: selectedTeams().length,
+    siteLabel: siteLabel(),
+    canExpand: state.teams.length > state.siteIds.length,
+    defaultTeamId: num(state.siteId)
   };
+}
+/** 卡片上的站点范围提示 + 「读全部站点」按钮的可用状态。 */
+function renderDeductScope() {
+  const el = $("deduct-scope");
+  if (el) {
+    el.innerHTML = `范围 <b>${esc(state.siteName || "—")}</b> · 骑手 ${state.knights.length} 人`;
+  }
+  const btn = $("deduct-all-sites");
+  if (btn) {
+    const all = state.teams.length > 0 && state.siteIds.length >= state.teams.length;
+    btn.disabled = all || state.deductSubmitting;
+    btn.textContent = all ? "已是全部站点" : `读全部站点（${state.teams.length}）`;
+  }
+}
+/** 一键把页面站点范围切到全部站点，再按现有输入重算预览。 */
+async function useAllSitesForDeduct() {
+  if (!state.teams.length) { showMsg("deduct-msg", "站点还没取到，点「立即刷新」重试", "error"); return; }
+  if (state.siteIds.length >= state.teams.length && !state.siteAll) {
+    showMsg("deduct-msg", "已经是全部站点了", "info");
+    return;
+  }
+  const btn = $("deduct-all-sites");
+  if (btn) btn.disabled = true;
+  showMsg("deduct-msg", `正在读取全部 ${state.teams.length} 个站点的骑手与已有租用单，请稍候…`, "info");
+  await applySiteIds(state.teams.map((t) => String(t.id)), true);
+  renderDeductScope();
+  const text = String(($("deduct-input") && $("deduct-input").value) || "").trim();
+  if (text) generateDeduct();
+  else showMsg("deduct-msg", `已切到全部站点（骑手 ${state.knights.length} 人），填好「骑士ID 金额」后点「生成预览」`, "info");
 }
 function renderDeduct() {
   const info = $("deduct-fee-info");
@@ -1607,6 +1862,7 @@ function renderDeduct() {
       (capI > 0 ? `（单张单最多 ${capMaxTotal(capI, fee)} 天次）` : "");
     info.textContent = `按 ${todayStr().slice(0, 7)}（${dm} 天）折算 · 日扣款 ${fee.toFixed(2)} 元/天次 · ${capTxt}`;
   }
+  renderDeductScope();
   const t = $("deduct-preview");
   if (!t) return;
   const rows = state.deductRows;
@@ -1626,9 +1882,10 @@ function renderDeduct() {
         `${r.pick && !r.done && !r.err ? " checked" : ""}${r.done || r.err ? " disabled" : ""}>`;
       const diffTxt = r.days ? (r.diff === 0 ? "0" : (r.diff > 0 ? `少 ${r.diff}` : `多 ${-r.diff}`)) : "—";
       const bad = !!r.err || !!(r.done && r.result && !r.result.ok);
+      const siteTag = state.siteIds.length > 1 && r.teamName ? `<em>${esc(r.teamName)}</em>` : "";
       return `<tr${bad ? ' class="deduct-bad"' : ""}>` +
         `<td>${pick}</td><td>${esc(r.line)}</td>` +
-        `<td>${esc(r.knightName || r.knightId)}${r.merged ? "<em>（金额已合并）</em>" : ""}</td>` +
+        `<td>${esc(r.knightName || r.knightId)}${siteTag}${r.merged ? "<em>（金额已合并）</em>" : ""}</td>` +
         `<td>¥${r.amount}</td><td>${r.target}</td><td>${esc(r.earliest || "—")}</td>` +
         `<td>${r.start && r.end ? `${r.start} ~ ${r.end}` : "—"}</td>` +
         `<td>${r.days || "—"}</td><td>${r.qty || "—"}</td><td>${r.total || "—"}</td>` +
@@ -1656,9 +1913,13 @@ function generateDeduct() {
   saveDeductOpts();
   renderDeduct();
   const okN = state.deductRows.filter((r) => !r.err).length;
+  const missing = state.deductRows.filter((r) => /没有骑士ID/.test(r.err)).length;
   const msg = parsed.errs.length
     ? `已生成 ${state.deductRows.length} 行 · ${parsed.errs.length} 行输入有误：${parsed.errs.slice(0, 2).join("；")}`
-    : (okN ? `已生成 ${okN} 行可执行 · 请核对起止日期与数量后执行` : "没有可执行的行，检查骑士ID / 金额 / 可绑定窗口");
+    : (okN ? `已生成 ${okN} 行可执行 · 请核对起止日期与数量后执行`
+      : (missing && state.siteIds.length < state.teams.length
+        ? `${missing} 位骑士不在所选 ${state.siteIds.length} 个站点里，点右上「读全部站点（${state.teams.length}）」后重新生成`
+        : "没有可执行的行，检查骑士ID / 金额 / 可绑定窗口"));
   showMsg("deduct-msg", msg, parsed.errs.length || !okN ? "error" : "info");
   return { rows: state.deductRows, errs: parsed.errs };
 }
@@ -1708,20 +1969,20 @@ async function runDeduct() {
     } else {
       let oneOk = false, msg = "";
       try {
-        const j = await postApi(API_CREATE, payloadOf(r.knightId, r.typeId, r.qty, r.start, r.end));
+        const j = await postApi(API_CREATE, payloadOf(r.knightId, r.typeId, r.qty, r.start, r.end, r.teamId));
         oneOk = okJson(j);
         msg = oneOk ? "" : msgOf(j);
       } catch (e) { msg = String(e && e.message ? e.message : e); }
       r.done = true; r.result = { ok: oneOk, msg };
       pushHistory({
-        at: Date.now(), site: state.siteName || String(state.siteId),
+        at: Date.now(), site: r.teamName || teamNameOfKnight(r.knightId),
         knightId: r.knightId, knightName: r.knightName || String(r.knightId),
         typeId: r.typeId, typeName: r.typeName, num: r.qty, start: r.start, end: r.end,
         fee: r.actualFee, ok: oneOk, msg
       });
       if (oneOk) {
         ok++;
-        addLocalRent(r.knightId, r.typeId, r.start, r.end, r.qty, r.knightName, r.typeName);
+        addLocalRent(r.knightId, r.typeId, r.start, r.end, r.qty, r.knightName, r.typeName, r.teamId);
       } else { bad++; fails.push(`${r.knightName || r.knightId}（${msg}）`); }
     }
     renderDeduct();
@@ -1737,32 +1998,48 @@ async function runDeduct() {
 }
 
 // ---------------------------------------------------------------- 事件
-async function switchSite(siteId) {
-  state.siteId = String(siteId || "");
-  try { localStorage.setItem(LS_SITE, state.siteId); } catch (e) { /* ignore */ }
-  const t = currentTeam();
-  state.siteName = t ? t.name : state.siteId;
+/** 应用站点范围（多选）：清掉旧数据 → 重新拉选中站点的骑手 / 名单 / 已有单。
+ *  ids 为空时不动，避免把范围清成「一个站点都没有」。 */
+async function applySiteIds(ids, all) {
+  const next = [...new Set((ids || []).map(String).filter(Boolean))];
+  if (!next.length) { showNotice("至少选一个站点", "bad"); return { list: [], fails: [] }; }
+  state.siteAll = !!all && next.length === state.teams.length;
+  state.siteIds = next;
+  syncSiteMeta();
+  saveSiteIds();
+  openSitePop(false);
   state.selected.clear();
   state.knights = [];
   state.roster = [];
   state.rosterErr = "";
   state.rents = [];
   state.rentsErr = "";
-  renderSites();
-  renderBatchList();
-  renderKpis();
-  renderStatus();
-  renderBind();
-  if (!state.siteId) return;
-  try {
-    state.knights = await loadKnights(state.siteId);
-    state.errors = [];
-  } catch (e) {
-    showNotice("骑手列表加载失败：" + String(e && e.message ? e.message : e), "bad");
-  }
+  state.deductRows = [];            // 范围变了，旧预览的站点归属已经不成立
+  state.loadText = "";
   renderAll();
-  loadRosterInto();          // 不 await：名单慢一点也不挡主表
-  loadRentsInto();           // 已有租用单，防重叠校验的数据源
+  return await reloadScope();
+}
+/** 重新拉选中范围的骑手 + 名单 + 已有单（名单与已有单不 await，别挡主表）。 */
+async function reloadScope() {
+  const ids = state.siteIds.slice();
+  if (!ids.length) return { list: [], fails: [] };
+  const seq = ++state.siteSeq;
+  const res = await loadKnightsMulti(ids, seq);
+  if (seq !== state.siteSeq) return res;
+  state.knights = res.list;
+  state.loadText = "";
+  state.finishedAt = new Date();
+  renderAll();
+  if (res.fails.length) {
+    showNotice(`有 ${res.fails.length} 个站点的骑手列表没取到：${res.fails.slice(0, 3).join("；")}`, "bad");
+  }
+  loadRosterInto();
+  loadRentsInto();
+  return res;
+}
+/** 兼容旧调用：按单个站点切换。 */
+async function switchSite(siteId) {
+  return await applySiteIds([String(siteId || "")], false);
 }
 async function loadAll() {
   state.loading = true;
@@ -1776,19 +2053,45 @@ async function loadAll() {
     if (!state.teams.length) state.teams = fallbackTeams();
     showNotice("站点 / 物资类型加载失败：" + state.errors[0] + "（可点「立即刷新」重试，或切到静默桥接）", "bad");
   }
-  if (!state.siteId || !state.teams.some((t) => String(t.id) === String(state.siteId))) {
-    state.siteId = state.teams[0] ? String(state.teams[0].id) : "";
-  }
-  const t = currentTeam();
-  state.siteName = t ? t.name : state.siteId;
+  // 站点列表变了：全部站点模式展开成当前全部 id；否则丢掉已经不存在的站点
+  const valid = state.teams.map((t) => String(t.id));
+  if (state.siteAll) state.siteIds = valid.slice();
+  else state.siteIds = state.siteIds.map(String).filter((id) => valid.includes(id));
+  if (!state.siteIds.length) state.siteIds = valid.slice(0, 1);
+  state.siteAll = state.siteAll && state.siteIds.length === valid.length;
+  syncSiteMeta();
   state.finishedAt = new Date();
   state.loading = false;
   renderAll();
-  if (state.siteId) await switchSite(state.siteId);
+  if (state.siteIds.length) await applySiteIds(state.siteIds.slice(), state.siteAll);
 }
 
 function bind() {
-  $("site-select").addEventListener("change", (e) => switchSite(e.target.value));
+  // ---- 站点多选
+  $("site-btn").addEventListener("click", () => {
+    const pop = $("site-pop");
+    openSitePop(!!(pop && pop.hidden));
+  });
+  $("site-search").addEventListener("input", renderSiteList);
+  $("site-all").addEventListener("click", () => {
+    state.siteDraft = state.teams.map((t) => String(t.id));
+    renderSiteList();
+  });
+  $("site-none").addEventListener("click", () => {
+    state.siteDraft = [];
+    renderSiteList();
+  });
+  $("site-apply").addEventListener("click", () => {
+    applySiteIds(state.siteDraft, state.siteDraft.length === state.teams.length);
+  });
+  // 隐藏的原生 select：脚本 / 键盘改值时仍按单选切换
+  $("site-select").addEventListener("change", (e) => applySiteIds([e.target.value], false));
+  document.addEventListener("click", (e) => {
+    const pick = $("site-pick"), pop = $("site-pop");
+    if (!pick || !pop || pop.hidden) return;
+    if (!pick.contains(e.target)) openSitePop(false);
+  });
+
   $("btn-refresh").addEventListener("click", () => loadAll());
   $("btn-channel").addEventListener("click", async () => {
     state.via = state.via === "direct" ? "bridge" : "direct";
@@ -1856,6 +2159,7 @@ function bind() {
   });
   $("deduct-generate").addEventListener("click", () => generateDeduct());
   $("deduct-run").addEventListener("click", () => runDeduct());
+  $("deduct-all-sites").addEventListener("click", () => useAllSitesForDeduct());
   $("deduct-clear").addEventListener("click", () => {
     $("deduct-input").value = "";
     state.deductInput = "";
@@ -1936,6 +2240,7 @@ function bind() {
     if (e.key === "Escape") {
       const n = $("notice"); if (n) n.hidden = true;
       const m = $("import-modal"); if (m) m.hidden = true;
+      openSitePop(false);
     }
   });
 }
@@ -1954,9 +2259,12 @@ window.__SET_RENT__ = (o) => {
   if (Array.isArray(o.types)) state.types = o.types.map((t) => ({ id: num(t.id), name: String(t.name || t.id) }));
   if (Array.isArray(o.knights)) state.knights = o.knights.map((k) => ({
     id: num(k.id == null ? k.knightId : k.id), name: String(k.name || k.knightName || ""),
-    mobile: String(k.mobile || ""), teamId: num(k.teamId)
+    mobile: String(k.mobile || ""), teamId: num(k.teamId),
+    teamName: String(k.teamName || "")
   }));
-  if (o.siteId != null) state.siteId = String(o.siteId);
+  if (Array.isArray(o.siteIds)) state.siteIds = o.siteIds.map(String).filter(Boolean);
+  if (o.siteAll != null) state.siteAll = !!o.siteAll;
+  if (o.siteId != null) state.siteIds = [String(o.siteId)];
   if (Array.isArray(o.history)) state.history = o.history;
   if (Array.isArray(o.roster)) state.roster = o.roster.map((r) => ({
     id: num(r.id == null ? r.knightId : r.id), name: String(r.name || r.staffName || ""),
@@ -2022,14 +2330,18 @@ window.__SET_RENT__ = (o) => {
       pick: r.pick == null ? !r.err : !!r.pick, done: !!r.done, result: r.result || null
     }));
   }
-  const t = state.teams.find((x) => String(x.id) === String(state.siteId));
-  state.siteName = t ? t.name : String(state.siteId || "");
+  if (!state.siteIds.length && state.teams.length) state.siteIds = [String(state.teams[0].id)];
+  state.siteDraft = state.siteIds.slice();
+  syncSiteMeta();
   state.finishedAt = new Date();
   renderAll();
   renderImportPreview();
 };
 window.__RENT__ = {
   state, postApi, getApi, loadAll, loadTeams, loadTypes, loadKnights, switchSite,
+  loadKnightsMulti, applySiteIds, reloadScope, selectedTeams, siteLabel, syncSiteMeta,
+  teamIdOfKnight, teamNameOf, teamNameOfKnight, mergeRoster, saveSiteIds, loadSiteIds,
+  openSitePop, renderSiteList, renderSiteCount,
   loadRoster, loadRosterInto, loadRents, loadRentsInto, addLocalRent,
   findOverlap, suggestStart, checkOverlap, checkWindow, overlapText, dayDiff, earliestBindDate,
   computeBind, bindRows, bindState, busyMapFor, monthDays, ymd, exportBind,
@@ -2039,12 +2351,12 @@ window.__RENT__ = {
   downloadTemplate, importStats, downloadCsv, csvCell, saveBindOpts,
   submitOne, submitBatch, validate, payloadOf, renderAll, renderHistory, renderBind, renderImportPreview,
   deductMonthDays, deductDailyFee, deductTarget, deductWindow, planDeduction,
-  planDeductRow, planDeductRows, parseDeductInput, deductCtx,
+  planDeductRow, planDeductRows, parseDeductInput, deductCtx, renderDeductScope, useAllSitesForDeduct,
   generateDeduct, runDeduct, renderDeduct, loadDeductOpts, saveDeductOpts,
   API_TEAMS, API_TYPES, API_KNIGHTS, API_CREATE, API_RENT_LIST, API_STAFF,
   RENT_TYPE, QUERY_TYPE, BATCH_GAP_MS, HISTORY_MAX, BIND_BACK_DAYS,
-  STAFF_PAGE_SIZE, RENT_PAGE_SIZE, IMPORT_MAX_ROWS,
-  DEDUCT_QTY_MAX, DEDUCT_DEFAULT_FEE, LS_DEDUCT,
+  STAFF_PAGE_SIZE, RENT_PAGE_SIZE, IMPORT_MAX_ROWS, SITE_FETCH_GAP_MS,
+  DEDUCT_QTY_MAX, DEDUCT_DEFAULT_FEE, LS_DEDUCT, LS_SITES, LS_SITES_ALL,
   DEDUCT_CAP_ITEM, DEDUCT_CAP_TOTAL, capMaxTotal, todayDeductFee, planDeduction,
   boundDaysInMonth, boundFeeByType,
   currentDeductCapItem, currentDeductCapTotal
@@ -2052,6 +2364,7 @@ window.__RENT__ = {
 
 (async function init() {
   bind();
+  loadSiteIds();                 // 上次选的站点范围（旧版本只存了单个站点也能读回来）
   const today = todayStr();
   for (const [id, val] of [["one-start", today], ["one-end", shiftDate(today, 30)],
     ["batch-start", today], ["batch-end", shiftDate(today, 30)]]) {
