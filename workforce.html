@@ -34,11 +34,11 @@
     </select>
     <div class="date-pick scale-pick">
       <span>汇总区间</span>
-      <input type="date" id="scale-start" aria-label="汇总起始日期" title="「1天有效出勤骑手」的统计起始日">
+      <input type="date" id="scale-start" aria-label="汇总起始日期" title="「N天有效出勤规模」的统计起始日（默认 T-5）">
       <span class="scale-tilde">~</span>
-      <input type="date" id="scale-end" aria-label="汇总结束日期" title="「1天有效出勤骑手」的统计结束日，默认昨天">
+      <input type="date" id="scale-end" aria-label="汇总结束日期" title="「N天有效出勤规模」的统计结束日，默认昨天">
     </div>
-    <select id="scale-mode" class="wf-select" aria-label="有效出勤判定口径" title="「1天有效出勤骑手」按什么判定有效">
+    <select id="scale-mode" class="wf-select" aria-label="有效出勤判定口径" title="「N天有效出勤规模」与「在职规模」按什么判定有效">
       <option value="any">有效出勤：有效时长或完单</option>
       <option value="both">有效出勤：两者都要</option>
       <option value="achieved">有效出勤：达成标记</option>
