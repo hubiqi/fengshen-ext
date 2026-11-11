@@ -113,8 +113,11 @@
    * 把看板主画面渲染为 PNG Blob。返回 {blob,width,height}（width/height 为实际像素）。
    * rootId 默认 "sheet"；v3.6.0 起「出勤达成」是独立页面，可传自己的根节点 id，
    * 两个入口各自导出自己的画面，互不混入。
+   * v3.30.0：opts.title 存在时，在克隆画面最前面插一段标题区（主标题 + 可选副标题），
+   * 只出现在导出图里、用内联样式，不影响页面本身；插入后再量高度，保证不被裁掉。
    */
-  async function toBlob(rootId) {
+  async function toBlob(rootId, opts) {
+    const o = opts || {};
     const src = document.getElementById(rootId || "sheet");
     if (!src) throw new Error("未找到看板画面（#" + (rootId || "sheet") + "）");
     WIDTH = measureWidth(src);
@@ -132,6 +135,23 @@
       `background:#FFFFFF;color:#1F2937;font-family:${FONT};`);
     for (const [sel, css] of DESKTOP_OVERRIDES) {
       for (const n of Array.from(clone.querySelectorAll(sel))) n.style.cssText += css;
+    }
+    if (o.title) {
+      const box = document.createElement("div");
+      box.setAttribute("style",
+        `width:100%;box-sizing:border-box;text-align:center;margin:0 0 16px;padding:0 0 10px;` +
+        `border-bottom:2px solid #2F5597;font-family:${FONT};`);
+      const h = document.createElement("div");
+      h.textContent = String(o.title);
+      h.setAttribute("style", "font-size:28px;line-height:1.35;font-weight:700;color:#1F2937;letter-spacing:.5px;");
+      box.appendChild(h);
+      if (o.subtitle) {
+        const sub = document.createElement("div");
+        sub.textContent = String(o.subtitle);
+        sub.setAttribute("style", "font-size:12.5px;line-height:1.5;color:#6B7280;margin-top:4px;font-weight:400;");
+        box.appendChild(sub);
+      }
+      clone.insertBefore(box, clone.firstChild);
     }
     holder.appendChild(clone);
     document.body.appendChild(holder);
@@ -210,13 +230,15 @@
 
   /**
    * 一键复制入口。
-   * @param {{download?:boolean, date?:string, rootId?:string, filename?:string}} opts
-   *        download=true 时直接另存为 PNG；rootId/filename 供独立页面指定自己的画面与文件名
+   * @param {{download?:boolean, date?:string, rootId?:string, filename?:string,
+   *          title?:string, subtitle?:string}} opts
+   *        download=true 时直接另存为 PNG；rootId/filename 供独立页面指定自己的画面与文件名；
+   *        title/subtitle 给导出图加标题区（不写就没有，老入口行为不变）
    * @returns {Promise<{mode:"clipboard"|"download"|"fallback", width:number, height:number}>}
    */
   async function capture(opts) {
     const o = opts || {};
-    const rendering = toBlob(o.rootId);          // 立即开工，不先 await
+    const rendering = toBlob(o.rootId, o);        // 立即开工，不先 await
     const name = o.filename || `风神考核看板_${o.date || today()}.png`;
     if (o.download) {
       const { blob, width, height } = await rendering;

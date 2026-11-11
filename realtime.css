@@ -40,6 +40,7 @@ body.rt-page { background: #F3F4F6; }
   font-size: 12px; color: #1F2937; background: #FFF; }
 .rt-input:focus, .rt-select:focus { outline: 2px solid #93C5FD; border-color: #60A5FA; }
 .rt-gap { width: 64px; text-align: center; }
+.rt-project { width: 118px; }
 #btn-auto.active { border-color: #F59E0B; color: #B45309; background: #FFFBEB; }
 
 /* ---- KPI ---- */

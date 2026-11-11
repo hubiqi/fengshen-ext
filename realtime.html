@@ -35,6 +35,9 @@
     </label>
     <button id="btn-refresh" class="primary">立即刷新</button>
     <button id="btn-copy" class="primary" title="把当前画面复制为高清 PNG，可直接粘贴到钉钉 / 微信；按住 Shift 点击则另存为 PNG 文件">复制图片</button>
+    <label class="rt-field-inline" title="导出图片标题里的「项目名称」；「商名称」自动跟随当前登录账号，标题形如：商名称-项目名称">项目
+      <input id="rt-project" class="rt-input rt-project" maxlength="30" placeholder="下午茶在线" autocomplete="off">
+    </label>
     <label class="rt-field-inline" title="自动刷新间隔（秒），10 ~ 3600">每
       <input id="rt-gap" class="rt-input rt-gap" type="number" min="10" max="3600" step="5" value="30">
       秒

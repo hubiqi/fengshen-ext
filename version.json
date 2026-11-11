@@ -1,6 +1,6 @@
 {
-  "version": "3.29.1",
-  "notes": "实时出勤监控：异常骑手 / 不在线骑手两张明细表的时长列改成「有效在线」，取 timeValidOnlineTime（剔除无效在线，与考核口径一致），不再是原始在线 timeOnlineTime；鼠标停在数字上仍可看原始在线时长与本时段目标时长 timeOnlineTimeTarget",
-  "download": "https://github.com/hubiqi/fengshen-ext/releases/download/v3.29.1/fengshen-ext-v3.29.1.zip",
+  "version": "3.30.0",
+  "notes": "实时出勤监控：导出的 PNG 顶部加标题区 —— 主标题为「商名称-项目名称」（商名称自动跟随当前登录账号，项目名可在工具条改、默认「下午茶在线」，例如 福建省双十网络科技有限公司-下午茶在线），副标题给站点范围 / 时段 / 数据时间；标题只出现在图片里，不影响页面。另含 v3.29.1 明细表时长改有效在线 timeValidOnlineTime",
+  "download": "https://github.com/hubiqi/fengshen-ext/releases/download/v3.30.0/fengshen-ext-v3.30.0.zip",
   "published_at": "2026-11-11"
 }

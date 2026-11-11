@@ -39,6 +39,9 @@ const SLOT_IGNORE = [2, 9999]; // 休息 / 全天，不参与时段选择
 const LS_GAP = "wb_rt_gap";
 const LS_SITES = "wb_rt_sites";
 const LS_SLOT = "wb_rt_slot";
+const LS_PROJECT = "wb_rt_project";       // 导出图标题里的项目名称
+const DEFAULT_PROJECT = "下午茶在线";      // 示例：福建省双十网络科技有限公司-下午茶在线
+const AGENCY_FALLBACK = "福建省双十网络科技有限公司";  // 与 schedule.js 的 AGENCY_NAME 一致
 
 // 站点名 → 商圈片（与 assess.js / schedule.js 同一套映射；没命中的按站点自己成组）
 const SITE_TO_AREA = {
@@ -715,9 +718,49 @@ function loadOpts() {
     const s = localStorage.getItem(LS_SLOT);
     if (s) state.slotMode = s === "auto" ? "auto" : String(s);
   } catch (e) { /* ignore */ }
+  loadProject();
+}
+/** 读回上次的项目名，并把「商名称-项目名」写进输入框的悬浮提示。 */
+function loadProject() {
+  const el = $("rt-project");
+  if (!el) return;
+  let saved = "";
+  try { saved = String(localStorage.getItem(LS_PROJECT) || "").trim(); } catch (e) { /* ignore */ }
+  el.value = saved || DEFAULT_PROJECT;
+  updateProjectTip();
+}
+function saveProject() {
+  const el = $("rt-project");
+  if (!el) return;
+  const v = String(el.value || "").trim();
+  try { if (v) localStorage.setItem(LS_PROJECT, v); else localStorage.removeItem(LS_PROJECT); } catch (e) { /* ignore */ }
+  updateProjectTip();
+}
+function updateProjectTip() {
+  const el = $("rt-project");
+  if (el && el.parentNode) el.parentNode.title = `导出图标题：${shotTitle()}（商名称自动跟随当前登录账号）`;
 }
 
 // ---------------------------------------------------------------- 一键复制图片
+/** 商名称：跟随当前登录账号。看板 / 排班模块记住的合作商名优先，首次用默认商名。 */
+function agencyName() {
+  try {
+    return String(localStorage.getItem("wb_agency_name")
+      || localStorage.getItem("wb_sch_agency") || AGENCY_FALLBACK).trim() || AGENCY_FALLBACK;
+  } catch (e) { return AGENCY_FALLBACK; }
+}
+/** 项目名：工具条上可改，空着就用默认「下午茶在线」，改动记在本机。 */
+function projectName() {
+  const el = $("rt-project");
+  return String((el && el.value) || "").trim() || DEFAULT_PROJECT;
+}
+/** 导出图标题 = 商名称-项目名称，例如「福建省双十网络科技有限公司-下午茶在线」。 */
+function shotTitle() { return `${agencyName()}-${projectName()}`; }
+/** 标题下面的一行小字：范围 / 时段 / 数据时间，方便发到群里后还能对上是哪一刻的快照。 */
+function shotSubtitle() {
+  const slot = activeSlot();
+  return `${siteLabel()} · ${slot ? slotText(slot) : "—"} · 数据时间 ${hhmmss(state.lastAt || new Date())}`;
+}
 /** 出图文件名：风神实时出勤_20261111_1543_下午茶1.png（时段名去掉括号里的时间，避免文件名太长）。 */
 function shotName() {
   const d = state.lastAt || new Date();
@@ -741,7 +784,8 @@ async function copyImage(e) {
   const name = shotName();
   try {
     const r = await window.WB_CAPTURE.capture({
-      download: !!(e && e.shiftKey), rootId: "rt-wrap", filename: name
+      download: !!(e && e.shiftKey), rootId: "rt-wrap", filename: name,
+      title: shotTitle(), subtitle: shotSubtitle()
     });
     const size = `${r.width}×${r.height}`;
     showNotice(r.mode === "clipboard"
@@ -795,6 +839,8 @@ function bind() {
   });
   $("btn-refresh").addEventListener("click", () => refresh());
   $("btn-copy").addEventListener("click", (e) => copyImage(e));
+  $("rt-project").addEventListener("change", saveProject);
+  $("rt-project").addEventListener("blur", saveProject);
   $("rt-gap").addEventListener("change", (e) => setGap(e.target.value));
   $("rt-gap").addEventListener("blur", (e) => setGap(e.target.value));
   $("btn-auto").addEventListener("click", () => setAuto(!state.auto));
@@ -857,9 +903,9 @@ window.__RT__ = {
   timeToMin, slotAt, pickSlot, slotText, isScheduled, isOnline, ordersOf, pct, fmtPct,
   siteSummary, aggByArea, detailRow, buildDetails, totals, statFor, refresh,
   startTimer, stopTimer, tick, setGap, setAuto, saveSites, loadOpts, renderAll, renderAreas, renderDetails,
-  copyImage, shotName,
+  copyImage, shotName, shotTitle, shotSubtitle, agencyName, projectName, loadProject, saveProject,
   selectedTeams, siteLabel, activeSlot, SITE_TO_AREA, DEFAULT_GAP, MIN_GAP, MAX_GAP, STAT_TTL,
-  CONCURRENCY, ONLINE_WORK_STATUS, LS_GAP, LS_SITES, LS_SLOT,
+  CONCURRENCY, ONLINE_WORK_STATUS, LS_GAP, LS_SITES, LS_SLOT, LS_PROJECT, DEFAULT_PROJECT, AGENCY_FALLBACK,
   API_TEAMS, API_TIMES, API_STAT, API_ATT
 };
 
