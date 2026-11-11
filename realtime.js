@@ -494,7 +494,7 @@ function renderDetails() {
     ta.innerHTML = detailHead(false) + `<tbody>` + (state.abnormal.length
       ? state.abnormal.map((r) => `<tr>` +
         `<td class="c-site" title="${esc(r.site)}">${esc(r.site.replace(/^福州/, "").replace(/-UB$/, ""))}</td>` +
-        `<td class="c-area" title="${esc(r.area)}">${esc(r.area.replace(/^福州/, "").replace(/商圈片$/, ""))}</td>` +
+        `<td class="c-area" title="${esc(r.area)}">${esc(r.area)}</td>` +
         `<td class="c-name">${esc(r.name || "未命名")}<em>${esc(r.knightId)}</em></td>` +
         `<td class="c-mobile">${esc(r.mobile)}</td>` +
         `<td class="c-shift" title="${esc(r.shifts)}">${esc(r.shifts || "—")}</td>` +
@@ -507,7 +507,7 @@ function renderDetails() {
     to.innerHTML = detailHead(true) + `<tbody>` + (state.offline.length
       ? state.offline.map((r) => `<tr>` +
         `<td class="c-site" title="${esc(r.site)}">${esc(r.site.replace(/^福州/, "").replace(/-UB$/, ""))}</td>` +
-        `<td class="c-area" title="${esc(r.area)}">${esc(r.area.replace(/^福州/, "").replace(/商圈片$/, ""))}</td>` +
+        `<td class="c-area" title="${esc(r.area)}">${esc(r.area)}</td>` +
         `<td class="c-name">${esc(r.name || "未命名")}<em>${esc(r.knightId)}</em></td>` +
         `<td class="c-mobile">${esc(r.mobile)}</td>` +
         `<td class="c-shift" title="${esc(r.shifts)}">${esc(r.shifts || "—")}</td>` +

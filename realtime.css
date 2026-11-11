@@ -110,7 +110,7 @@ table.tbl.rt-area-table tbody tr.rt-total td.bad { color: #B91C1C; }
 /* ---- 明细表 ---- */
 table.tbl.rt-detail-table .c-site { width: 150px; text-align: left; overflow: hidden;
   text-overflow: ellipsis; white-space: nowrap; }
-table.tbl.rt-detail-table .c-area { width: 130px; text-align: left; color: #6B7280;
+table.tbl.rt-detail-table .c-area { width: 172px; text-align: left; color: #6B7280;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 table.tbl.rt-detail-table .c-name { width: 150px; text-align: left; color: #1F2937; font-weight: 600; }
 table.tbl.rt-detail-table .c-name em { font-style: normal; font-weight: 400; color: #9CA3AF;

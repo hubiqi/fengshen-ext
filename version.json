@@ -1,6 +1,6 @@
 {
-  "version": "3.27.0",
-  "notes": "新增第六个独立入口「实时出勤监控」：把风神实时出勤监控页一个站点一个站点看的数据按商圈片汇总成一张表——应排（predictNum）/ 实排（actualNum）/ 在线（workStatus=1）/ 下线背单（不在线但背着单）/ 在线率 / 异常（已排本时段、不在线且 0 背单），默认 30 秒自动刷新（10~3600 秒可改、可暂停、切后台自动停、回前台补一次）；下方分「异常骑手」与「不在线骑手（含下线背单）」两张明细表；站点可多选、时段可跟当前时间自动切或固定某一档、商圈片行可展开站点明细；应排/实排 5 分钟缓存，在线/背单每次刷新都取最新",
-  "download": "https://github.com/hubiqi/fengshen-ext/releases/download/v3.27.0/fengshen-ext-v3.27.0.zip",
+  "version": "3.27.1",
+  "notes": "实时出勤监控：下方「异常骑手」「不在线骑手」两张明细表的商圈片列改为显示全名（带「福州」前缀与「商圈片」后缀），并把列宽从 130px 放宽到 172px，全名不再被省略号截断",
+  "download": "https://github.com/hubiqi/fengshen-ext/releases/download/v3.27.1/fengshen-ext-v3.27.1.zip",
   "published_at": "2026-11-11"
 }
