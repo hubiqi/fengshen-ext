@@ -26,7 +26,9 @@ const WORKFORCE = chrome.runtime.getURL("workforce.html");
 const SCHEDULE = chrome.runtime.getURL("schedule.html");
 // v3.21.0：物资租用是第五个独立页面
 const RENT = chrome.runtime.getURL("rent.html");
-const PAGE_URL = { assess: DASHBOARD, attendance: ATTENDANCE, workforce: WORKFORCE, schedule: SCHEDULE, rent: RENT };
+// v3.27.0：实时出勤监控是第六个独立页面
+const REALTIME = chrome.runtime.getURL("realtime.html");
+const PAGE_URL = { assess: DASHBOARD, attendance: ATTENDANCE, workforce: WORKFORCE, schedule: SCHEDULE, rent: RENT, realtime: REALTIME };
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 

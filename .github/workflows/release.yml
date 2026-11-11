@@ -50,6 +50,7 @@ jobs:
             workforce.html workforce.css workforce.js \
             schedule.html schedule.css schedule.js \
             rent.html rent.css rent.js \
+            realtime.html realtime.css realtime.js \
             assess.js sync.js capture.js xlsx.js
 
       - name: Create GitHub Release with the zip
