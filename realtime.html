@@ -93,7 +93,8 @@
   <div class="rt-note" id="rt-note">
     数据源：<code>getTeamsAll</code> / <code>listCustomTime</code> / <code>listScheduleStatistics</code> / <code>listAttendance</code>（全部沿用风神「实时出勤监控」页的接口，不新增后端）。
     <b>口径</b>：应排 = 排班需求人数（<code>predictNum</code>），实排 = 实际排班人数（<code>actualNum</code>），
-    在线 = <code>workStatus=1</code>，背单 = <code>deliveryOrder&gt;0</code>，在线率 = 在线 ÷ 实排，
+    在线 = <b>本时段排班且 <code>workStatus=1</code></b> 的人数（未排班但仍在线的<b>不计入</b>），
+    背单 = <code>deliveryOrder&gt;0</code>，在线率 = 排班在线 ÷ 实排，
     <b>异常 = 已排本时段 &amp;&amp; 不在线 &amp;&amp; 0 背单</b>，<b>下线背单 = 不在线 &amp;&amp; 背单 &gt; 0</b>。
     商圈片按站点名映射（与考核看板 / 排班模块同一套），映射不到就按站点自己成组。
     应排 / 实排每 5 分钟才重新取一次（排班不会 30 秒一变），在线 / 背单每次刷新都取最新。

@@ -254,11 +254,14 @@ function fmtPct(v) {
   const n = Math.round(v * 1000) / 10;
   return (Number.isInteger(n) ? String(n) : n.toFixed(1)) + "%";
 }
-/** 单站汇总：应排 / 实排取自排班统计，在线 / 背单 / 异常用实时骑手表算。 */
+/** 单站汇总：应排 / 实排取自排班统计，在线 / 背单 / 异常用实时骑手表算。
+ *  v3.29.0：在线只算**本时段排班且在线**的人（未排班但在线的骑手不计入），
+ *  否则在线 ÷ 实排 会超过 100%。 */
 function siteSummary(team, stat, rows, code) {
   const list = rows || [];
   const sched = list.filter((r) => isScheduled(r, code));
-  const online = list.filter((r) => isOnline(r));
+  const online = sched.filter((r) => isOnline(r));                 // 排班在线
+  const onlineAll = list.filter((r) => isOnline(r)).length;        // 全站在线（仅展示用）
   const offlineOrder = list.filter((r) => !isOnline(r) && ordersOf(r) > 0);
   const abnormal = sched.filter((r) => !isOnline(r) && ordersOf(r) === 0);
   const cell = (stat && stat.byCode && stat.byCode[num(code)]) || null;
@@ -267,7 +270,7 @@ function siteSummary(team, stat, rows, code) {
     area: SITE_TO_AREA[String(team.name || "").trim()] || String(team.name || ""),
     应排: num(cell && cell.predict), 实排: num(cell && cell.actual),
     在线: online.length, 下线背单: offlineOrder.length, 异常: abnormal.length,
-    骑手数: list.length,
+    骑手数: list.length, 在线全站: onlineAll,
     sched, online, offlineOrder, abnormal, rows: list,
     statOk: !!cell
   };
@@ -278,11 +281,11 @@ function aggByArea(sites) {
   for (const s of sites || []) {
     const key = s.area || s.teamName;
     if (!map.has(key)) {
-      map.set(key, { area: key, sites: [], 应排: 0, 实排: 0, 在线: 0, 下线背单: 0, 异常: 0, 骑手数: 0 });
+      map.set(key, { area: key, sites: [], 应排: 0, 实排: 0, 在线: 0, 下线背单: 0, 异常: 0, 骑手数: 0, 在线全站: 0 });
     }
     const a = map.get(key);
     a.sites.push(s);
-    for (const f of ["应排", "实排", "在线", "下线背单", "异常", "骑手数"]) a[f] += num(s[f]);
+    for (const f of ["应排", "实排", "在线", "下线背单", "异常", "骑手数", "在线全站"]) a[f] += num(s[f]);
   }
   const list = [...map.values()];
   for (const a of list) a.rate = pct(a.在线, a.实排);
@@ -316,7 +319,7 @@ function buildDetails(sites) {
 }
 /** 总计：反过来把商圈片再合一遍。 */
 function totals(areas) {
-  const t = { 应排: 0, 实排: 0, 在线: 0, 下线背单: 0, 异常: 0, 骑手数: 0 };
+  const t = { 应排: 0, 实排: 0, 在线: 0, 下线背单: 0, 异常: 0, 骑手数: 0, 在线全站: 0 };
   for (const a of areas || []) for (const f of Object.keys(t)) t[f] += num(a[f]);
   t.rate = pct(t.在线, t.实排);
   return t;
@@ -414,14 +417,20 @@ function renderKpis() {
   const list = [
     ["应排", String(t.应排), "排班需求人数"],
     ["实排", String(t.实排), "实际排班人数"],
-    ["在线", String(t.在线), "workStatus=1"],
+    ["在线", String(t.在线), "本时段排班且在线（workStatus=1）的人数；未排班但在线的不计入"],
     ["下线背单", String(t.下线背单), "不在线但背着单"],
-    ["在线率", fmtPct(t.rate), "在线 ÷ 实排"],
-    ["异常", String(t.异常), "0 背单且不在线"]
+    ["在线率", fmtPct(t.rate), "排班在线 ÷ 实排，不会超过 100%"],
+    ["异常", String(t.异常), "已排本时段、不在线且 0 背单"]
   ];
   box.innerHTML = list.map(([k, v, tip], i) => `<div class="rt-kpi${i === 5 && t.异常 ? " bad" : ""}" title="${esc(tip)}">` +
     `<b>${esc(v)}</b><span>${esc(k)}</span></div>`).join("") +
     `<div class="rt-kpi meta" title="本次统计的站点数与骑手数"><b>${state.sites.length}</b><span>站点 · ${t.骑手数} 骑手</span></div>`;
+}
+/** 在线单元格的悬浮说明：说明「只算排班在线」，顺带给出未计入的全站在线人数。 */
+function onlineTip(row) {
+  const on = num(row.在线), all = num(row.在线全站);
+  const extra = all > on ? `；另有 ${all - on} 人未排班但当前在线，未计入` : "";
+  return `本时段排班且在线 ${on} 人${extra}`;
 }
 function rateCell(v) {
   const cls = v == null ? "" : (v < 0.8 ? " bad" : (v < 0.95 ? " warn" : ""));
@@ -434,9 +443,9 @@ function renderAreas() {
   const head = `<thead><tr><th class="c-idx"></th><th class="c-area">商圈片</th><th class="c-num">站点</th>` +
     `<th class="c-num" title="排班需求人数（listScheduleStatistics 的 predictNum）">应排</th>` +
     `<th class="c-num" title="实际排班人数（listScheduleStatistics 的 actualNum）">实排</th>` +
-    `<th class="c-num" title="workStatus=1 的骑手数；含未排班但仍在线的，所以可能高于实排">在线</th>` +
+    `<th class="c-num" title="本时段排班且在线（workStatus=1）的人数；未排班但在线的不计入，所以不会高于实排">在线</th>` +
     `<th class="c-num" title="不在线但手里还有单（deliveryOrder>0）">下线背单</th>` +
-    `<th class="c-rate" title="在线 ÷ 实排；>100% 表示有未排班骑手也在线">在线率</th>` +
+    `<th class="c-rate" title="排班在线 ÷ 实排">在线率</th>` +
     `<th class="c-num" title="已排本时段 + 不在线 + 0 背单">异常</th></tr></thead>`;
   if (!state.areas.length) {
     t.innerHTML = head + `<tbody><tr><td colspan="9" class="rt-empty">${state.loading ? "正在取数…" : "还没有数据，点「立即刷新」"}</td></tr></tbody>`;
@@ -450,7 +459,8 @@ function renderAreas() {
       `<td class="c-idx"><button class="rt-exp" data-area="${esc(a.area)}" title="${open ? "收起" : "展开"}站点明细">${open ? "▾" : "▸"}</button></td>` +
       `<td class="c-area" title="${esc(a.area)}">${esc(a.area)}</td>` +
       `<td class="c-num">${a.sites.length}</td>` +
-      `<td class="c-num">${a.应排}</td><td class="c-num">${a.实排}</td><td class="c-num">${a.在线}</td>` +
+      `<td class="c-num">${a.应排}</td><td class="c-num">${a.实排}</td>` +
+      `<td class="c-num" title="${esc(onlineTip(a))}">${a.在线}</td>` +
       `<td class="c-num">${a.下线背单}</td><td class="c-rate">${rateCell(a.rate)}</td>` +
       `<td class="c-num${a.异常 ? " bad" : ""}">${a.异常}</td></tr>`;
     if (!open) return body;
@@ -460,14 +470,15 @@ function renderAreas() {
       `<td class="c-area" title="${esc(s.teamName)}">${esc(s.teamName)}</td>` +
       `<td class="c-num">—</td>` +
       `<td class="c-num">${s.statOk ? s.应排 : "—"}</td><td class="c-num">${s.statOk ? s.实排 : "—"}</td>` +
-      `<td class="c-num">${s.在线}</td><td class="c-num">${s.下线背单}</td>` +
+      `<td class="c-num" title="${esc(onlineTip(s))}">${s.在线}</td><td class="c-num">${s.下线背单}</td>` +
       `<td class="c-rate">${rateCell(pct(s.在线, s.实排))}</td>` +
       `<td class="c-num${s.异常 ? " bad" : ""}">${s.异常}</td></tr>`).join("");
     return body + subs;
   }).join("");
   const tot = totals(state.areas);
   const foot = `<tr class="rt-total"><td></td><td>合计</td><td class="c-num">${state.sites.length}</td>` +
-    `<td class="c-num">${tot.应排}</td><td class="c-num">${tot.实排}</td><td class="c-num">${tot.在线}</td>` +
+    `<td class="c-num">${tot.应排}</td><td class="c-num">${tot.实排}</td>` +
+    `<td class="c-num" title="${esc(onlineTip(tot))}">${tot.在线}</td>` +
     `<td class="c-num">${tot.下线背单}</td><td class="c-rate">${rateCell(tot.rate)}</td>` +
     `<td class="c-num${tot.异常 ? " bad" : ""}">${tot.异常}</td></tr>`;
   t.innerHTML = head + `<tbody>${rows}${foot}</tbody>`;
@@ -547,7 +558,7 @@ function renderStatus() {
   const hint = $("rt-scope-hint");
   if (hint) {
     const slot = activeSlot();
-    hint.textContent = `${siteLabel()} · ${slot ? slotText(slot) : "—"} · 按商圈片汇总，点行首箭头展开站点明细`;
+    hint.textContent = `${siteLabel()} · ${slot ? slotText(slot) : "—"} · 按商圈片汇总，在线只算排班在线，点行首箭头展开站点明细`;
   }
   const foot = $("foot-meta");
   if (foot) {
