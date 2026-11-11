@@ -41,6 +41,14 @@ const API_CLUE = XT + "xtop.knight.task.mng.growth.knightRecruitResultRead.query
 const API_STAFF = "https://app2-edu.ele.me/kunkka-svr/ehr/staff/knight/list";
 const API_ATT_DETAIL = XT + "xtop.fs.special.examine.exportStatisticsDetail/1.0";
 const API_KPI_DETAIL = XT + "xtop.performance.fs.opp.perfDetail.queryDetailList/1.0";
+const API_TEAMS = XT + "xtop.lpd.intelligentConfig.getTeamsAll/1.0";
+const SCALE_LS = "wb_wf_scale_v1";        // v3.31.0：手填的规模目标 / 招募目标 / 招聘缺口 / 渠道名称
+const SCALE_DAYS = 5;                      // 默认 T-5 ~ T-1
+const SCALE_MODE_LABEL = {
+  any: "有效在线时长>0 或 完单量>0",
+  both: "有效在线时长>0 且 完单量>0",
+  achieved: "是否达成=达成（不含全天）"
+};
 const PAGE_SIZE = 500;
 const KPI_PAGE_SIZE = 100;       // 实测 pageSize > 100 接口返回空数据
 const KPI_MAX_PAGES = 10;       // 每类问题订单最多 10 页 = 1000 单，防止异常情况下退化成全量翻页
@@ -158,7 +166,14 @@ const state = {
   pop: { type: "", key: "", anchor: null },
   loading: false, gen: 0,
   bills: [], staff: new Map(), clues: new Map(),
+  staffList: [], clueList: [],          // v3.31.0：汇总要按站点聚合，保留原始人资 / 线索列表
   errors: {}, rows: [], loadedAt: null,
+  // v3.31.0 规模汇总：渠道 1 行 + 站点明细 N 行；effective = 站点id -> Set(骑手id)
+  scale: {
+    start: "", end: "", mode: "any", week: "",
+    teams: [], byTeam: Object.create(null), effective: new Map(),
+    manual: loadScaleManual(), ready: false, loading: false, err: "", attAt: ""
+  },
   // 主表先出图，这两组明细异步补：失败只让对应列显示「—」，不阻断出表
   // 三组明细统一以「骑手id \u0001 站点id」为键（站点id 缺失时用 "*" 通配）
   attBad: new Map(),        // 复合键 -> 本月除「全天」外「未达成」班次数
@@ -584,6 +599,485 @@ function clearView() {
 }
 function activeFilterCount() { return Object.keys(state.colFilters).length; }
 
+// ---------------------------------------------------------------- v3.31.0 规模汇总
+/* 一张「渠道汇总 1 行 + 站点明细 N 行」的表，整块在 #sheet 内，页面与「复制图片」
+   用的是同一份 DOM，所以导出图和屏幕上的数值 / 排版完全一致。
+   自动：站点（getTeamsAll）、代理商名称（线索结果明细 / 本机商名）、在职规模、
+         今日入司 / 首跑 / 离职、1天有效出勤骑手、规模达成率、净缺口、汇总行合计。
+   手填：渠道名称、规模目标 W46、招募目标、渠道招聘缺口（浅黄格，按周次本机记忆）。
+   1天有效出勤骑手 = 选定区间内至少 1 天「有效」的骑手，按「站点 + 骑手」去重；
+   数据源就是算「炸班次」的 exportStatisticsDetail（含每天的有效在线时长与完单量）。 */
+function loadScaleManual() {
+  try {
+    const o = JSON.parse(localStorage.getItem(SCALE_LS) || "{}");
+    return o && typeof o === "object" && !Array.isArray(o) ? o : {};
+  } catch (e) { return {}; }
+}
+function saveScaleManual() {
+  try { localStorage.setItem(SCALE_LS, JSON.stringify(state.scale.manual)); } catch (e) { /* ignore */ }
+}
+const ymdOf = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+const parseYmd = (s) => {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(s || ""));
+  return m ? new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])) : null;
+};
+const todayYmd = () => ymdOf(new Date());
+function shiftDay(s, n) {
+  const d = parseYmd(s);
+  if (!d) return "";
+  d.setDate(d.getDate() + n);
+  return ymdOf(d);
+}
+function defaultScaleRange() {
+  const t = todayYmd();
+  return [shiftDay(t, -SCALE_DAYS), shiftDay(t, -1)];
+}
+/** ISO 周次：表头「规模目标 W46」跟着统计区间的结束日走。 */
+function isoWeek(s) {
+  const d = parseYmd(s);
+  if (!d) return 1;
+  const t = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  t.setDate(t.getDate() + 3 - ((t.getDay() + 6) % 7));
+  const first = new Date(t.getFullYear(), 0, 4);
+  first.setDate(first.getDate() + 3 - ((first.getDay() + 6) % 7));
+  return 1 + Math.round((t - first) / (7 * 86400000));
+}
+/** 出勤明细接口单次最多 7 天，任意区间按 7 天切段。 */
+function dateSegments(start, end) {
+  const a = parseYmd(start), b = parseYmd(end), out = [];
+  if (!a || !b || b < a) return out;
+  let cur = new Date(a);
+  while (cur <= b) {
+    const s = ymdOf(cur);
+    const e = new Date(cur);
+    e.setDate(e.getDate() + Math.min(ATT_SEG_DAYS - 1, Math.round((b - cur) / 86400000)));
+    out.push([s, ymdOf(e)]);
+    cur = new Date(e);
+    cur.setDate(cur.getDate() + 1);
+  }
+  return out;
+}
+/** 「02小时30分钟」→ 150 分钟；也兼容纯数字。 */
+function parseDuration(v) {
+  const s = String(v == null ? "" : v).trim();
+  if (!s) return 0;
+  if (/^\d+(\.\d+)?$/.test(s)) return num(s);
+  const h = /(\d+)\s*小时/.exec(s), m = /(\d+)\s*分钟/.exec(s);
+  return (h ? Number(h[1]) * 60 : 0) + (m ? Number(m[1]) : 0);
+}
+function scaleWeek() {
+  return "W" + isoWeek(state.scale.end || todayYmd());
+}
+function scaleBucket() {
+  const w = scaleWeek();
+  if (!state.scale.manual[w]) state.scale.manual[w] = { channel: "", rows: Object.create(null) };
+  const b = state.scale.manual[w];
+  if (!b.rows) b.rows = Object.create(null);
+  return b;
+}
+function manualRow(teamId) {
+  const b = scaleBucket();
+  if (!b.rows[teamId]) b.rows[teamId] = { target: "", recruit: "", gap: "" };
+  return b.rows[teamId];
+}
+function manualNum(v) {
+  const s = String(v == null ? "" : v).trim();
+  if (!s) return null;
+  const n = Number(s);
+  return Number.isFinite(n) ? n : null;
+}
+function scaleShortRange() {
+  const f = (s) => String(s || "").slice(5).replace(/-/g, "");
+  return f(state.scale.start) + "-" + f(state.scale.end);
+}
+/** 本机记住的商名（与实时出勤导出图标题同源）。 */
+function scaleGlobalAgency() {
+  try {
+    const a = localStorage.getItem("wb_agency_name") || localStorage.getItem("wb_sch_agency");
+    if (a && String(a).trim()) return String(a).trim();
+  } catch (e) { /* ignore */ }
+  const counts = new Map();
+  for (const c of state.clueList || []) {
+    const a = String(c.entryAgencyName || c.pushingAgencyName || "").trim();
+    if (a) counts.set(a, (counts.get(a) || 0) + 1);
+  }
+  let best = "", n = 0;
+  for (const [a, c] of counts) if (c > n) { best = a; n = c; }
+  return best || "福建省双十网络科技有限公司";
+}
+/** 按站点从线索结果明细里取出现最多的代理商名，取不到用全局商名。 */
+function scaleAgencyOf(teamId, nameToId, fallback) {
+  const counts = new Map();
+  for (const c of state.clueList || []) {
+    const tid = normId(c.resultTeam || c.entryTeam || c.pushingTeam);
+    const name = String(c.resultTeamName || c.entryTeamName || c.pushingTeamName || "").trim();
+    if (!((tid && tid === teamId) || (name && nameToId[name] === teamId))) continue;
+    const a = String(c.entryAgencyName || c.pushingAgencyName || c.organizationName || "").trim();
+    if (a) counts.set(a, (counts.get(a) || 0) + 1);
+  }
+  let best = "", n = 0;
+  for (const [a, c] of counts) if (c > n) { best = a; n = c; }
+  return best || fallback;
+}
+function scaleTeamsFromBills() {
+  const map = new Map();
+  for (const b of state.bills || []) {
+    const id = normId(b.teamId);
+    if (!id || id === "0") continue;
+    if (!map.has(id)) map.set(id, { id, name: String(b.teamName || ("站点 " + id)) });
+  }
+  return [...map.values()];
+}
+async function loadScaleTeams() {
+  const j = await request(API_TEAMS, "POST", { metas: {}, params: { request: {} } });
+  const d = (j && j.result && j.result.data) || [];
+  const arr = Array.isArray(d) ? d : (d.teams || d.list || []);
+  return (arr || []).filter((t) => t && t.id).map((t) => ({
+    id: normId(t.id), name: String(t.team_name || t.name || t.id)
+  }));
+}
+function scaleTeamsWithAgency(teams) {
+  const nameToId = Object.create(null);
+  for (const t of teams) nameToId[t.name] = t.id;
+  const global = scaleGlobalAgency();
+  return teams.map((t) => ({ id: t.id, name: t.name, agency: scaleAgencyOf(t.id, nameToId, global) }));
+}
+/** 人资名单：在职 / 今日入司 / 今日离职，按 departmentId 聚合（先按骑手去重）。 */
+function scaleStaffStats(list, today) {
+  const out = Object.create(null);
+  const empty = () => ({ onJob: 0, entry: 0, leave: 0, firstRun: 0 });
+  const m = staffMap(list);
+  for (const s of m.values()) {
+    const tid = normId(s.departmentId);
+    if (!tid) continue;
+    if (!out[tid]) out[tid] = empty();
+    if (num(s.workStatus) === 1) out[tid].onJob++;
+    if (String(s.entryTime || "").slice(0, 10) === today) out[tid].entry++;
+    if (String(s.leaveTime || "").slice(0, 10) === today) out[tid].leave++;
+  }
+  return out;
+}
+/** 今日首跑 = 本月考勤明细里该骑手「首个全天有单日」正好是今天。 */
+function scaleFirstRun(attRun, today) {
+  const out = Object.create(null);
+  for (const [key, days] of (attRun || new Map())) {
+    const tid = String(key).split("\u0001")[1];
+    if (!tid || tid === ANY_SITE || !days || !days.size) continue;
+    let min = null;
+    for (const d of days) if (min === null || d < min) min = d;
+    if (min === today) out[tid] = (out[tid] || 0) + 1;
+  }
+  return out;
+}
+/** 从出勤明细 xlsx 里算「区间内至少 1 天有效出勤」的骑手，按站点 + 骑手去重。 */
+function scaleEffectiveFromSheets(sheets, mode, nameToId, start, end) {
+  const out = new Map();
+  for (const sh of sheets || []) {
+    const rows = sh && sh.rows;
+    if (!rows || rows.length < 2) continue;
+    const col = Object.create(null);
+    rows[0].forEach((h, i) => {
+      const k = String(h == null ? "" : h).trim();
+      if (k && col[k] === undefined) col[k] = i;
+    });
+    const idx = (...names) => { for (const n of names) if (col[n] !== undefined) return col[n]; return undefined; };
+    const iR = idx("骑手ID", "骑手id"), iS = idx("站点ID", "站点id", "站点Id");
+    const iN = idx("站点名称"), iD = idx("考勤日期", "日期");
+    const iP = idx("时段"), iOk = idx("是否达成");
+    const iO = idx("完单量", "时段完单量"), iV = idx("有效在线时长");
+    if (iR === undefined || iD === undefined) continue;
+    for (const r of rows.slice(1)) {
+      const rid = normId(r[iR]);
+      if (!rid) continue;
+      const day = String(r[iD] == null ? "" : r[iD]).slice(0, 10);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) continue;
+      if (start && day < start) continue;
+      if (end && day > end) continue;
+      let ok = false;
+      if (mode === "achieved") {
+        ok = iOk !== undefined && String(r[iOk] || "").trim() === "达成"
+          && (iP === undefined || String(r[iP] || "").trim() !== "全天");
+      } else {
+        const dur = iV !== undefined ? parseDuration(r[iV]) : 0;
+        const ord = iO !== undefined ? num(r[iO]) : 0;
+        ok = mode === "both" ? (dur > 0 && ord > 0) : (dur > 0 || ord > 0);
+      }
+      if (!ok) continue;
+      let tid = iS !== undefined ? normId(r[iS]) : "";
+      if (!tid && iN !== undefined) tid = nameToId[String(r[iN] == null ? "" : r[iN]).trim()] || "";
+      if (!tid) tid = ANY_SITE;
+      if (!out.has(tid)) out.set(tid, new Set());
+      out.get(tid).add(rid);
+    }
+  }
+  return out;
+}
+/** 按选定区间拉出勤明细（同一接口，≤7 天自动分段）。 */
+async function loadScaleSheets(start, end, teamIds) {
+  const segs = dateSegments(start, end);
+  if (!segs.length) throw new Error("汇总日期区间无效");
+  const sheets = [];
+  for (const [s, e] of segs) {
+    const j = await request(API_ATT_DETAIL, "POST", {
+      params: { request: { teamIds, startDate: s, endDate: e } }
+    });
+    const d = (j && j.result && j.result.data) || {};
+    const url = d.url || d.downloadUrl;
+    if (!url || !/^https?:/.test(String(url))) throw new Error(`汇总出勤 ${s}~${e} 未返回下载链接`);
+    sheets.push(...(await XLSX_READER.read(await fetchBinary(String(url)))));
+    if (segs.length > 1) await new Promise((r) => setTimeout(r, 180));
+  }
+  return sheets;
+}
+/** 组装站点行与汇总行；汇总行的有效出勤按骑手全局去重，其余按站点相加。 */
+function computeScaleRows() {
+  const s = state.scale;
+  const ready = s.ready;
+  const rows = (s.teams || []).map((t) => {
+    const st = s.byTeam[t.id] || {};
+    const m = manualRow(t.id);
+    const eff = ready ? (s.effective.get(t.id) || new Set()).size : null;
+    const target = manualNum(m.target), recruit = manualNum(m.recruit), gap = manualNum(m.gap);
+    return {
+      teamId: t.id, name: t.name, agency: t.agency,
+      onJob: num(st.onJob), entry: num(st.entry), leave: num(st.leave), firstRun: num(st.firstRun),
+      effective: eff, target, recruit, gap,
+      rate: ready && eff !== null && target && target > 0 ? eff / target : null,
+      net: ready && eff !== null && target !== null ? eff - target : null
+    };
+  });
+  const sum = (f, nullable) => {
+    let has = false, v = 0;
+    for (const r of rows) { const x = r[f]; if (x == null) continue; has = true; v += x; }
+    return has ? v : (nullable ? null : 0);
+  };
+  const union = new Set();
+  if (ready) for (const set of s.effective.values()) for (const rid of set) union.add(rid);
+  const effAll = ready ? union.size : null;
+  const target = sum("target", true);
+  const total = {
+    teamId: "*", name: "", agency: scaleGlobalAgency(),
+    onJob: sum("onJob"), entry: sum("entry"), leave: sum("leave"), firstRun: sum("firstRun"),
+    effective: effAll, target,
+    recruit: sum("recruit", true), gap: sum("gap", true),
+    rate: ready && effAll !== null && target && target > 0 ? effAll / target : null,
+    net: ready && effAll !== null && target !== null ? effAll - target : null
+  };
+  return { rows, total };
+}
+function scaleCell(field, r) {
+  const v = r[field];
+  const attrs = ` data-row="${esc(r.teamId)}" data-cell="${field}"`;
+  if (v == null) return { text: "—", cls: "num c-empty", attrs };
+  if (field === "rate") return { text: Math.round(v * 100) + "%", cls: "num", attrs };
+  if (field === "net") {
+    const cls = v < 0 ? " cell-neg" : (v > 0 ? " cell-pos" : "");
+    return { text: (v > 0 ? "+" : "") + int(v), cls: "num" + cls, attrs };
+  }
+  return { text: int(v), cls: "num", attrs };
+}
+function scaleEditCell(r, field, numeric, isTotal) {
+  const v = r[field];
+  const txt = v == null ? "" : String(v);
+  const tip = numeric ? "点击填写数字；留空表示未填" : "点击填写渠道名称";
+  return `<td class="wf-edit${numeric ? " num" : ""}${txt ? "" : " empty"}"` +
+    ` contenteditable="true" spellcheck="false" data-team="${esc(r.teamId)}"` +
+    ` data-field="${field}" data-numeric="${numeric ? 1 : 0}"` +
+    ` data-row="${esc(r.teamId)}" data-cell="${field}" title="${esc(tip)}">${esc(txt)}</td>`;
+}
+function scaleTextCell(field, text, cls) {
+  return `<td class="${cls || ""}" title="${esc(text)}" data-cell="${field}">${esc(text || "—")}</td>`;
+}
+function scaleRowHtml(r, isTotal) {
+  const s = state.scale;
+  const numTotal = (field) => isTotal
+    ? `<td class="num${r[field] == null ? " c-empty" : ""}" data-row="*" data-cell="${field}">${r[field] == null ? "—" : int(r[field])}</td>`
+    : scaleEditCell(r, field, true, isTotal);
+  const c = (field) => {
+    const d = scaleCell(field, r);
+    return `<td class="${d.cls}"${d.attrs}>${esc(d.text)}</td>`;
+  };
+  const bucket = state.scale.manual[scaleWeek()] || {};   // 只读，别为渲染创建空周次
+  const first = isTotal
+    ? scaleEditCell({ teamId: "*", channel: bucket.channel || "" }, "channel", false, true)
+    : scaleTextCell("agency", r.agency, "name");
+  const second = isTotal ? scaleTextCell("agency", r.agency, "name") : scaleTextCell("name", r.name, "name");
+  return "<tr" + (isTotal ? ' class="wf-scale-total"' : "") + ">" + [
+    first, second, numTotal("target"), c("onJob"), c("effective"), c("rate"), c("net"),
+    c("entry"), c("firstRun"), c("leave"), numTotal("recruit"), numTotal("gap")
+  ].join("") + "</tr>";
+}
+function renderScale() {
+  const box = $("wf-scale-table");
+  if (!box) return;
+  const s = state.scale;
+  if (!s.teams.length) s.teams = scaleTeamsWithAgency(scaleTeamsFromBills());
+  const week = scaleWeek();
+  s.week = week;
+  const heads = [
+    ["渠道名称", "grp-d"], ["商站信息", "grp-d"], [`规模目标 ${week}`, "grp-a"],
+    ["在职规模", "grp-a"], [`1天有效出勤骑手 ${scaleShortRange()}`, "grp-a"],
+    ["规模达成率", "grp-a"], ["净缺口", "grp-c"],
+    ["今日入司", "grp-b"], ["今日首跑", "grp-b"], ["今日离职", "grp-b"],
+    ["招募目标", "grp-b"], ["渠道招聘缺口", "grp-c"]
+  ];
+  const subs = ["代理商名称", "站点名称", ...heads.slice(2).map((h) => h[0])];
+  const cols = [13, 15, 7, 6, 12, 7, 7, 6, 6, 6, 7, 8];
+  const { rows, total } = computeScaleRows();
+  const colgroup = "<colgroup>" + cols.map((w) => `<col style="width:${w}%">`).join("") + "</colgroup>";
+  const head = "<thead><tr>" + heads.map(([t, g]) => `<th class="${g}">${esc(t)}</th>`).join("") + "</tr></thead>";
+  const subhead = '<tbody><tr class="wf-scale-subhead">' + subs.map((t, i) =>
+    `<th class="${heads[i][1]}">${esc(t)}</th>`).join("") + "</tr></tbody>";
+  const body = "<tbody>" + scaleRowHtml(total, true) + "</tbody>" +
+    "<tbody>" + (rows.length ? rows.map((r) => scaleRowHtml(r, false)).join("")
+      : `<tr><td colspan="12" class="c-empty">没有取到站点，点「立即刷新」重试</td></tr>`) + "</tbody>";
+  box.innerHTML = colgroup + head + subhead + body;
+
+  const title = $("wf-scale-title");
+  if (title) {
+    title.innerHTML = `规模汇总 · ${esc(week)} · 统计区间 ${esc(s.start)} ~ ${esc(s.end)}` +
+      `<span class="wf-scale-sub">口径：${esc(SCALE_MODE_LABEL[s.mode] || SCALE_MODE_LABEL.any)}` +
+      (s.attAt ? ` · 出勤数据 ${esc(s.attAt)}` : "") + "</span>";
+  }
+  const note = $("wf-scale-note");
+  if (note) {
+    note.innerHTML = `<b>口径</b>：1天有效出勤骑手 = 区间内至少 1 天有效的骑手，按「站点＋骑手」去重，` +
+      `汇总行再跨站去重；在职规模 = 人资名单 <code>workStatus=1</code>；今日入司 / 离职 = 人资名单` +
+      ` <code>entryTime / leaveTime</code> 为今天；今日首跑 = 本月考勤明细里首个「全天有完单」日为今天。` +
+      `<b>规模达成率 = 有效出勤 ÷ 规模目标</b>，<b>净缺口 = 有效出勤 − 规模目标</b>。` +
+      `浅黄格（渠道名称 / 规模目标 / 招募目标 / 渠道招聘缺口）点击即可填写，按 ${esc(week)} 记在本机；` +
+      `汇总行自动合计。数据源：站点列表 / 人资名单 / 线索结果明细 / 出勤明细 exportStatisticsDetail。` +
+      (s.loading ? ` <span class="wf-scale-loading">正在读取汇总数据…</span>` : "") +
+      (s.err ? ` <span class="wf-scale-loading">汇总取数提示：${esc(s.err)}（其余数据不受影响）</span>` : "");
+  }
+}
+/** 手填后只改派生格，不整表重绘，编辑焦点不会被抢走。 */
+function updateScaleDerived() {
+  const { rows, total } = computeScaleRows();
+  const byId = Object.create(null);
+  for (const r of rows) byId[r.teamId] = r;
+  const tds = document.querySelectorAll("#wf-scale-table td.wf-scale-total-cell, #wf-scale-table td[data-cell]");
+  for (const td of tds) {
+    if (td.classList.contains("wf-edit")) continue;
+    const r = td.dataset.row === "*" ? total : byId[td.dataset.row];
+    if (!r || !td.dataset.cell) continue;
+    const d = scaleCell(td.dataset.cell, r);
+    td.textContent = d.text;
+    td.className = d.cls;
+  }
+}
+/** 汇总数据：站点 / 人资聚合 / 区间考勤明细，失败只提示，不挡主表。 */
+async function loadScaleData(gen) {
+  const s = state.scale;
+  if (s.loading) return;
+  s.loading = true; s.err = "";
+  renderScale();
+  try {
+    if (window.__WB_TEST__ && !window.__WF_SCALE_NET_TEST__) {
+      s.ready = true;
+      return;
+    }
+    let teams = [];
+    try { teams = await loadScaleTeams(); }
+    catch (e) { s.err = "站点列表：" + String((e && e.message) || e); }
+    const base = teams.length ? teams : scaleTeamsFromBills();
+    const nameToId = Object.create(null);
+    for (const t of base) nameToId[t.name] = t.id;
+    s.teams = scaleTeamsWithAgency(base);
+    s.byTeam = scaleStaffStats(state.staffList, todayYmd());
+    const first = scaleFirstRun(state.attRun, todayYmd());
+    for (const [tid, n] of Object.entries(first)) {
+      if (!s.byTeam[tid]) s.byTeam[tid] = { onJob: 0, entry: 0, leave: 0, firstRun: 0 };
+      s.byTeam[tid].firstRun = n;
+    }
+    try {
+      // 与整月明细的导出请求错峰，避免同一个导出接口被并发限流
+      await new Promise((r) => setTimeout(r, 120));
+      const sheets = await loadScaleSheets(s.start, s.end, base.map((t) => t.id));
+      s.effective = scaleEffectiveFromSheets(sheets, s.mode, nameToId, s.start, s.end);
+      s.ready = true;
+      s.attAt = new Date().toTimeString().slice(0, 8);
+    } catch (e) {
+      s.ready = false;
+      s.err = (s.err ? s.err + "；" : "") + "汇总出勤：" + String((e && e.message) || e);
+    }
+  } finally {
+    s.loading = false;
+    if (gen && gen !== state.gen) return;
+    renderScale();
+  }
+}
+/** 本月明细补完后刷新「今日首跑」，不重新请求网络。 */
+function refreshScaleFirstRun() {
+  const s = state.scale;
+  const first = scaleFirstRun(state.attRun, todayYmd());
+  for (const tid of Object.keys(s.byTeam)) s.byTeam[tid].firstRun = 0;
+  for (const [tid, n] of Object.entries(first)) {
+    if (!s.byTeam[tid]) s.byTeam[tid] = { onJob: 0, entry: 0, leave: 0, firstRun: 0 };
+    s.byTeam[tid].firstRun = n;
+  }
+  renderScale();
+}
+function bindScaleEvents() {
+  const start = $("scale-start"), end = $("scale-end"), mode = $("scale-mode");
+  const [ds, de] = defaultScaleRange();
+  state.scale.start = start.value || ds;
+  state.scale.end = end.value || de;
+  start.value = state.scale.start;
+  end.value = state.scale.end;
+  mode.value = state.scale.mode;
+  const reload = () => {
+    const a = parseYmd(start.value), b = parseYmd(end.value);
+    if (!a || !b || b < a) { showNotice("汇总日期区间不合法：结束日不能早于起始日。", "blue"); return; }
+    if ((b - a) / 86400000 > 60) { showNotice("汇总区间最长 60 天，请缩短日期。", "blue"); return; }
+    state.scale.start = start.value;
+    state.scale.end = end.value;
+    state.scale.ready = false;
+    renderScale();
+    loadScaleData(state.gen);
+  };
+  start.addEventListener("change", reload);
+  end.addEventListener("change", reload);
+  mode.addEventListener("change", () => {
+    state.scale.mode = mode.value;
+    state.scale.ready = false;
+    renderScale();
+    loadScaleData(state.gen);
+  });
+  const table = $("wf-scale-table");
+  table.addEventListener("focusin", (e) => {
+    const td = e.target.closest && e.target.closest("td.wf-edit");
+    if (td) td.dataset.orig = td.textContent;
+  });
+  table.addEventListener("input", (e) => {
+    const td = e.target.closest && e.target.closest("td.wf-edit");
+    if (!td) return;
+    td.classList.toggle("empty", !td.textContent.trim());
+  });
+  table.addEventListener("focusout", (e) => {
+    const td = e.target.closest && e.target.closest("td.wf-edit");
+    if (!td) return;
+    const v = td.textContent.replace(/\u00a0/g, " ").trim();
+    const field = td.dataset.field;
+    if (field === "channel") scaleBucket().channel = v;
+    else {
+      const m = manualRow(td.dataset.team);
+      m[field] = td.dataset.numeric === "1"
+        ? (v !== "" && Number.isFinite(Number(v)) ? v : "") : v;
+    }
+    td.textContent = v;
+    td.classList.toggle("empty", !v);
+    saveScaleManual();
+    updateScaleDerived();
+  });
+  table.addEventListener("keydown", (e) => {
+    const td = e.target.closest && e.target.closest("td.wf-edit");
+    if (!td) return;
+    if (e.key === "Enter") { e.preventDefault(); td.blur(); }
+    else if (e.key === "Escape") { e.preventDefault(); td.textContent = td.dataset.orig || ""; td.blur(); }
+  });
+}
+
 // ---------------------------------------------------------------- 渲染
 function renderSummary(rows) {
   const riders = new Set(rows.map((r) => r.riderId).filter(Boolean));
@@ -869,6 +1363,7 @@ function applyData() {
   renderSummary(rows);
   renderTable(rows);
   renderMeta();
+  renderScale();
 }
 
 // ---------------------------------------------------------------- 进度 / 提示
@@ -922,8 +1417,8 @@ async function loadAll() {
     else state.errors[r.name] = r.err;
   }
   if (b.ok) state.bills = b.v; else if (!state.bills.length) state.bills = [];
-  if (s.ok) state.staff = staffMap(s.v);
-  if (c.ok) state.clues = clueMap(c.v);
+  if (s.ok) { state.staff = staffMap(s.v); state.staffList = s.v; }
+  if (c.ok) { state.clues = clueMap(c.v); state.clueList = c.v; }
   state.loadedAt = new Date().toTimeString().slice(0, 5);
   applyData();
   const teamIds = [...new Set(state.bills.map((b) => num(b.teamId)).filter((n) => n > 0))];
@@ -938,6 +1433,7 @@ async function loadAll() {
   state.loading = false;
   $("btn-refresh").disabled = false;
   loadDetailData(gen, teamIds);      // 后台补 6 列，不阻塞主表
+  loadScaleData(gen);                // v3.31.0：规模汇总（站点 / 人资 / 区间考勤），同样不阻塞
 }
 
 // 主表先出图，再异步补「本月出勤明细 + 考核运单明细」两组数据。
@@ -969,6 +1465,7 @@ async function loadDetailData(gen, teamIds) {
   state.pendingAtt = false; state.pendingKpi = false;
   state.detailLoading = false;
   applyData();
+  refreshScaleFirstRun();            // v3.31.0：本月首跑明细补完后刷新汇总「今日首跑」
 }
 
 function setMonth(m) {
@@ -1118,6 +1615,35 @@ window.__SET_WORKFORCE__ = (obj) => {
       Object.assign({ lgt: 0, complain: 0, negative: 0, early: 0 }, v));
     state.kpiReady = true;
   }
+  if (Array.isArray(obj.staff)) state.staffList = obj.staff;
+  if (Array.isArray(obj.clues)) state.clueList = obj.clues;
+  // v3.31.0：规模汇总样本（站点 / 区间 / 出勤明细 sheets），全部离线，不发请求
+  if (obj.scale) {
+    const sc = state.scale, o = obj.scale;
+    if (o.start) { sc.start = o.start; $("scale-start").value = o.start; }
+    if (o.end) { sc.end = o.end; $("scale-end").value = o.end; }
+    if (o.mode) { sc.mode = o.mode; $("scale-mode").value = o.mode; }
+    if (Array.isArray(o.teams)) sc.teams = scaleTeamsWithAgency(o.teams);
+    if (state.staffList.length) sc.byTeam = scaleStaffStats(state.staffList, todayYmd());
+    if (o.byTeam) for (const [tid, v] of Object.entries(o.byTeam)) sc.byTeam[tid] = v;
+    const first = scaleFirstRun(state.attRun, todayYmd());
+    for (const [tid, n] of Object.entries(first)) {
+      if (!sc.byTeam[tid]) sc.byTeam[tid] = { onJob: 0, entry: 0, leave: 0, firstRun: 0 };
+      sc.byTeam[tid].firstRun = n;
+    }
+    if (Array.isArray(o.sheets)) {
+      const nameToId = Object.create(null);
+      for (const t of sc.teams) nameToId[t.name] = t.id;
+      sc.effective = scaleEffectiveFromSheets(o.sheets, sc.mode, nameToId, sc.start, sc.end);
+    }
+    if (o.effective) {
+      sc.effective = new Map(Object.entries(o.effective).map(([k, v]) => [k, new Set(v || [])]));
+    }
+    sc.ready = o.ready !== false;
+    sc.err = String(o.err || "");
+    sc.attAt = String(o.attAt || "");
+    sc.loading = false;
+  }
   if (obj.attReady === false) { state.attReady = false; state.attBad = new Map(); state.attRun = new Map(); }
   if (obj.kpiReady === false) { state.kpiReady = false; state.kpi = new Map(); }
   // 真机回归可显式指定视图状态，避免上一次跑留下的 localStorage 偏好干扰
@@ -1137,10 +1663,19 @@ window.__WF__ = { state, COLS, PAGE_COLS, buildRows, attachDetail, visibleRows, 
   // v3.18.0 视图能力（真机回归用）
   cellText, sortVal, compareCell, filteredRows, toggleSort, clearView, activeFilterCount,
   colValues, openFilterPop, openFreezePop, applyFilterPop, closePop, setFrozen, applyFreeze,
-  loadFrozen, DEFAULT_FROZEN, MAX_FROZEN, NUM_CSV };
+  loadFrozen, DEFAULT_FROZEN, MAX_FROZEN, NUM_CSV,
+  // v3.31.0 规模汇总
+  ymdOf, parseYmd, shiftDay, todayYmd, defaultScaleRange, isoWeek, dateSegments, parseDuration,
+  scaleWeek, scaleBucket, manualRow, manualNum, scaleShortRange, scaleGlobalAgency, scaleAgencyOf,
+  loadScaleManual, saveScaleManual,
+  scaleTeamsFromBills, loadScaleTeams, scaleTeamsWithAgency, scaleStaffStats, scaleFirstRun,
+  scaleEffectiveFromSheets, loadScaleSheets, computeScaleRows, scaleCell, renderScale,
+  updateScaleDerived, loadScaleData, refreshScaleFirstRun, bindScaleEvents,
+  SCALE_LS, SCALE_DAYS, SCALE_MODE_LABEL, API_TEAMS };
 
 // ---------------------------------------------------------------- 初始化
 (async function init() {
+  bindScaleEvents();                 // v3.31.0：先设好汇总默认区间 T-5 ~ T-1，再渲染
   $("month-picker").value = state.month;
   $("month-picker").min = shiftMonth(curMonth(), -MONTHS_BACK);
   $("month-picker").max = curMonth();

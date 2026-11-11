@@ -32,6 +32,17 @@
       <option value="yes">只看三方人资</option>
       <option value="no">只看非三方</option>
     </select>
+    <div class="date-pick scale-pick">
+      <span>汇总区间</span>
+      <input type="date" id="scale-start" aria-label="汇总起始日期" title="「1天有效出勤骑手」的统计起始日">
+      <span class="scale-tilde">~</span>
+      <input type="date" id="scale-end" aria-label="汇总结束日期" title="「1天有效出勤骑手」的统计结束日，默认昨天">
+    </div>
+    <select id="scale-mode" class="wf-select" aria-label="有效出勤判定口径" title="「1天有效出勤骑手」按什么判定有效">
+      <option value="any">有效出勤：有效时长或完单</option>
+      <option value="both">有效出勤：两者都要</option>
+      <option value="achieved">有效出勤：达成标记</option>
+    </select>
     <button id="btn-refresh" class="primary">立即刷新</button>
     <button id="btn-freeze" class="ghost" title="自定义冻结左侧列：可指定一列或几列，表头始终冻结">冻结列 (2)</button>
     <button id="btn-clear-view" class="ghost" title="清除表头排序与列筛选，恢复默认显示顺序">清除排序/筛选</button>
@@ -53,6 +64,12 @@
   <div class="doc-title">运力模块 · 骑手账单 × 人资 × 出勤 × 异常订单</div>
   <div class="doc-sub" id="doc-sub">账单月份 —&nbsp;&nbsp;&nbsp;&nbsp;生成时间 —</div>
   <div class="doc-note" id="doc-note">数据源：骑手账单管家 → 账单查询 ＋ 人资综合服务 → 成员管理（全部状态）＋ 招募缺口管理 → 线索结果明细 ＋ 出勤统计 → 明细数据（本月）＋ KPI管理 → 考核运单明细（仅 4 类异常订单）；账单主表按骑手 id 合并，一行一条账单；出勤与问题订单按「骑手 id ＋ 站点 id」归集</div>
+
+  <div class="wf-scale" id="wf-scale">
+    <div class="wf-scale-title" id="wf-scale-title">规模汇总</div>
+    <table class="tbl wf-scale-table" id="wf-scale-table"></table>
+    <div class="wf-scale-note" id="wf-scale-note"></div>
+  </div>
 
   <div class="wf-summary" id="wf-summary"></div>
   <div class="wf-note" id="wf-note"></div>

@@ -1,6 +1,6 @@
 {
-  "version": "3.30.0",
-  "notes": "实时出勤监控：导出的 PNG 顶部加标题区 —— 主标题为「商名称-项目名称」（商名称自动跟随当前登录账号，项目名可在工具条改、默认「下午茶在线」，例如 福建省双十网络科技有限公司-下午茶在线），副标题给站点范围 / 时段 / 数据时间；标题只出现在图片里，不影响页面。另含 v3.29.1 明细表时长改有效在线 timeValidOnlineTime",
-  "download": "https://github.com/hubiqi/fengshen-ext/releases/download/v3.30.0/fengshen-ext-v3.30.0.zip",
+  "version": "3.31.0",
+  "notes": "运力模块新增「规模汇总」：渠道汇总 1 行 + 站点明细 N 行，页面与「复制图片」导出的 PNG 完全一致（12 列不裁、全站点行不丢）。自动取站点 / 代理商名 / 在职规模 / 今日入司·首跑·离职 / 1天有效出勤骑手；有效出勤按可选日期区间（默认 T-5~T-1）用考勤明细的有效在线时长或完单量去重，口径可切；规模达成率与净缺口自动算。渠道名称、规模目标 W 周、招募目标、渠道招聘缺口留浅黄格手填并按周次记在本机。",
+  "download": "https://github.com/hubiqi/fengshen-ext/releases/download/v3.31.0/fengshen-ext-v3.31.0.zip",
   "published_at": "2026-11-11"
 }

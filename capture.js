@@ -38,7 +38,10 @@
     [".rt-table-wrap", "overflow:visible;max-height:none;height:auto;"],
     ["table.tbl.rt-area-table thead th,table.tbl.rt-detail-table thead th", "position:static;top:auto;"],
     [".rt-exp", "display:none;"],
-    [".rt-timer", "display:none;"]
+    [".rt-timer", "display:none;"],
+    // v3.31.0：运力模块的规模汇总表也整块进图，宽度跟随 #sheet，不设滚动区
+    [".wf-scale", "width:100%;max-width:none;margin-left:0;margin-right:0;"],
+    ["table.tbl.wf-scale-table", "width:100%;min-width:0;"]
   ];
 
   /** 画布宽度自适应：默认 1240；#sheet 里有内容比它更宽时放宽，避免右侧列被裁掉。
@@ -48,7 +51,8 @@
     // v3.15.0：运力模块 17 列天然比 1240 宽，measureWidth 也要量它，否则导出图右侧被裁
     const sels = "table.tbl.fr,.fail-roster,table.tbl.att,.fr-note,.att-note,.att-kpi," +
       "table.tbl.wf,.wf-summary,.wf-note,table.tbl.sch,.sch-summary,.sch-note," +
-      "table.tbl.rt-area-table,table.tbl.rt-detail-table";
+      "table.tbl.rt-area-table,table.tbl.rt-detail-table," +
+      ".wf-scale,.wf-scale-title,.wf-scale-note,table.tbl.wf-scale-table";
     for (const el of Array.from(src.querySelectorAll(sels) || [])) {
       if (el.closest && el.closest("[hidden]")) continue;
       try { if (global.getComputedStyle(el).display === "none") continue; } catch (e) { /* ignore */ }

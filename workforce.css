@@ -11,6 +11,14 @@
 }
 .wf-input { width: 210px; }
 .wf-select { max-width: 150px; }
+/* v3.31.0：口径下拉文字较长，单独放宽，别把「有效时长或完单」截成省略号 */
+#scale-mode { max-width: 216px; }
+.date-pick.scale-pick input[type="date"] {
+  font-family: inherit; font-size: 12px; height: 28px; color: #374151;
+  background: #FFFFFF; border: 1px solid #D1D5DB; border-radius: 5px; padding: 0 5px;
+  width: 132px;
+}
+.scale-tilde { color: #6B7280; font-size: 12px; }
 .wf-input:focus, .wf-select:focus { outline: 2px solid #BFDBFE; border-color: #3B82F6; }
 .date-pick input[type="month"] {
   font-family: inherit; font-size: 12px; height: 28px; color: #374151;
@@ -146,6 +154,46 @@ table.tbl.wf thead th.fz-edge {
 .wf-pop.freeze .wf-pop-list { max-height: 340px; }
 body.clean .wf-pop { display: none !important; }
 
+/* ---------------------------------------------------------------- v3.31.0 规模汇总
+   渠道汇总 1 行 + 站点明细 N 行，整块放在 #sheet 里，页面与「复制图片」用同一份 DOM。
+   列宽由 colgroup 固定，导出图不会因为内容不同重新折行。 */
+.wf-scale { width: 100%; max-width: 100%; margin: 22px auto 0; padding: 0 8px; box-sizing: border-box; }
+.wf-scale-title { font-size: 15px; font-weight: 700; color: #1F2937; line-height: 1.5;
+  margin: 0 0 8px; display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.wf-scale-title .wf-scale-sub { font-size: 11.5px; font-weight: 400; color: #6B7280; }
+.wf-scale-note { font-size: 11px; color: #6B7280; line-height: 1.7; margin-top: 8px; }
+.wf-scale-note b { color: #1F2937; }
+table.tbl.wf-scale-table { width: 100%; min-width: 1240px; table-layout: fixed;
+  border-collapse: collapse; font-size: 11.5px; }
+table.tbl.wf-scale-table th, table.tbl.wf-scale-table td {
+  border: 1px solid #C7D2E5; padding: 5px 6px; text-align: center;
+  font-size: 11.5px; line-height: 1.4; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; color: #1F2937; }
+table.tbl.wf-scale-table thead th, table.tbl.wf-scale-table tr.wf-scale-subhead th {
+  font-weight: 700; color: #FFFFFF; height: 40px; white-space: normal; }
+table.tbl.wf-scale-table th.grp-a { background: #E36C0A; }
+table.tbl.wf-scale-table th.grp-b { background: #159447; }
+table.tbl.wf-scale-table th.grp-c { background: #C0392B; }
+table.tbl.wf-scale-table th.grp-d { background: #2F5597; }
+table.tbl.wf-scale-table tr.wf-scale-subhead th { height: 34px; }
+table.tbl.wf-scale-table tbody td.num { text-align: right; font-variant-numeric: tabular-nums; }
+table.tbl.wf-scale-table tbody td.name { text-align: left; white-space: normal; word-break: break-all; }
+table.tbl.wf-scale-table tbody tr.wf-scale-total td { background: #EAF1FD; font-weight: 700; }
+table.tbl.wf-scale-table tbody tr.wf-scale-total td.wf-edit { background: #FFF7DF; }
+table.tbl.wf-scale-table tbody tr:nth-child(even) td { background: #FAFBFE; }
+table.tbl.wf-scale-table tbody tr.wf-scale-total td.cell-neg,
+table.tbl.wf-scale-table tbody tr.wf-scale-total td.cell-pos { background: #EAF1FD; }
+/* 手填格：浅黄底 + 虚线下划线，页面和可导出的图里都清楚哪几列是自己填的 */
+table.tbl.wf-scale-table td.wf-edit { background: #FFF7DF; color: #1F2937;
+  box-shadow: inset 0 -1px 0 #D9A441; cursor: text; }
+table.tbl.wf-scale-table td.wf-edit:focus { outline: 2px solid #3B82F6; background: #FFFFFF; }
+table.tbl.wf-scale-table td.wf-edit.empty::before { content: "点击填写";
+  color: #B9A77A; font-size: 10.5px; font-style: italic; }
+table.tbl.wf-scale-table td.cell-neg { background: #FCE4E4 !important; color: #B91C1C; font-weight: 700; }
+table.tbl.wf-scale-table td.cell-pos { background: #E3F4E8 !important; color: #15803D; font-weight: 700; }
+table.tbl.wf-scale-table td.c-empty { color: #9CA3AF; }
+.wf-scale-loading { color: #6B7280; font-size: 11.5px; padding: 8px 2px; }
+
 @media (max-width: 1260px) {
-  .wf-summary, .wf-note { padding-left: 12px; padding-right: 12px; }
+  .wf-summary, .wf-note, .wf-scale { padding-left: 12px; padding-right: 12px; }
 }
