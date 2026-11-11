@@ -1,6 +1,6 @@
 {
-  "version": "3.29.0",
-  "notes": "实时出勤监控：「在线」改为只统计本时段排班且在线（workStatus=1）的骑手，未排班但仍在线的骑手不再计入，在线率（排班在线 ÷ 实排）不会再超过 100%；单元格悬浮提示里会说明被排除的未排班在线人数。另含 v3.28.0 的「复制图片」（整页 2480px PNG 写剪贴板 / Shift 另存）与明细表商圈片显示全名",
-  "download": "https://github.com/hubiqi/fengshen-ext/releases/download/v3.29.0/fengshen-ext-v3.29.0.zip",
+  "version": "3.29.1",
+  "notes": "实时出勤监控：异常骑手 / 不在线骑手两张明细表的时长列改成「有效在线」，取 timeValidOnlineTime（剔除无效在线，与考核口径一致），不再是原始在线 timeOnlineTime；鼠标停在数字上仍可看原始在线时长与本时段目标时长 timeOnlineTimeTarget",
+  "download": "https://github.com/hubiqi/fengshen-ext/releases/download/v3.29.1/fengshen-ext-v3.29.1.zip",
   "published_at": "2026-11-11"
 }

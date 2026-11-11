@@ -190,6 +190,7 @@ async function loadAttendance(team, code) {
     workStatus: num(x.workStatus), status: num(x.status),
     order: num(x.deliveryOrder),
     onlineTime: num(x.timeOnlineTime), validOnline: num(x.timeValidOnlineTime),
+    onlineTarget: num(x.timeOnlineTimeTarget),
     startOnline: num(x.startOnlineTime),
     fullOnline: num(x.fullDayOnlineTime), fullOrder: num(x.fullDayFinishOrder)
   }));
@@ -292,15 +293,23 @@ function aggByArea(sites) {
   list.sort((x, y) => y.异常 - x.异常 || y.应排 - x.应排 || String(x.area).localeCompare(String(y.area), "zh"));
   return list;
 }
-/** 明细行：异常 / 不在线共用一套字段。 */
+/** 明细行：异常 / 不在线共用一套字段。
+ *  v3.29.1：「本时段在线」列改显示**有效在线**（timeValidOnlineTime ÷ 60），
+ *  原始在线（timeOnlineTime）与目标时长只放在悬浮提示里，避免把毛时长当成考核口径。 */
 function detailRow(site, row) {
   const online = isOnline(row);
+  const rawMin = Math.round(num(row.onlineTime) / 60);
+  const validMin = Math.round(num(row.validOnline) / 60);
+  const targetMin = Math.round(num(row.onlineTarget) / 60);
+  const tip = `本时段有效在线 ${validMin} 分（timeValidOnlineTime）` +
+    ` · 原始在线 ${rawMin} 分（timeOnlineTime）` +
+    (targetMin > 0 ? ` · 目标 ${targetMin} 分` : "");
   return {
     area: site.area, site: site.teamName, teamId: site.teamId,
     knightId: num(row.knightId), name: String(row.name || ""), mobile: String(row.mobile || ""),
     shifts: (row.timeName || []).join(" / "),
     online, orders: ordersOf(row),
-    onlineMin: Math.round(num(row.onlineTime) / 60),
+    onlineMin: rawMin, validMin, targetMin, onlineTipText: tip,
     lastOnline: num(row.startOnline) > 0 ? hhmm(new Date(num(row.startOnline))) : "",
     kind: online ? "online" : (ordersOf(row) > 0 ? "offline-order" : "abnormal")
   };
@@ -494,7 +503,8 @@ function detailHead(first) {
   return `<thead><tr><th class="c-site">站点</th><th class="c-area">商圈片</th><th class="c-name">骑手</th>` +
     `<th class="c-mobile">手机号</th><th class="c-shift">排班时段</th>` +
     (first ? `<th class="c-num">背单</th>` : "") +
-    `<th class="c-num">本时段在线</th><th class="c-num">最近上线</th><th class="c-state">状态</th></tr></thead>`;
+    `<th class="c-num" title="本时段有效在线时长（timeValidOnlineTime，剔除无效在线）；悬浮单个单元格可看原始在线时长与目标时长">有效在线</th>` +
+    `<th class="c-num">最近上线</th><th class="c-state">状态</th></tr></thead>`;
 }
 function renderDetails() {
   const ta = $("rt-abnormal"), to = $("rt-offline");
@@ -509,7 +519,7 @@ function renderDetails() {
         `<td class="c-name">${esc(r.name || "未命名")}<em>${esc(r.knightId)}</em></td>` +
         `<td class="c-mobile">${esc(r.mobile)}</td>` +
         `<td class="c-shift" title="${esc(r.shifts)}">${esc(r.shifts || "—")}</td>` +
-        `<td class="c-num">${r.onlineMin} 分</td>` +
+        `<td class="c-num" title="${esc(r.onlineTipText)}">${r.validMin} 分</td>` +
         `<td class="c-num">${esc(r.lastOnline || "—")}</td>` +
         `<td class="c-state bad">异常 · 0 背单不在线</td></tr>`).join("")
       : `<tr><td colspan="8" class="rt-empty">${state.loading ? "正在取数…" : "本时段没有异常骑手 🎉"}</td></tr>`) + `</tbody>`;
@@ -523,7 +533,7 @@ function renderDetails() {
         `<td class="c-mobile">${esc(r.mobile)}</td>` +
         `<td class="c-shift" title="${esc(r.shifts)}">${esc(r.shifts || "—")}</td>` +
         `<td class="c-num warn">${r.orders}</td>` +
-        `<td class="c-num">${r.onlineMin} 分</td>` +
+        `<td class="c-num" title="${esc(r.onlineTipText)}">${r.validMin} 分</td>` +
         `<td class="c-num">${esc(r.lastOnline || "—")}</td>` +
         `<td class="c-state warn">下线背单</td></tr>`).join("")
       : `<tr><td colspan="9" class="rt-empty">${state.loading ? "正在取数…" : "本时段没有下线背单的骑手"}</td></tr>`) + `</tbody>`;
