@@ -1,6 +1,6 @@
 {
-  "version": "3.27.1",
-  "notes": "实时出勤监控：下方「异常骑手」「不在线骑手」两张明细表的商圈片列改为显示全名（带「福州」前缀与「商圈片」后缀），并把列宽从 130px 放宽到 172px，全名不再被省略号截断",
-  "download": "https://github.com/hubiqi/fengshen-ext/releases/download/v3.27.1/fengshen-ext-v3.27.1.zip",
+  "version": "3.28.0",
+  "notes": "实时出勤监控：新增「复制图片」按钮，把当前画面（KPI + 商圈片表 + 异常骑手 / 不在线骑手两张明细表 + 口径说明）整页导出成 2480px 宽的 PNG 写入剪贴板，可直接粘贴到钉钉 / 微信；按住 Shift 点击或剪贴板不可用时自动另存 PNG 文件。同时明细表商圈片列改为显示全名（带「福州」前缀与「商圈片」后缀），列宽放宽到 172px，不再被省略号截断",
+  "download": "https://github.com/hubiqi/fengshen-ext/releases/download/v3.28.0/fengshen-ext-v3.28.0.zip",
   "published_at": "2026-11-11"
 }

@@ -32,7 +32,13 @@
     [".doc-sub", "font-size:16px;"],
     [".doc-note", "font-size:15px;"],
     [".doc-foot", "font-size:13px;"],
-    [".doc-foot.small", "font-size:12px;"]
+    [".doc-foot.small", "font-size:12px;"],
+    // v3.28.0：实时出勤监控。这些必须写成内联样式——量高度时用的是页面里的克隆节点，
+    // 只写进导出 SVG 的样式表不会影响高度测量，max-height:460px 会把明细表后面的内容挤掉。
+    [".rt-table-wrap", "overflow:visible;max-height:none;height:auto;"],
+    ["table.tbl.rt-area-table thead th,table.tbl.rt-detail-table thead th", "position:static;top:auto;"],
+    [".rt-exp", "display:none;"],
+    [".rt-timer", "display:none;"]
   ];
 
   /** 画布宽度自适应：默认 1240；#sheet 里有内容比它更宽时放宽，避免右侧列被裁掉。
@@ -41,7 +47,8 @@
     let w = 0;
     // v3.15.0：运力模块 17 列天然比 1240 宽，measureWidth 也要量它，否则导出图右侧被裁
     const sels = "table.tbl.fr,.fail-roster,table.tbl.att,.fr-note,.att-note,.att-kpi," +
-      "table.tbl.wf,.wf-summary,.wf-note,table.tbl.sch,.sch-summary,.sch-note";
+      "table.tbl.wf,.wf-summary,.wf-note,table.tbl.sch,.sch-summary,.sch-note," +
+      "table.tbl.rt-area-table,table.tbl.rt-detail-table";
     for (const el of Array.from(src.querySelectorAll(sels) || [])) {
       if (el.closest && el.closest("[hidden]")) continue;
       try { if (global.getComputedStyle(el).display === "none") continue; } catch (e) { /* ignore */ }
@@ -55,7 +62,7 @@
   }
 
   /** 收集当前页面的 CSS 文本；跳过媒体查询（导出固定按桌面宽度），并补上强制布局。 */
-  function collectCss() {
+  function collectCss(rootId) {
     const rules = [];
     for (const sheet of Array.from(document.styleSheets || [])) {
       let list;
@@ -66,6 +73,10 @@
       }
     }
     rules.push(`.sheet { width:${WIDTH}px !important;max-width:none !important;margin:0 !important; }`);
+    // v3.28.0：根节点不一定叫 .sheet（实时出勤用的是 #rt-wrap），统一按 id 锁宽度
+    if (rootId && rootId !== "sheet") {
+      rules.push(`#${rootId} { width:${WIDTH}px !important;max-width:none !important;margin:0 !important; }`);
+    }
     rules.push(`.tbl-scroll { overflow:visible !important;width:${WIDTH}px !important; }`);
     // v3.18.0：运力模块屏幕上有「表头 + 左侧列」冻结，导出图必须还原成一张完整表格，
     // 否则 sticky 会让表头悬浮、max-height 会把滚动区以外的内容挤掉。
@@ -79,6 +90,12 @@
     rules.push(`.wf-pop { display:none !important; }`);
     // v3.19.0：排班模块的「时段权重配置」弹窗也不能混进导出图
     rules.push(`.sch-weight-overlay { display:none !important; }`);
+    // v3.28.0：实时出勤监控的表格外面包着 max-height:460px 的滚动区，导出必须放开，
+    // 否则只截到一屏；表头 sticky 也要还原成静态行，展开箭头是屏幕上的交互标记，不导出。
+    rules.push(`.rt-table-wrap { overflow:visible !important;max-height:none !important;height:auto !important; }`);
+    rules.push(`table.tbl.rt-area-table thead th,table.tbl.rt-detail-table thead th` +
+      ` { position:static !important;top:auto !important; }`);
+    rules.push(`.rt-exp,.rt-timer,.rt-pop { display:none !important; }`);
     if (WIDTH > BASE_WIDTH) {
       // 画布加宽时，标题 / 说明等原本锁 1218px 的块跟着铺满，固定宽的达成矩阵居中
       rules.push(`.att-kpi,.att-note,.att-switch,.att-block-title,.fr-head,.fr-title,.fr-note,` +
@@ -106,8 +123,12 @@
     holder.style.cssText =
       `position:fixed;left:-100000px;top:0;width:${WIDTH}px;background:#FFFFFF;pointer-events:none;`;
     const clone = src.cloneNode(true);
+    // 独立入口（出勤达成 / 实时出勤）的根节点自带 1240px 外框，导出时左右留 20px 白边，
+    // 用 border-box 保证内容区仍是 WIDTH，量高度与出图完全一致。
+    const padX = rootId && rootId !== "sheet" ? 20 : 0;
     clone.setAttribute("style",
-      `width:${WIDTH}px;max-width:none;margin:0;padding:28px 0 36px;` +
+      `width:${WIDTH}px;max-width:none;margin:0;padding:28px ${padX}px 36px;` +
+      `${padX ? "box-sizing:border-box;" : ""}` +
       `background:#FFFFFF;color:#1F2937;font-family:${FONT};`);
     for (const [sel, css] of DESKTOP_OVERRIDES) {
       for (const n of Array.from(clone.querySelectorAll(sel))) n.style.cssText += css;
@@ -130,7 +151,7 @@
       `<foreignObject x="0" y="0" width="${WIDTH}" height="${height}">` +
       `<div xmlns="http://www.w3.org/1999/xhtml" style="width:${WIDTH}px;height:${height}px;` +
       `margin:0;padding:0;background:#FFFFFF;color:#1F2937;font-family:${FONT};">` +
-      `<style>${escXml(collectCss())}</style>${xhtml}</div></foreignObject></svg>`;
+      `<style>${escXml(collectCss(rootId || "sheet"))}</style>${xhtml}</div></foreignObject></svg>`;
 
     const img = new Image();
     await new Promise((resolve, reject) => {

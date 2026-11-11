@@ -696,6 +696,45 @@ function loadOpts() {
   } catch (e) { /* ignore */ }
 }
 
+// ---------------------------------------------------------------- 一键复制图片
+/** 出图文件名：风神实时出勤_20261111_1543_下午茶1.png（时段名去掉括号里的时间，避免文件名太长）。 */
+function shotName() {
+  const d = state.lastAt || new Date();
+  const p = (n) => String(n).padStart(2, "0");
+  const stamp = `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}`;
+  const slot = activeSlot();
+  const slotName = slot ? String(slot.name || slot.code || "").replace(/[\/:*?"<>|\s]+/g, "") : "";
+  return `风神实时出勤_${stamp}${slotName ? "_" + slotName : ""}.png`;
+}
+/** 把当前画面（KPI + 商圈片表 + 两张明细表 + 口径说明）导出成 PNG：
+ *  优先写系统剪贴板，按住 Shift 或剪贴板不可用时自动另存为 PNG 文件。 */
+async function copyImage(e) {
+  const btn = $("btn-copy");
+  if (btn && btn.disabled) return;
+  if (!window.WB_CAPTURE) {
+    showNotice("图片模块没加载：请在 chrome://extensions 重新加载扩展，或安装新版 zip。", "bad");
+    return;
+  }
+  const label = btn ? btn.textContent : "";
+  if (btn) { btn.disabled = true; btn.textContent = "正在生成图片…"; }
+  const name = shotName();
+  try {
+    const r = await window.WB_CAPTURE.capture({
+      download: !!(e && e.shiftKey), rootId: "rt-wrap", filename: name
+    });
+    const size = `${r.width}×${r.height}`;
+    showNotice(r.mode === "clipboard"
+      ? `已复制实时出勤图片（${size} PNG），可直接 Ctrl/⌘+V 粘贴到钉钉 / 微信。`
+      : r.mode === "download"
+        ? `实时出勤图片已另存为 PNG（${size}）。`
+        : `当前环境不允许写剪贴板，已自动下载 PNG 图片（${size}）。`, "blue");
+  } catch (err) {
+    showNotice(`生成图片失败：${String((err && err.message) || err)}`, "bad");
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = label; }
+  }
+}
+
 // ---------------------------------------------------------------- 事件
 function bind() {
   $("site-btn").addEventListener("click", () => {
@@ -734,6 +773,7 @@ function bind() {
     refresh({ silent: true });
   });
   $("btn-refresh").addEventListener("click", () => refresh());
+  $("btn-copy").addEventListener("click", (e) => copyImage(e));
   $("rt-gap").addEventListener("change", (e) => setGap(e.target.value));
   $("rt-gap").addEventListener("blur", (e) => setGap(e.target.value));
   $("btn-auto").addEventListener("click", () => setAuto(!state.auto));
@@ -796,6 +836,7 @@ window.__RT__ = {
   timeToMin, slotAt, pickSlot, slotText, isScheduled, isOnline, ordersOf, pct, fmtPct,
   siteSummary, aggByArea, detailRow, buildDetails, totals, statFor, refresh,
   startTimer, stopTimer, tick, setGap, setAuto, saveSites, loadOpts, renderAll, renderAreas, renderDetails,
+  copyImage, shotName,
   selectedTeams, siteLabel, activeSlot, SITE_TO_AREA, DEFAULT_GAP, MIN_GAP, MAX_GAP, STAT_TTL,
   CONCURRENCY, ONLINE_WORK_STATUS, LS_GAP, LS_SITES, LS_SLOT,
   API_TEAMS, API_TIMES, API_STAT, API_ATT

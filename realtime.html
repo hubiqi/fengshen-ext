@@ -34,6 +34,7 @@
       <select id="rt-slot" class="rt-select" title="默认跟当前时间自动切，也可以固定看某个时段"></select>
     </label>
     <button id="btn-refresh" class="primary">立即刷新</button>
+    <button id="btn-copy" class="primary" title="把当前画面复制为高清 PNG，可直接粘贴到钉钉 / 微信；按住 Shift 点击则另存为 PNG 文件">复制图片</button>
     <label class="rt-field-inline" title="自动刷新间隔（秒），10 ~ 3600">每
       <input id="rt-gap" class="rt-input rt-gap" type="number" min="10" max="3600" step="5" value="30">
       秒
@@ -102,6 +103,7 @@
 
 <footer id="foot-meta" class="foot-meta"></footer>
 
+<script src="capture.js"></script>
 <script src="realtime.js"></script>
 </body>
 </html>
