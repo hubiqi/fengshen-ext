@@ -51,7 +51,8 @@ jobs:
             schedule.html schedule.css schedule.js \
             rent.html rent.css rent.js \
             realtime.html realtime.css realtime.js \
-            assess.js sync.js capture.js xlsx.js
+            assess.js sync.js capture.js xlsx.js \
+            scripts/hot-update.command
 
       - name: Create GitHub Release with the zip
         if: steps.exists.outputs.exists == 'false'

@@ -177,3 +177,21 @@ body.clean .update-banner, body.clean .update-status { display: none !important;
 .update-status.bad { border-color: #FECACA; background: #FEF2F2; color: #991B1B; }
 .update-status.new { border-color: #BFDBFE; background: #EFF6FF; color: #1E40AF; }
 .update-status.info { border-color: #E5E7EB; background: #F9FAFB; color: #374151; }
+
+/* 一键热更新弹层 */
+.hot-panel { position: fixed; right: 18px; bottom: 18px; z-index: 60; width: 440px; max-width: calc(100vw - 36px);
+  max-height: 70vh; overflow: auto; background: #FFF; border: 1px solid #CBD5E1; border-radius: 8px;
+  box-shadow: 0 10px 30px rgba(15,23,42,.18); padding: 12px 14px; font-size: 12.5px; color: #1F2937; }
+.hot-panel[hidden] { display: none; }
+.hp-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+.hp-head strong { font-size: 13.5px; color: #1E40AF; }
+.hp-close { border: 0; background: transparent; font-size: 18px; line-height: 1; cursor: pointer; color: #9CA3AF; padding: 0 2px; }
+.hp-close:hover { color: #374151; }
+.hp-tip { margin: 0 0 8px; line-height: 1.6; color: #374151; }
+.hp-tip code, .hot-panel code { background: #F1F5F9; border-radius: 4px; padding: 1px 5px; font-size: 11.5px; color: #0F172A; }
+.hp-script { width: 100%; height: 200px; box-sizing: border-box; resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px; line-height: 1.45; color: #0F172A; background: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 6px; padding: 8px; white-space: pre; }
+.hp-actions { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
+.hp-copied { color: #15803D; font-size: 12px; }
+/* 纯净看板用于截图，隐藏所有工具性质的内容 */
+body.clean .hot-panel { display: none !important; }

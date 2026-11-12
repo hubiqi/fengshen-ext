@@ -214,4 +214,54 @@
       if (r && r.ok === false) setHint("无法自动打开下载文件夹，请手动到系统「下载」目录找 zip。", true);
     }).catch(() => setHint("无法自动打开下载文件夹，请手动到系统「下载」目录找 zip。", true));
   });
+
+  // ---------------------------------------------------------------- 一键热更新
+  // 点「热更新」：把扩展内置的 scripts/hot-update.command 下载到「下载」文件夹，
+  // 同时把脚本文本显示出来（浏览器拦截可执行下载时可直接复制自建）。双击脚本即自动更新。
+  const btnHot = $("btn-hot");
+  const hotPanel = $("hot-panel");
+  const hpScript = $("hp-script");
+  const hpTip = $("hp-tip");
+  const hpCopied = $("hp-copied");
+  const b64u = (s) => {
+    const bytes = new TextEncoder().encode(s);
+    let bin = "";
+    bytes.forEach((b) => { bin += String.fromCharCode(b); });
+    return btoa(bin);
+  };
+  if (btnHot) btnHot.addEventListener("click", async () => {
+    let text = "";
+    try {
+      const resp = await fetch(chrome.runtime.getURL("scripts/hot-update.command") + "?t=" + Date.now());
+      text = await resp.text();
+    } catch (e) { text = ""; }
+    hpScript.value = text;
+    hotPanel.hidden = false;
+    if (text) {
+      try {
+        await chrome.downloads.download({
+          url: "data:application/octet-stream;base64," + b64u(text),
+          filename: "fengshen-hot-update.command",
+          saveAs: false,
+          conflictAction: "overwrite"
+        });
+        hpTip.innerHTML = "脚本已放到「下载」文件夹（<code>fengshen-hot-update.command</code>）。<b>去「下载」里双击它</b>即可自动下载新版、覆盖到插件目录并在 1 分钟内自动重载。若双击后提示选择目录，选中你加载扩展的那个文件夹即可。";
+      } catch (e) {
+        hpTip.innerHTML = "浏览器拦截了脚本下载（常见于可执行文件）。请直接<b>复制下方文本</b>，粘贴到一个新建文件并命名为 <code>fengshen-hot-update.command</code>，再双击运行即可。";
+      }
+    } else {
+      hpTip.textContent = "未能读取内置脚本，请直接到扩展目录的 scripts/hot-update.command 双击运行，或复制下方文本自建脚本。";
+    }
+  });
+  if ($("hp-close")) $("hp-close").addEventListener("click", () => { hotPanel.hidden = true; });
+  if ($("hp-copy")) $("hp-copy").addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(hpScript.value);
+    } catch (e) {
+      hpScript.select();
+      if (document.execCommand) document.execCommand("copy");
+    }
+    hpCopied.hidden = false;
+    setTimeout(() => { hpCopied.hidden = true; }, 1500);
+  });
 })();
