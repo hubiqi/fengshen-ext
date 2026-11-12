@@ -43,8 +43,11 @@ const API_ATT_DETAIL = XT + "xtop.fs.special.examine.exportStatisticsDetail/1.0"
 const API_KPI_DETAIL = XT + "xtop.performance.fs.opp.perfDetail.queryDetailList/1.0";
 const API_TEAMS = XT + "xtop.lpd.intelligentConfig.getTeamsAll/1.0";
 const SCALE_LS = "wb_wf_scale_v1";        // v3.31.0：手填的规模目标 / 招募目标 / 招聘缺口 / 渠道名称
-const SCALE_DAYS = 5;                      // 有效出勤规模默认 T-5 ~ T-1
-const SCALE_ONJOB_DAYS = 7;                // v3.32.0：在职规模固定取 T-7 ~ T-1 全天有效出勤
+const SCALE_LS_DAYS = "wb_wf_scale_days_v1"; // v3.34.0：两个可调统计天数
+const SCALE_DAYS = 5;                      // 有效出勤规模默认近 5 天
+const SCALE_ONJOB_DAYS = 7;                // 在职规模默认近 7 天
+const SCALE_DAYS_MIN = 1, SCALE_DAYS_MAX = 10;              // 有效出勤规模可选 1~10 天
+const SCALE_ONJOB_DAYS_MIN = 3, SCALE_ONJOB_DAYS_MAX = 15;  // 在职规模可选 3~15 天
 const SCALE_MODE_LABEL = {
   any: "有效在线时长>0 或 完单量>0",
   both: "有效在线时长>0 且 完单量>0",
@@ -200,6 +203,7 @@ const state = {
   // v3.32.0 规模汇总：渠道 1 行 + 商圈片明细 N 行；
   // effective / onJob = 商圈片名 -> Set(骑手id)，均已排除人资名单里的离职状态。
   scale: {
+    days: loadScaleDays().days, onJobDays: loadScaleDays().onJobDays,
     start: "", end: "", mode: "any", week: "",
     teams: [], areas: [], byTeam: Object.create(null),
     effective: new Map(), onJob: new Map(), left: new Set(),
@@ -653,6 +657,29 @@ function loadScaleManual() {
 function saveScaleManual() {
   try { localStorage.setItem(SCALE_LS, JSON.stringify(state.scale.manual)); } catch (e) { /* ignore */ }
 }
+/** v3.34.0：天数只允许各自范围内的整数，越界 / 非数字 / 缺失都退回默认。 */
+function clampScaleDays(v, lo, hi, dflt) {
+  const n = Math.round(Number(v));
+  return Number.isFinite(n) && n >= lo && n <= hi ? n : dflt;
+}
+function loadScaleDays() {
+  let days = SCALE_DAYS, onJobDays = SCALE_ONJOB_DAYS;
+  try {
+    const o = JSON.parse(localStorage.getItem(SCALE_LS_DAYS) || "{}");
+    if (o && typeof o === "object" && !Array.isArray(o)) {
+      days = clampScaleDays(o.days, SCALE_DAYS_MIN, SCALE_DAYS_MAX, SCALE_DAYS);
+      onJobDays = clampScaleDays(o.onJobDays, SCALE_ONJOB_DAYS_MIN, SCALE_ONJOB_DAYS_MAX, SCALE_ONJOB_DAYS);
+    }
+  } catch (e) { /* 读不到就用默认 */ }
+  return { days, onJobDays };
+}
+function saveScaleDays() {
+  try {
+    localStorage.setItem(SCALE_LS_DAYS, JSON.stringify({
+      days: state.scale.days, onJobDays: state.scale.onJobDays
+    }));
+  } catch (e) { /* ignore */ }
+}
 const ymdOf = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 const parseYmd = (s) => {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(s || ""));
@@ -665,14 +692,17 @@ function shiftDay(s, n) {
   d.setDate(d.getDate() + n);
   return ymdOf(d);
 }
+/** v3.34.0：有效出勤规模的天数可在「规模设置」里调整（默认近 5 天，可选 1~10 天）。 */
 function defaultScaleRange() {
   const t = todayYmd();
-  return [shiftDay(t, -SCALE_DAYS), shiftDay(t, -1)];
+  const n = state.scale.days || SCALE_DAYS;
+  return [shiftDay(t, -n), shiftDay(t, -1)];
 }
-/** v3.32.0：在职规模固定取 T-7 ~ T-1，不随工具条上有效出勤的区间变化。 */
+/** v3.34.0：在职规模默认近 7 天（可选 3~15 天），不随有效出勤的起止日期手动微调。 */
 function scaleOnJobRange() {
   const t = todayYmd();
-  return [shiftDay(t, -SCALE_ONJOB_DAYS), shiftDay(t, -1)];
+  const n = state.scale.onJobDays || SCALE_ONJOB_DAYS;
+  return [shiftDay(t, -n), shiftDay(t, -1)];
 }
 /** 表头「N天有效出勤规模」里的 N = 所选区间含首尾的天数。 */
 function scaleRangeDays() {
@@ -1100,14 +1130,14 @@ function renderScale() {
     title.innerHTML = `规模汇总 · ${esc(week)} · 统计区间 ${esc(s.start)} ~ ${esc(s.end)}` +
       ` · 按商圈片聚合（${int(rows.length)} 个商圈片 / ${int((s.teams || []).length)} 站点）` +
       `<span class="wf-scale-sub">口径：${esc(SCALE_MODE_LABEL[s.mode] || SCALE_MODE_LABEL.any)}` +
-      ` · 在职规模 T-${SCALE_ONJOB_DAYS}~T-1（${esc(scaleShortOnJobRange())}）全天有效出勤 · 两类规模均已排除离职` +
+      ` · 在职规模 T-${s.onJobDays}~T-1（${esc(scaleShortOnJobRange())}）全天有效出勤 · 两类规模均已排除离职` +
       (s.attAt ? ` · 出勤数据 ${esc(s.attAt)}` : "") + "</span>";
   }
   const note = $("wf-scale-note");
   if (note) {
     note.innerHTML = `<b>口径</b>：<b>${esc(heads[4][0])}</b> = 所选区间内至少 1 天有效的骑手，` +
       `按「商圈片＋骑手」去重、汇总行再跨片区去重，<b>排除人资名单里已离职 / 非在职状态</b>；` +
-      `<b>在职规模</b> = T-${SCALE_ONJOB_DAYS}~T-1（${esc(scaleShortOnJobRange())}）考勤明细里「全天」行有效的骑手去重，同样排除离职；` +
+      `<b>在职规模</b> = T-${s.onJobDays}~T-1（${esc(scaleShortOnJobRange())}）考勤明细里「全天」行有效的骑手去重，同样排除离职；` +
       `明细行按商圈片聚合（站点名映射到商圈片，未识别的按站点自成一组）。` +
       `今日入司 / 离职 = 人资名单 <code>entryTime / leaveTime</code> 为今天；` +
       `今日首跑 = 本月考勤明细里首个「全天有完单」日为今天。` +
@@ -1202,6 +1232,90 @@ function refreshScaleFirstRun() {
   }
   renderScale();
 }
+// ---------------------------------------------------------------- v3.34.0 规模统计口径设置
+/* 「规模设置」按钮打开一个小浮层：有效出勤规模近 N 天（1~10，默认 5）、
+   在职规模近 M 天（3~15，默认 7）。浮层挂在 body 上、不进 #sheet，
+   所以「复制图片」导出图里只有表头 / 口径说明的变化，不会出现按钮。 */
+function scaleSettingsEl() { return $("scale-settings"); }
+function scaleDayOptions(id, lo, hi, cur) {
+  const el = $(id);
+  if (!el) return;
+  const out = [];
+  for (let n = lo; n <= hi; n++) out.push(`<option value="${n}">近 ${n} 天</option>`);
+  el.innerHTML = out.join("");
+  el.value = String(clampScaleDays(cur, lo, hi, lo));
+}
+function placeScaleSettings(anchor) {
+  const p = scaleSettingsEl();
+  if (!p) return;
+  p.hidden = false;
+  const r = anchor.getBoundingClientRect();
+  const w = p.offsetWidth || 336, h = p.offsetHeight || 280;
+  let x = Math.min(r.left, window.innerWidth - w - 8);
+  let y = r.bottom + 6;
+  if (y + h > window.innerHeight - 8) y = Math.max(8, r.top - h - 6);
+  p.style.left = Math.max(8, Math.round(x)) + "px";
+  p.style.top = Math.round(y) + "px";
+}
+function openScaleSettings(anchor) {
+  const p = scaleSettingsEl();
+  if (!p) return;
+  closePop();
+  scaleDayOptions("ss-days", SCALE_DAYS_MIN, SCALE_DAYS_MAX, state.scale.days);
+  scaleDayOptions("ss-onjob-days", SCALE_ONJOB_DAYS_MIN, SCALE_ONJOB_DAYS_MAX, state.scale.onJobDays);
+  const note = $("ss-note");
+  if (note) {
+    const [os, oe] = scaleOnJobRange();
+    note.textContent = `当前有效出勤区间：${state.scale.start} ~ ${state.scale.end}（${scaleRangeDays()} 天）；`
+      + `在职规模：${os} ~ ${oe}（近 ${state.scale.onJobDays} 天）。`;
+  }
+  placeScaleSettings(anchor);
+}
+function closeScaleSettings() {
+  const p = scaleSettingsEl();
+  if (p) p.hidden = true;
+}
+function applyScaleSettings() {
+  const d = $("ss-days"), j = $("ss-onjob-days");
+  state.scale.days = clampScaleDays(d && d.value, SCALE_DAYS_MIN, SCALE_DAYS_MAX, SCALE_DAYS);
+  state.scale.onJobDays = clampScaleDays(j && j.value,
+    SCALE_ONJOB_DAYS_MIN, SCALE_ONJOB_DAYS_MAX, SCALE_ONJOB_DAYS);
+  // 应用天数 = 快捷把区间重设为 T-N ~ T-1；手动改日期框仍可继续微调
+  const [ds, de] = defaultScaleRange();
+  state.scale.start = ds;
+  state.scale.end = de;
+  const a = $("scale-start"), b = $("scale-end");
+  if (a) a.value = ds;
+  if (b) b.value = de;
+  saveScaleDays();
+  closeScaleSettings();
+  state.scale.ready = false;
+  state.scale.onJobReady = false;
+  renderScale();
+  loadScaleData(state.gen);
+}
+function bindScaleSettings() {
+  const btn = $("btn-scale-settings"), p = scaleSettingsEl();
+  if (!btn || !p) return;
+  btn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (!p.hidden) { closeScaleSettings(); return; }
+    openScaleSettings(btn);
+  });
+  for (const id of ["ss-close", "ss-cancel"]) {
+    const el = $(id);
+    if (el) el.addEventListener("click", closeScaleSettings);
+  }
+  const apply = $("ss-apply");
+  if (apply) apply.addEventListener("click", applyScaleSettings);
+  document.addEventListener("click", (e) => {
+    if (p.hidden || p.contains(e.target) || e.target === btn) return;
+    closeScaleSettings();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !p.hidden) closeScaleSettings();
+  });
+}
 function bindScaleEvents() {
   const start = $("scale-start"), end = $("scale-end"), mode = $("scale-mode");
   const [ds, de] = defaultScaleRange();
@@ -1216,6 +1330,10 @@ function bindScaleEvents() {
     if ((b - a) / 86400000 > 60) { showNotice("汇总区间最长 60 天，请缩短日期。", "blue"); return; }
     state.scale.start = start.value;
     state.scale.end = end.value;
+    // 手动改日期后让「规模设置」里的天数跟实际区间同步（超出 1~10 天保留上次值）
+    const n = Math.round((b - a) / 86400000) + 1;
+    state.scale.days = clampScaleDays(n, SCALE_DAYS_MIN, SCALE_DAYS_MAX, state.scale.days);
+    saveScaleDays();
     state.scale.ready = false;
     state.scale.onJobReady = false;
     renderScale();
@@ -1809,6 +1927,9 @@ window.__SET_WORKFORCE__ = (obj) => {
     if (o.start) { sc.start = o.start; $("scale-start").value = o.start; }
     if (o.end) { sc.end = o.end; $("scale-end").value = o.end; }
     if (o.mode) { sc.mode = o.mode; $("scale-mode").value = o.mode; }
+    if (o.days !== undefined) sc.days = clampScaleDays(o.days, SCALE_DAYS_MIN, SCALE_DAYS_MAX, SCALE_DAYS);
+    if (o.onJobDays !== undefined) sc.onJobDays = clampScaleDays(o.onJobDays,
+      SCALE_ONJOB_DAYS_MIN, SCALE_ONJOB_DAYS_MAX, SCALE_ONJOB_DAYS);
     if (Array.isArray(o.teams)) sc.teams = scaleTeamsWithAgency(o.teams);
     sc.areas = scaleAreaGroups(sc.teams);
     sc.left = o.left ? new Set(o.left) : scaleLeftRiders(state.staffList);
@@ -1869,11 +1990,16 @@ window.__WF__ = { state, COLS, PAGE_COLS, buildRows, attachDetail, visibleRows, 
   scaleTeamsFromBills, loadScaleTeams, scaleTeamsWithAgency, scaleStaffStats, scaleFirstRun,
   scaleEffectiveFromSheets, scaleOnJobFromSheets, loadScaleSheets, computeScaleRows, scaleCell, renderScale,
   updateScaleDerived, loadScaleData, refreshScaleFirstRun, bindScaleEvents,
-  SCALE_LS, SCALE_DAYS, SCALE_ONJOB_DAYS, SCALE_MODE_LABEL, SITE_TO_AREA, SCALE_AREA_ORDER, API_TEAMS };
+  clampScaleDays, loadScaleDays, saveScaleDays,
+  openScaleSettings, closeScaleSettings, applyScaleSettings, bindScaleSettings,
+  SCALE_LS, SCALE_LS_DAYS, SCALE_DAYS, SCALE_ONJOB_DAYS,
+  SCALE_DAYS_MIN, SCALE_DAYS_MAX, SCALE_ONJOB_DAYS_MIN, SCALE_ONJOB_DAYS_MAX,
+  SCALE_MODE_LABEL, SITE_TO_AREA, SCALE_AREA_ORDER, API_TEAMS };
 
 // ---------------------------------------------------------------- 初始化
 (async function init() {
-  bindScaleEvents();                 // v3.31.0：先设好汇总默认区间 T-5 ~ T-1，再渲染
+  bindScaleSettings();               // v3.34.0：规模设置按钮（有效出勤 / 在职规模的天数）
+  bindScaleEvents();                 // v3.31.0：先设好汇总默认区间（天数可配），再渲染
   $("month-picker").value = state.month;
   $("month-picker").min = shiftMonth(curMonth(), -MONTHS_BACK);
   $("month-picker").max = curMonth();

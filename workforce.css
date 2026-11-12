@@ -45,8 +45,10 @@ table.tbl.wf { table-layout: auto; width: max-content; min-width: 1240px;
   margin: 0 auto; font-size: 11.5px; }
 table.tbl.wf thead th { height: 42px; font-size: 11.5px; line-height: 1.35;
   padding: 3px 7px; white-space: normal; }
+/* v3.34.0：运力模块表格内容统一居中（数值列不再右对齐、名称列不再左对齐），
+   页面与「复制图片」导出图用的是同一份 CSS，两边一致。 */
 table.tbl.wf tbody td { height: 34px; font-size: 11.5px; padding: 3px 7px;
-  white-space: nowrap; }
+  white-space: nowrap; text-align: center; }
 table.tbl.wf tbody tr:nth-child(even) td { background: #FAFBFE; }
 table.tbl.wf tbody tr:hover td { background: #EFF6FF; }
 
@@ -59,7 +61,7 @@ table.tbl.wf td.c-site { min-width: 132px; max-width: 176px; font-size: 11px; }
 table.tbl.wf td.c-scheme { min-width: 160px; max-width: 220px; font-size: 11px; color: #4B5563; }
 table.tbl.wf td.c-name { font-weight: 700; color: #1F2937; }
 table.tbl.wf td.c-id { color: #6B7280; font-size: 11px; }
-table.tbl.wf td.num { text-align: right; font-variant-numeric: tabular-nums; }
+table.tbl.wf td.num { text-align: center; font-variant-numeric: tabular-nums; }
 table.tbl.wf td.c-total { font-weight: 700; color: #1F2937; }
 table.tbl.wf td.c-prepay, table.tbl.wf td.c-bind { color: #B45309; font-weight: 700; }
 table.tbl.wf td.c-ts { font-size: 10.5px; color: #4B5563; }
@@ -154,6 +156,16 @@ table.tbl.wf thead th.fz-edge {
 .wf-pop.freeze .wf-pop-list { max-height: 340px; }
 body.clean .wf-pop { display: none !important; }
 
+/* v3.34.0 规模统计口径设置浮层（复用 wf-pop 外壳，挂在 body 上不进导出图） */
+.wf-pop.wf-scale-settings { width: 336px; }
+.wf-scale-settings .ss-row { margin: 11px 0; }
+.wf-scale-settings .ss-row label { display: inline-block; width: 92px; font-weight: 700; color: #1F2937; }
+.wf-scale-settings .ss-row select { width: 82px; }
+.wf-scale-settings .ss-hint { display: block; margin-top: 5px; font-size: 11px;
+  color: #6B7280; line-height: 1.6; }
+.wf-scale-settings .ss-note { margin: 10px 0 4px; padding: 7px 9px; border-radius: 5px;
+  background: #F3F6FC; font-size: 11px; color: #374151; line-height: 1.6; }
+
 /* ---------------------------------------------------------------- v3.31.0 规模汇总
    渠道汇总 1 行 + 站点明细 N 行，整块放在 #sheet 里，页面与「复制图片」用同一份 DOM。
    列宽由 colgroup 固定，导出图不会因为内容不同重新折行。 */
@@ -176,8 +188,8 @@ table.tbl.wf-scale-table th.grp-b { background: #159447; }
 table.tbl.wf-scale-table th.grp-c { background: #C0392B; }
 table.tbl.wf-scale-table th.grp-d { background: #2F5597; }
 table.tbl.wf-scale-table tr.wf-scale-subhead th { height: 34px; }
-table.tbl.wf-scale-table tbody td.num { text-align: right; font-variant-numeric: tabular-nums; }
-table.tbl.wf-scale-table tbody td.name { text-align: left; white-space: normal; word-break: break-all; }
+table.tbl.wf-scale-table tbody td.num { text-align: center; font-variant-numeric: tabular-nums; }
+table.tbl.wf-scale-table tbody td.name { text-align: center; white-space: normal; word-break: break-all; }
 table.tbl.wf-scale-table tbody tr.wf-scale-total td { background: #EAF1FD; font-weight: 700; }
 table.tbl.wf-scale-table tbody tr.wf-scale-total td.wf-edit { background: #FFF7DF; }
 table.tbl.wf-scale-table tbody tr:nth-child(even) td { background: #FAFBFE; }

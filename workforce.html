@@ -43,6 +43,7 @@
       <option value="both">有效出勤：两者都要</option>
       <option value="achieved">有效出勤：达成标记</option>
     </select>
+    <button id="btn-scale-settings" class="ghost" title="设置「有效出勤规模」与「在职规模」的统计天数">规模设置</button>
     <button id="btn-refresh" class="primary">立即刷新</button>
     <button id="btn-freeze" class="ghost" title="自定义冻结左侧列：可指定一列或几列，表头始终冻结">冻结列 (2)</button>
     <button id="btn-clear-view" class="ghost" title="清除表头排序与列筛选，恢复默认显示顺序">清除排序/筛选</button>
@@ -86,6 +87,29 @@
 
 <!-- 表头筛选 / 冻结列浮层：挂在 body 上，不进入 #sheet，因此不会出现在导出图里 -->
 <div class="wf-pop" id="wf-pop" hidden></div>
+
+<!-- v3.34.0 规模统计口径设置：同样挂在 body 上，不进入 #sheet，导出图里不会出现按钮 / 浮层 -->
+<div class="wf-pop wf-scale-settings" id="scale-settings" hidden>
+  <div class="wf-pop-head"><span>规模统计口径设置</span><button type="button" id="ss-close" title="关闭">×</button></div>
+  <div class="ss-row">
+    <label for="ss-days">有效出勤规模</label>
+    <select id="ss-days" class="wf-select" aria-label="有效出勤规模统计天数"></select>
+    <span class="ss-hint">默认近 5 天，可选 1–10 天。应用后统计区间自动设为 T-N ~ T-1，表头「N天有效出勤规模」跟着变。</span>
+  </div>
+  <div class="ss-row">
+    <label for="ss-onjob-days">在职规模</label>
+    <select id="ss-onjob-days" class="wf-select" aria-label="在职规模统计天数"></select>
+    <span class="ss-hint">默认近 7 天，可选 3–15 天。固定取 T-N ~ T-1 考勤明细里「全天」行有效出勤去重。</span>
+  </div>
+  <div class="ss-note" id="ss-note"></div>
+  <div class="wf-pop-foot">
+    <span class="hint">天数设置记在本机，刷新后保留</span>
+    <span>
+      <button type="button" id="ss-cancel" class="ghost">取消</button>
+      <button type="button" id="ss-apply" class="primary">应用</button>
+    </span>
+  </div>
+</div>
 
 <script src="capture.js"></script>
 <script src="xlsx.js"></script>
