@@ -22,6 +22,12 @@
  *      4 个 Radio 筛选各查一次（物流责未完成单 / 不满意单_投诉单 / 不满意单_差评单 /
  *      不满意单_索赔单），按运单ID去重后读 4 个「是否XX单」列，按复合键计数
  *      → 物流责 / 投诉 / 差评 / 提前点
+ *   6) v3.41.0 差评 / 投诉补全：违规处罚（targetId=57532 / ZSViolationPunish）
+ *      POST xtop.lpd.quality.control.violation.violationOrderAeolusCenterApi.queryList/1.0
+ *      违规状态=成立、违规分类=差评+投诉，接口单次窗口 ≤2 天 → 按 2 天分段拉整月；
+ *      运单号去重后逗号拼接（50 单/批）回查考核运单明细，把「是否投诉单 / 是否差评单」
+ *      等标记并集合并进第 5 源 —— 4 个 Radio 筛选只覆盖「提前点送达不满意单」子类，
+ *      普通差评 / 投诉会漏，两路并集才完整。
  *
  * 与另两个页面一样：直连优先、失败自动切「静默桥接」；跟随当前登录态，不依赖本地服务。
  * 前三源并行取数先出主表，后两源异步补齐（失败只让对应列显示「—」，不阻断出表）。
@@ -43,6 +49,11 @@ const API_ATT_DETAIL = XT + "xtop.fs.special.examine.exportStatisticsDetail/1.0"
 // v3.36.0：与「出勤达成」T0 同源 —— 实时考勤当日快照（忽略日期参数，永远返回当前实时数据）
 const API_ATT_LIVE = XT + "xtop.fs.special.realtimeattendance.exportAttendance/1.0";
 const API_KPI_DETAIL = XT + "xtop.performance.fs.opp.perfDetail.queryDetailList/1.0";
+// v3.41.0：违规处罚列表（违规状态=成立 / 违规分类=差评+投诉），单次查询窗口不能超过 2 天
+const API_VIOLATION = XT + "xtop.lpd.quality.control.violation.violationOrderAeolusCenterApi.queryList/1.0";
+const VIOL_SEG_DAYS = 2;          // 违规处罚接口硬限制：单次查询 ≤ 2 天
+const VIOL_BATCH = 50;            // 差评/投诉运单号逗号拼接批量回查考核运单明细的批次大小
+const VIOL_MAX_PAGES = 3;         // 每个 2 天段最多翻 3 页（pageSize=500，异常情况防全量翻页）
 const API_TEAMS = XT + "xtop.lpd.intelligentConfig.getTeamsAll/1.0";
 const SCALE_LS = "wb_wf_scale_v1";        // v3.31.0：手填的规模目标 / 招募目标 / 招聘缺口 / 渠道名称
 const SCALE_LS_DAYS = "wb_wf_scale_days_v1"; // v3.34.0 两个可调统计天数；v3.35.0 增加首跑对比天数
@@ -92,7 +103,7 @@ const ATT_SEG_DAYS = 7;          // 出勤明细接口硬限制：单次最多�
 const MONTHS_BACK = 11;          // 当前月 + 往前 11 个月 = 最近 12 个月
 const MAX_PAGES = 20;
 const SRC_LABEL = { bill: "薪资账单", staff: "人资名单", clue: "线索结果明细",
-  att: "本月出勤明细", kpi: "考核运单明细" };
+  att: "本月出勤明细", kpi: "考核运单明细", viol: "违规处罚明细" };
 
 // 考核运单明细的 4 个筛选：分别把命中的少量订单拉回来，按运单ID去重后读列值聚合。
 // 三个 is_early_delivery_* 是「提前点送达不满意单」的下属分类，合并后正好覆盖提前点列。
@@ -413,9 +424,76 @@ function attStatsFromSheets(sheets) {
 // ---------------------------------------------------------------- 考核运单明细
 // 只按 4 个 Radio 筛选拉「有问题」的订单，绝不发起不带筛选的全量运单查询
 // （本月约 6 万单、整月可达 20 万单）。multiHeaders + data 逐行读 4 个「是否XX单」列，
-// 按运单ID 去重后按「骑手 id + 站点 id」汇总；每类筛选最多翻 KPI_MAX_PAGES 页。
+// 按运单ID 去重后按「骑手 id + 站点 id」汇总。
 // 「提前点送达不满意单」没有独立筛选项，实测 3 个 is_early_delivery_* 子筛选的并集
-// 完整覆盖该列（10 月并集 17 单全部命中，日指标汇总 16 单）。
+// 完整覆盖该列。
+// v3.41.0 差评 / 投诉补全：4 个 Radio 筛选只能覆盖「提前点送达不满意单」的子类，
+// 普通差评 / 投诉单会漏。改从违规处罚列表（违规状态=成立、违规分类=差评+投诉）
+// 拉整月运单号（接口单次 ≤2 天 → 按 2 天分段），去重后逗号拼接 50 单/批回查
+// 考核运单明细，把「是否投诉单 / 是否差评单」等标记与 Radio 筛选的结果取并集。
+// 解析一页考核运单明细：读 4 个「是否XX单」列，按运单ID去重合并进 seen。
+// 已存在的运单取各标记的并集（max），补全路不会把 Radio 路已拿到的标记冲掉。
+function parseKpiRows(j, seen) {
+  const d = (j && j.result && j.result.data) || {};
+  const heads = (d.multiHeaders || [])[0] || [];
+  const rows = Array.isArray(d.data) ? d.data : [];
+  const ix = (n) => heads.indexOf(n);
+  const iT = ix("运单ID"), iR = ix("骑手ID"), iS = ix("站点ID");
+  const iF = KPI_COLS.map(ix);
+  if (iR < 0 || iF.some((i) => i < 0)) return { rows: 0 };
+  for (const row of rows) {
+    const cells = Array.isArray(row) ? row : [];
+    const val = (i) => (i >= 0 && cells[i] && cells[i].content != null)
+      ? String(cells[i].content).trim() : "";
+    const tid = val(iT);
+    const flags = {
+      rid: val(iR), teamId: iS >= 0 ? val(iS) : "",
+      lgt: val(iF[0]) === "是" ? 1 : 0,
+      complain: val(iF[1]) === "是" ? 1 : 0,
+      negative: val(iF[2]) === "是" ? 1 : 0,
+      early: val(iF[3]) === "是" ? 1 : 0
+    };
+    const prev = tid && seen.get(tid);
+    if (prev) {
+      prev.lgt = Math.max(prev.lgt, flags.lgt);
+      prev.complain = Math.max(prev.complain, flags.complain);
+      prev.negative = Math.max(prev.negative, flags.negative);
+      prev.early = Math.max(prev.early, flags.early);
+    } else {
+      seen.set(tid || ("__" + seen.size), flags);
+    }
+  }
+  return { rows: rows.length };
+}
+
+// 违规处罚列表（差评 / 投诉 · 成立）：按 2 天分段拉整月，返回去重后的运单号数组
+async function loadViolationTrackingIds(b) {
+  const tids = new Set();
+  for (let d = 1; d <= b.maxDay; d += VIOL_SEG_DAYS) {
+    const segEnd = Math.min(d + VIOL_SEG_DAYS - 1, b.maxDay);
+    const start = new Date(b.y, b.m - 1, d, 0, 0, 0).getTime();
+    const end = new Date(b.y, b.m - 1, segEnd, 23, 59, 59, 999).getTime();
+    for (let p = 1; p <= VIOL_MAX_PAGES; p++) {
+      const j = await request(API_VIOLATION, "POST", {
+        params: { request: {
+          violationStartTime: start, violationEndTime: end,
+          violationStatus: [10],                       // 10 = 成立
+          violationCategories: ["BAD_REVIEW", "COMPLAIN"],
+          pageNo: p, pageSize: 500
+        } }
+      });
+      const d0 = (j && j.result && j.result.data) || {};
+      const list = Array.isArray(d0.violationEventList) ? d0.violationEventList : [];
+      for (const x of list) {
+        const tid = String((x && x.trackingId) || "").trim();
+        if (tid) tids.add(tid);
+      }
+      if (!list.length || list.length < 500 || (d0.count && p * 500 >= d0.count)) break;
+    }
+  }
+  return [...tids];
+}
+
 async function loadKpiFlags(month) {
   const b = monthBounds(month);
   const seen = new Map();
@@ -428,30 +506,29 @@ async function loadKpiFlags(month) {
           pageIndex: p, pageSize: KPI_PAGE_SIZE
         } }
       });
+      const { rows } = parseKpiRows(j, seen);
       const d = (j && j.result && j.result.data) || {};
-      const heads = (d.multiHeaders || [])[0] || [];
-      const rows = Array.isArray(d.data) ? d.data : [];
-      const ix = (n) => heads.indexOf(n);
-      const iT = ix("运单ID"), iR = ix("骑手ID"), iS = ix("站点ID");
-      const iF = KPI_COLS.map(ix);
-      if (iR < 0 || iF.some((i) => i < 0)) break;
-      for (const row of rows) {
-        const cells = Array.isArray(row) ? row : [];
-        const val = (i) => (i >= 0 && cells[i] && cells[i].content != null)
-          ? String(cells[i].content).trim() : "";
-        const tid = val(iT);
-        if (tid && seen.has(tid)) continue;
-        seen.set(tid || ("__" + seen.size), {
-          rid: val(iR), teamId: iS >= 0 ? val(iS) : "",
-          lgt: val(iF[0]) === "是" ? 1 : 0,
-          complain: val(iF[1]) === "是" ? 1 : 0,
-          negative: val(iF[2]) === "是" ? 1 : 0,
-          early: val(iF[3]) === "是" ? 1 : 0
-        });
-      }
       const total = num(d.total);
-      if (rows.length < KPI_PAGE_SIZE || (total && p * KPI_PAGE_SIZE >= total)) break;
+      if (rows < KPI_PAGE_SIZE || (total && p * KPI_PAGE_SIZE >= total)) break;
     }
+  }
+  // v3.41.0 差评 / 投诉补全：违规处罚（成立）运单号 → 逗号拼接批量回查考核运单明细。
+  // 失败只少补一部分数据，不让整个考核运单明细源挂掉。
+  try {
+    const tids = await loadViolationTrackingIds(b);
+    for (let i = 0; i < tids.length; i += VIOL_BATCH) {
+      const batch = tids.slice(i, i + VIOL_BATCH);
+      const j = await request(API_KPI_DETAIL, "POST", {
+        params: { request: {
+          queryParam: { ds: [b.start, b.end], trackingId: batch.join(",") },
+          planType: "UPLUS_AGENCY", tabCode: "TRACK_UB",
+          pageIndex: 1, pageSize: KPI_PAGE_SIZE
+        } }
+      });
+      parseKpiRows(j, seen);
+    }
+  } catch (e) {
+    console.warn("[viol] 差评/投诉补全失败（不影响 Radio 筛选结果）:", e && e.message);
   }
   const out = new Map();
   for (const v of seen.values()) {
@@ -2195,7 +2272,7 @@ function renderMeta() {
     `成员管理·全部（${state.staff.size} 人）`,
     `线索结果明细（${state.clues.size} 人带三方人资公司）`,
     `本月出勤明细（${monthSegments(state.month).length} 段 × 最多 7 天）`,
-    "考核运单明细（4 类异常订单筛选，不拉全量运单）",
+    "考核运单明细（4 类异常订单筛选 + 违规处罚差评/投诉运单号批量补全，不拉全量运单）",
     state.loadedAt ? `取数完成 ${state.loadedAt}` : ""
   ].filter(Boolean);
   $("foot-meta").textContent = parts.join("　·　") + "　·　跟随当前浏览器登录态，换账号自动换商";
@@ -2205,6 +2282,8 @@ function renderMeta() {
     "本月班次异常数 = 出勤明细里除「全天」外「是否达成 = 未达成」的班次数；" +
     "首跑时间只给本月入职骑手，取入职日起首个「全天」完单 > 0 的日期；" +
     "物流责 / 投诉 / 差评 / 提前点 = 考核运单明细里 4 类异常订单计数；" +
+    "投诉 / 差评另经违规处罚列表（违规状态=成立、违规分类=差评+投诉、接口按 2 天分段）的运单号" +
+    "去重后逗号拼接批量回查考核运单明细补全，两路取并集，普通差评 / 投诉不再漏计；" +
     "出勤异常 / 首跑 / 4 类坏单均按「骑手id＋站点id」归集，同一骑手跨站点各站分开计、不重复；金额单位人民币元。";
 }
 
@@ -2546,6 +2625,8 @@ window.__SET_WORKFORCE__ = (obj) => {
 window.__WF__ = { state, COLS, PAGE_COLS, buildRows, attachDetail, visibleRows, splitSep,
   staffMap, clueMap, money, attStatsFromSheets, monthSegments, monthBounds, exportCsv,
   applyData, loadKpiFlags, loadAttendance, KPI_FILTERS,
+  // v3.41.0 差评 / 投诉补全（违规处罚 → 批量回查考核运单明细）
+  parseKpiRows, loadViolationTrackingIds, API_VIOLATION, VIOL_SEG_DAYS, VIOL_BATCH,
   normId, pairKey, pairGet, hookPairMap,
   // v3.18.0 视图能力（真机回归用）
   cellText, sortVal, compareCell, filteredRows, toggleSort, clearView, activeFilterCount,
