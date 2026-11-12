@@ -246,17 +246,8 @@ function areaList() {
   return [...set];
 }
 function riderList() {
-  // 骑手清单来自本月出勤明细 + 坏单明细（出勤数据没到时至少能看到有坏单的骑手）
-  const m = new Map();
-  for (const r of state.recs) {
-    if (!m.has(r.rid)) m.set(r.rid, { rid: r.rid, name: r.name || "", teamId: r.teamId });
-    else if (!m.get(r.rid).name && r.name) m.get(r.rid).name = r.name;
-  }
-  for (const o of state.orders) {
-    if (!m.has(o.rid)) m.set(o.rid, { rid: o.rid, name: o.rname || "", teamId: o.teamId });
-    else if (!m.get(o.rid).name && o.rname) m.get(o.rid).name = o.rname;
-  }
-  return [...m.values()].sort((a, b) => (a.name || a.rid).localeCompare(b.name || b.rid));
+  // 骑手清单与矩阵行同源（主站点取班次最多的站点），出勤或坏单任一有数据即可选
+  return riderRows().map((r) => ({ rid: r.rid, name: r.name, teamId: r.teamId }));
 }
 function inScope(rec) {
   const d = state.dim;
@@ -317,6 +308,7 @@ function parseAttSheets(sheets, defaultDay) {
     const iP = idx("时段", "班次");
     const iOk = idx("是否达成");
     const iSched = idx("是否排班");
+    const iPlan = idx("排班时段");      // 实时快照：当天排班计划（「午高峰、晚高峰、…」）
     const iO = idx("时段完单量", "完单量");
     const iV = idx("时段有效在线时长", "有效在线时长", "有效在线");
     if (iR === undefined || iP === undefined) continue;
@@ -327,8 +319,15 @@ function parseAttSheets(sheets, defaultDay) {
       if (!per) continue;
       const day = iD !== undefined ? str(r[iD]).slice(0, 10) : str(defaultDay);
       if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) continue;
-      // 有「是否排班」列时按它过滤；没排班的人不进矩阵
-      if (iSched !== undefined && str(r[iSched]) === "否") continue;
+      // 「是否排班」实际取值为 排班 / 未排班 / 休息 —— 只保留「排班」；
+      // 未排班 / 休息行的「是否达成」必为空，不滤掉会把整片格子染成「统计中」。
+      if (iSched !== undefined && str(r[iSched]) !== "排班") continue;
+      // 实时快照没有「是否排班」列，用「排班时段」判断：时段不在当天排班计划里 → 不是真排班班次
+      if (iSched === undefined && iPlan !== undefined) {
+        const plan = str(r[iPlan]);
+        const planArr = plan.split(/[、,，]/).map((s) => s.trim()).filter(Boolean);
+        if (!planArr.includes(per)) continue;
+      }
       const okRaw = iOk !== undefined ? str(r[iOk]) : "";
       const ok = okRaw === "达成" ? 1 : (okRaw === "未达成" ? 0 : -1);
       out.push({
@@ -538,22 +537,48 @@ async function loadAll() {
 }
 
 // ---------------------------------------------------------------- 矩阵聚合（行 = 骑手，列 = 日期）
-/** 范围内的骑手行清单：姓名 / 站点 / 商圈片，按姓名排序。 */
+/** 范围内的骑手行清单：姓名 / 主站点 / 商圈片，按姓名排序。
+ *  主站点 = 该骑手本月班次数最多的站点（跨站骑手不再取"第一条记录"而归错站）。 */
 function riderRows() {
-  const map = new Map();
-  const add = (rid, name, teamId, siteName) => {
-    rid = normId(rid);
-    if (!rid || rid === "0") return;
-    if (!map.has(rid)) map.set(rid, { rid, name: "", teamId: "", siteName: "", area: "" });
-    const r = map.get(rid);
-    if (name && !r.name) r.name = name;
-    if (teamId && !r.teamId) r.teamId = normId(teamId);
-    if (siteName && !r.siteName) r.siteName = siteName;
+  const map = new Map();   // rid -> { rid, name, sites: Map("teamId\u0001siteName" -> count), orders }
+  const riderOf = (rid) => {
+    if (!map.has(rid)) map.set(rid, { rid, name: "", sites: new Map(), hasOrder: false });
+    return map.get(rid);
   };
-  for (const rec of state.recs) if (inScope(rec)) add(rec.rid, rec.name, rec.teamId, rec.siteName);
-  for (const o of state.orders) if (inScope(o)) add(o.rid, o.rname, o.teamId, o.siteName);
-  const arr = [...map.values()];
-  for (const r of arr) r.area = areaOf(r.teamId, r.siteName);
+  for (const rec of state.recs) {
+    if (!inScope(rec)) continue;
+    const rid = normId(rec.rid);
+    if (!rid || rid === "0") continue;
+    const r = riderOf(rid);
+    if (rec.name && !r.name) r.name = rec.name;
+    const key = normId(rec.teamId) + "\u0001" + str(rec.siteName);
+    r.sites.set(key, (r.sites.get(key) || 0) + 1);
+  }
+  for (const o of state.orders) {
+    if (!inScope(o)) continue;
+    const rid = normId(o.rid);
+    if (!rid || rid === "0") continue;
+    const r = riderOf(rid);
+    if (o.rname && !r.name) r.name = o.rname;
+    r.hasOrder = true;
+    if (!r.sites.size) {
+      const key = normId(o.teamId) + "\u0001" + str(o.siteName);
+      r.sites.set(key, (r.sites.get(key) || 0) + 1);
+    }
+  }
+  const arr = [];
+  for (const r of map.values()) {
+    if (!r.name && !r.sites.size && !r.hasOrder) continue;
+    let best = "", bestN = -1;
+    for (const [k, n] of r.sites) if (n > bestN) { bestN = n; best = k; }
+    const [teamId, siteName] = best ? best.split("\u0001") : ["", ""];
+    arr.push({
+      rid: r.rid, name: r.name,
+      teamId, siteName,
+      area: areaOf(teamId, siteName),
+      shifts: [...r.sites.values()].reduce((a, b) => a + b, 0)
+    });
+  }
   arr.sort((a, b) => (a.name || a.rid).localeCompare(b.name || b.rid, "zh-CN"));
   return arr;
 }
@@ -645,7 +670,7 @@ function renderRiderTable(wrap, month, b) {
   html += "</tr></thead><tbody>";
   for (const rd of riders) {
     const m = mat.get(rd.rid);
-    const sub = (state.dim === "area" ? rd.siteName : rd.area) || "";
+    const sub = rd.siteName || rd.area || "";
     html += `<th class="lft ql-rider"><span class="qr-name">${esc(rd.name || rd.rid)}</span>` +
       `<span class="qr-sub">${esc(rd.name ? rd.rid : "")}${sub ? (rd.name ? " · " : "") + esc(sub) : ""}</span></th>`;
     for (let d = 1; d <= b.maxDay; d++) {
@@ -663,10 +688,12 @@ function renderRiderTable(wrap, month, b) {
 function renderFoot() {
   const isCur = state.month === curMonth();
   $("ql-foot").innerHTML =
-    "行 = 范围内的骑手（整商 = 全部骑手；商圈片 / 站点 / 骑手按钮 + 下拉切换范围），列 = 本月日期。<br>" +
+    "行 = 范围内的骑手（整商 = 全部骑手；商圈片 / 站点 / 骑手按钮 + 下拉切换范围），列 = 本月日期。" +
+    "骑手名下的站点 = 该骑手本月班次数最多的站点（跨站骑手取主站点）。<br>" +
     "炸班次 = 出勤统计「导出明细数据」的骑手 × 时段明细（本月按 7 天分段；当月今天取 T0 实时考勤快照），" +
-    "红字 = 当天炸掉的班次名（含「全天」，按系统「是否达成」标记），空白 = 全部达成或无排班，" +
-    "琥珀「统计中」 = 快照缺达成标记；点击单元格看该骑手当天全部班次明细（含完单量 / 有效在线）。<br>" +
+    "只统计「是否排班 = 排班」的班次；红字 = 当天炸掉的班次名（含「全天」，按系统「是否达成」标记），" +
+    "空白 = 全部达成或无排班；快照缺达成标记时显示琥珀「统计中」（当日数据 T+1 结算）；" +
+    "点击单元格看该骑手当天全部排班班次明细（含完单量 / 有效在线）。<br>" +
     "坏单 = KPI 考核运单明细 4 类问题订单筛选 + 违规处罚列表（违规状态=成立、违规分类=差评+投诉）" +
     "运单号去重后逗号拼接批量回查，两路按运单取并集、不重复计数（与运力模块投诉 / 差评同口径）；" +
     "红字「类型*N」 = 当天各类型坏单数，一个订单命中多个标签时每个标签单独计算；点击单元格看运单明细。" +
