@@ -43,7 +43,7 @@
       <option value="both">有效出勤：两者都要</option>
       <option value="achieved">有效出勤：达成标记</option>
     </select>
-    <button id="btn-scale-settings" class="ghost" title="设置「有效出勤规模」与「在职规模」的统计天数">规模设置</button>
+    <button id="btn-scale-settings" class="ghost" title="设置「有效出勤规模」「在职规模」的统计天数与「今日首跑」的对比天数">规模设置</button>
     <button id="btn-refresh" class="primary">立即刷新</button>
     <button id="btn-freeze" class="ghost" title="自定义冻结左侧列：可指定一列或几列，表头始终冻结">冻结列 (2)</button>
     <button id="btn-clear-view" class="ghost" title="清除表头排序与列筛选，恢复默认显示顺序">清除排序/筛选</button>
@@ -88,7 +88,7 @@
 <!-- 表头筛选 / 冻结列浮层：挂在 body 上，不进入 #sheet，因此不会出现在导出图里 -->
 <div class="wf-pop" id="wf-pop" hidden></div>
 
-<!-- v3.34.0 规模统计口径设置：同样挂在 body 上，不进入 #sheet，导出图里不会出现按钮 / 浮层 -->
+<!-- v3.34.0 规模统计口径设置 / v3.35.0 首跑对比天数：挂在 body 上，不进入 #sheet，导出图里不会出现按钮 / 浮层 -->
 <div class="wf-pop wf-scale-settings" id="scale-settings" hidden>
   <div class="wf-pop-head"><span>规模统计口径设置</span><button type="button" id="ss-close" title="关闭">×</button></div>
   <div class="ss-row">
@@ -101,6 +101,11 @@
     <select id="ss-onjob-days" class="wf-select" aria-label="在职规模统计天数"></select>
     <span class="ss-hint">默认近 7 天，可选 3–15 天。固定取 T-N ~ T-1 考勤明细里「全天」行有效出勤去重。</span>
   </div>
+  <div class="ss-row">
+    <label for="ss-first-days">今日首跑</label>
+    <select id="ss-first-days" class="wf-select" aria-label="今日首跑对比天数"></select>
+    <span class="ss-hint">默认近 14 天，可选 1–30 天。今日完单&gt;0 的骑手，对比 T-N ~ T-1 从未有完单的才算「新增」；按骑手全局对比，换站点不算新增。</span>
+  </div>
   <div class="ss-note" id="ss-note"></div>
   <div class="wf-pop-foot">
     <span class="hint">天数设置记在本机，刷新后保留</span>
@@ -108,6 +113,23 @@
       <button type="button" id="ss-cancel" class="ghost">取消</button>
       <button type="button" id="ss-apply" class="primary">应用</button>
     </span>
+  </div>
+</div>
+
+<!-- v3.35.0 今日首跑逐人判定明细：点汇总表「今日首跑」表头打开；挂在 body 上，不进导出图 -->
+<div class="wf-pop wf-scale-first" id="scale-first-pop" hidden>
+  <div class="wf-pop-head"><span>今日首跑 · 逐人判定明细</span><button type="button" id="sfd-close" title="关闭">×</button></div>
+  <div class="sfd-sum" id="sfd-sum"></div>
+  <input id="sfd-search" class="sfd-search" type="search" placeholder="按姓名 / 骑手ID / 商圈片搜索，例如：苏永康" aria-label="搜索首跑骑手">
+  <div class="sfd-wrap">
+    <table class="tbl sfd-table">
+      <thead><tr><th>骑手</th><th>今日所在商圈片</th><th>今日完单</th><th>判定</th><th>原因</th></tr></thead>
+      <tbody id="sfd-body"></tbody>
+    </table>
+  </div>
+  <div class="wf-pop-foot">
+    <span class="hint">口径：今日完单&gt;0 且 T-N~T-1 从未有完单（按骑手全局对比、排除离职）</span>
+    <button type="button" id="sfd-done" class="ghost">关闭</button>
   </div>
 </div>
 

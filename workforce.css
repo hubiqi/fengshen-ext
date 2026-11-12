@@ -166,6 +166,29 @@ body.clean .wf-pop { display: none !important; }
 .wf-scale-settings .ss-note { margin: 10px 0 4px; padding: 7px 9px; border-radius: 5px;
   background: #F3F6FC; font-size: 11px; color: #374151; line-height: 1.6; }
 
+/* v3.35.0 今日首跑逐人判定明细（同样挂在 body 上，不进 #sheet / 导出图） */
+.wf-pop.wf-scale-first { width: 720px; max-width: calc(100vw - 24px);
+  left: 50%; top: 9%; transform: translateX(-50%); }
+.wf-scale-first .sfd-sum { margin: 8px 0; padding: 7px 9px; border-radius: 5px;
+  background: #F3F6FC; font-size: 11.5px; color: #374151; line-height: 1.6; }
+.wf-scale-first .sfd-search { width: 100%; box-sizing: border-box; height: 30px;
+  padding: 4px 9px; border: 1px solid #C7D2E5; border-radius: 5px; font-size: 12px; }
+.wf-scale-first .sfd-wrap { max-height: 430px; overflow: auto; margin-top: 9px;
+  border: 1px solid #E5E7EB; border-radius: 5px; }
+.wf-scale-first table.sfd-table { width: 100%; border-collapse: collapse; font-size: 11.5px; }
+.wf-scale-first table.sfd-table th,
+.wf-scale-first table.sfd-table td { border-bottom: 1px solid #E5E7EB;
+  padding: 5px 7px; text-align: center; white-space: nowrap; }
+.wf-scale-first table.sfd-table th { background: #EAF1FD; color: #1F2937; font-weight: 700; }
+.wf-scale-first table.sfd-table td { color: #1F2937; }
+.wf-scale-first table.sfd-table td.sfd-name em { color: #9CA3AF; font-style: normal;
+  margin-left: 5px; font-size: 10.5px; }
+.wf-scale-first table.sfd-table td.sfd-why { white-space: normal; text-align: left; color: #6B7280; }
+.wf-scale-first tr.sfd-ok td { background: #F0FDF4; }
+.wf-scale-first tr.sfd-old td { background: #FFF7ED; }
+.wf-scale-first tr.sfd-no td, .wf-scale-first tr.sfd-left td { background: #F9FAFB; color: #9CA3AF; }
+table.tbl.wf-scale-table th[data-first-detail] { cursor: pointer; text-decoration: underline dotted; }
+
 /* ---------------------------------------------------------------- v3.31.0 规模汇总
    渠道汇总 1 行 + 站点明细 N 行，整块放在 #sheet 里，页面与「复制图片」用同一份 DOM。
    列宽由 colgroup 固定，导出图不会因为内容不同重新折行。 */
