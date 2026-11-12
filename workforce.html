@@ -133,6 +133,39 @@
   </div>
 </div>
 
+<!-- v3.37.0 手动增减：在职规模 / 有效出勤规模 单元格右键打开；挂在 body 上，不进导出图 -->
+<div class="wf-pop wf-scale-adj" id="scale-adj" hidden>
+  <div class="wf-pop-head"><span id="adj-title">手动调整</span><button type="button" id="adj-close" title="关闭">×</button></div>
+  <div class="ss-note" id="adj-sum"></div>
+  <div class="adj-row">
+    <label for="adj-n">增减人数</label>
+    <input id="adj-n" class="wf-input adj-n" type="number" min="1" max="999" step="1" value="1" aria-label="增减人数">
+    <button type="button" id="adj-plus" class="primary">增加</button>
+    <button type="button" id="adj-minus" class="ghost">减少</button>
+  </div>
+  <div class="wf-pop-foot">
+    <span class="hint">按 W 周 + 商圈片记在本机，汇总行自动合计</span>
+    <button type="button" id="adj-reset" class="ghost">清零</button>
+  </div>
+</div>
+
+<!-- v3.37.0 骑手明细：点今日入职 / 今日首跑 / 今日离职的数字打开；挂在 body 上，不进导出图 -->
+<div class="wf-pop wf-scale-first wf-scale-people" id="scale-people" hidden>
+  <div class="wf-pop-head"><span id="sp-title">骑手明细</span><button type="button" id="sp-close" title="关闭">×</button></div>
+  <div class="sfd-sum" id="sp-sum"></div>
+  <input id="sp-search" class="sfd-search" type="search" placeholder="按姓名 / 骑手ID / 商圈片搜索" aria-label="搜索骑手">
+  <div class="sfd-wrap">
+    <table class="tbl sfd-table">
+      <thead><tr><th>骑手</th><th>骑手ID</th><th>商圈片</th><th id="sp-col4">时间</th></tr></thead>
+      <tbody id="sp-body"></tbody>
+    </table>
+  </div>
+  <div class="wf-pop-foot">
+    <span class="hint" id="sp-hint"></span>
+    <button type="button" id="sp-done" class="ghost">关闭</button>
+  </div>
+</div>
+
 <script src="capture.js"></script>
 <script src="xlsx.js"></script>
 <script src="workforce.js"></script>

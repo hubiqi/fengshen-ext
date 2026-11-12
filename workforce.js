@@ -809,6 +809,27 @@ function manualNum(v) {
   const n = Number(s);
   return Number.isFinite(n) ? n : null;
 }
+/** v3.37.0：在职规模 / 有效出勤规模支持右键手动增减 n 人。
+ *  field = "onJob" | "eff"，增量按「W 周 + 商圈片」记在本机（和规模目标同一份手填数据）。
+ *  返回 0 表示没调过；正数加人、负数减人。 */
+function scaleAdj(key, field) {
+  const m = manualRow(key);
+  const v = manualNum(field === "eff" ? m.adjEff : m.adjOnJob);
+  return v == null ? 0 : Math.round(v);
+}
+function setScaleAdj(key, field, v) {
+  const m = manualRow(key);
+  const n = Math.round(Number(v) || 0);
+  if (field === "eff") m.adjEff = n ? n : "";
+  else m.adjOnJob = n ? n : "";
+  saveScaleManual();
+}
+/** 所有商圈片的手动增减合计（汇总行 = 跨片区去重人数 + 这个合计）。 */
+function scaleAdjSum(field) {
+  let v = 0;
+  for (const g of (state.scale.areas || [])) v += scaleAdj(g.key, field);
+  return v;
+}
 function scaleShortRange() {
   const f = (s) => String(s || "").slice(5).replace(/-/g, "");
   return f(state.scale.start) + "-" + f(state.scale.end);
@@ -1173,16 +1194,21 @@ function scaleTodayFromLiveSheets(liveSheets, nameToId, opts) {
   }
   return [...byRid.values()];
 }
-/** 组装商圈片行与汇总行；两类人数在汇总行再跨片区按骑手全局去重，其余按片区相加。 */
+/** 组装商圈片行与汇总行；两类人数在汇总行再跨片区按骑手全局去重，其余按片区相加。
+ *  v3.37.0：净缺口 = 在职规模 − 规模目标；汇总行的净缺口只累加「缺口」（负数），
+ *  某片区超编的人不能补别的片区的缺口，所以超编不参与汇总。 */
 function computeScaleRows() {
   const s = state.scale;
-  const ready = s.ready;
+  const ready = s.ready, onJobReady = s.onJobReady;
   const areas = (s.areas && s.areas.length) ? s.areas : scaleAreaGroups(s.teams);
   s.areas = areas;
   const rows = areas.map((g) => {
     const m = manualRow(g.key);
-    const eff = ready ? (s.effective.get(g.key) || new Set()).size : null;
-    const onJob = s.onJobReady ? (s.onJob.get(g.key) || new Set()).size : null;
+    const effBase = ready ? (s.effective.get(g.key) || new Set()).size : null;
+    const onJobBase = onJobReady ? (s.onJob.get(g.key) || new Set()).size : null;
+    const effAdj = scaleAdj(g.key, "eff"), onJobAdj = scaleAdj(g.key, "onJob");
+    const eff = effBase == null ? null : Math.max(0, effBase + effAdj);
+    const onJob = onJobBase == null ? null : Math.max(0, onJobBase + onJobAdj);
     const firstRun = s.firstReady ? (s.firstRun.get(g.key) || new Set()).size : null;
     const dyn = { entry: 0, leave: 0 };
     for (const tid of g.teamIds) {
@@ -1193,10 +1219,11 @@ function computeScaleRows() {
     const target = manualNum(m.target), recruit = manualNum(m.recruit), gap = manualNum(m.gap);
     return {
       teamId: g.key, name: g.name, agency: g.agency,
-      onJob, entry: dyn.entry, leave: dyn.leave, firstRun,
-      effective: eff, target, recruit, gap,
-      rate: ready && eff !== null && target && target > 0 ? eff / target : null,
-      net: ready && eff !== null && target !== null ? eff - target : null
+      onJob, onJobBase, onJobAdj, effective: eff, effBase, effAdj,
+      entry: dyn.entry, leave: dyn.leave, firstRun,
+      target, recruit, gap,
+      rate: onJob != null && target && target > 0 ? onJob / target : null,
+      net: onJob != null && target !== null ? onJob - target : null
     };
   });
   const sum = (f, nullable) => {
@@ -1210,17 +1237,26 @@ function computeScaleRows() {
     for (const set of map.values()) for (const rid of set) all.add(rid);
     return all.size;
   };
-  const effAll = union(s.effective, ready);
-  const onJobAll = union(s.onJob, s.onJobReady);
+  const effAllBase = union(s.effective, ready);
+  const onJobAllBase = union(s.onJob, onJobReady);
+  const effAdjAll = scaleAdjSum("eff"), onJobAdjAll = scaleAdjSum("onJob");
+  const effAll = effAllBase == null ? null : Math.max(0, effAllBase + effAdjAll);
+  const onJobAll = onJobAllBase == null ? null : Math.max(0, onJobAllBase + onJobAdjAll);
   const firstAll = union(s.firstRun, s.firstReady);
   const target = sum("target", true);
+  // 汇总净缺口：只加负数（缺口），超编单独统计，不抵别的片区
+  const nets = rows.map((r) => r.net).filter((v) => v != null);
+  const netTotal = nets.length ? nets.reduce((a, v) => a + Math.min(v, 0), 0) : null;
+  const surplus = nets.length ? nets.reduce((a, v) => a + Math.max(v, 0), 0) : null;
+  const defAreas = rows.filter((r) => r.net != null && r.net < 0).length;
   const total = {
-    teamId: "*", name: "", agency: scaleGlobalAgency(),
-    onJob: onJobAll, entry: sum("entry"), leave: sum("leave"), firstRun: firstAll,
-    effective: effAll, target,
-    recruit: sum("recruit", true), gap: sum("gap", true),
-    rate: ready && effAll !== null && target && target > 0 ? effAll / target : null,
-    net: ready && effAll !== null && target !== null ? effAll - target : null
+    teamId: "*", name: "", agency: scaleGlobalAgency(), isTotal: true,
+    onJob: onJobAll, onJobBase: onJobAllBase, onJobAdj: onJobAdjAll,
+    effective: effAll, effBase: effAllBase, effAdj: effAdjAll,
+    entry: sum("entry"), leave: sum("leave"), firstRun: firstAll,
+    target, recruit: sum("recruit", true), gap: sum("gap", true),
+    rate: onJobAll != null && target && target > 0 ? onJobAll / target : null,
+    net: netTotal, surplus, defAreas
   };
   return { rows, total };
 }
@@ -1228,12 +1264,46 @@ function scaleCell(field, r) {
   const v = r[field];
   const attrs = ` data-row="${esc(r.teamId)}" data-cell="${field}"`;
   if (v == null) return { text: "—", cls: "num c-empty", attrs };
-  if (field === "rate") return { text: Math.round(v * 100) + "%", cls: "num", attrs };
+  if (field === "rate") {
+    return {
+      text: Math.round(v * 100) + "%", cls: "num", attrs,
+      title: "规模达成率 = 在职规模 ÷ 规模目标"
+    };
+  }
   if (field === "net") {
     const cls = v < 0 ? " cell-neg" : (v > 0 ? " cell-pos" : "");
-    return { text: (v > 0 ? "+" : "") + int(v), cls: "num" + cls, attrs };
+    const title = r.isTotal
+      ? `汇总净缺口 = 各商圈片「在职规模 − 规模目标」里负数的合计 = ${int(v)}` +
+        (r.surplus ? `；另有超编 +${int(r.surplus)} 人，不能抵其他商圈片的缺口` : "")
+      : "净缺口 = 在职规模 − 规模目标";
+    return { text: (v > 0 ? "+" : "") + int(v), cls: "num" + cls, attrs, title };
+  }
+  if (field === "onJob" || field === "effective") {
+    const adj = field === "onJob" ? r.onJobAdj : r.effAdj;
+    const base = field === "onJob" ? r.onJobBase : r.effBase;
+    const html = int(v) + (adj
+      ? `<sup class="wf-adj-mark">${adj > 0 ? "+" : ""}${int(adj)}</sup>` : "");
+    const tip = adj
+      ? `自动 ${int(base)} ${adj > 0 ? "＋" : "−"} 手动 ${int(Math.abs(adj))} = ${int(v)}；右键可继续调整`
+      : (r.isTotal ? "汇总 = 各商圈片合计（含手动增减）；请在明细行右键调整"
+        : "右键可手动增加 / 减少 n 人");
+    const cls = "num wf-adjable" + (r.isTotal ? " wf-adj-total" : "");
+    return { text: int(v), html, cls, attrs: attrs + ` data-adj="${field}"`, title: tip };
+  }
+  if (field === "entry" || field === "firstRun" || field === "leave") {
+    const has = num(v) > 0;
+    const cls = "num" + (has ? " wf-people" : "");
+    const tip = has
+      ? (field === "entry" ? "点击查看今日入职骑手明细"
+        : field === "leave" ? "点击查看今日离职骑手明细" : "点击查看今日首跑骑手明细")
+      : "";
+    return { text: int(v), cls, attrs: attrPlus(attrs, has, field), title: tip };
   }
   return { text: int(v), cls: "num", attrs };
+}
+/** 有数值时给单元格挂「点开骑手明细」的标记，0 不挂（点了也没内容）。 */
+function attrPlus(attrs, on, field) {
+  return on ? attrs + ` data-people="${field}"` : attrs;
 }
 function scaleEditCell(r, field, numeric, isTotal) {
   const v = r[field];
@@ -1254,7 +1324,8 @@ function scaleRowHtml(r, isTotal) {
     : scaleEditCell(r, field, true, isTotal);
   const c = (field) => {
     const d = scaleCell(field, r);
-    return `<td class="${d.cls}"${d.attrs}>${esc(d.text)}</td>`;
+    return `<td class="${d.cls}"${d.attrs}${d.title ? ` title="${esc(d.title)}"` : ""}>` +
+      (d.html || esc(d.text)) + "</td>";
   };
   const bucket = state.scale.manual[scaleWeek()] || {};   // 只读，别为渲染创建空周次
   const first = isTotal
@@ -1338,6 +1409,198 @@ function bindFirstDetail() {
   });
   document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !p.hidden) closeFirstDetail(); });
 }
+// ------------------------------------- v3.37.0 三类人数的骑手明细 / 两类规模的手动增减
+const SCALE_PEOPLE = {
+  entry: { title: "今日入职", col: "入职时间", tip: "人资名单 entryTime 为今天" },
+  leave: { title: "今日离职", col: "离职时间", tip: "人资名单 leaveTime 为今天" },
+  firstRun: { title: "今日首跑", col: "今日完单", tip: "今日完单>0 且对比窗口内从无完单" }
+};
+let peopleState = { kind: "entry", key: "*" };
+function scaleAreaNameOf(key) {
+  if (!key || key === "*") return "全部商圈片";
+  const g = (state.scale.areas || []).find((x) => x.key === key);
+  return g ? g.name : key;
+}
+/** 站点 id → 商圈片（人资名单只有 departmentId，要用站点列表翻译成商圈片）。 */
+function scaleAreaOfTeam(tid) {
+  const id = normId(tid);
+  const t = (state.scale.teams || []).find((x) => normId(x.id) === id);
+  return t ? scaleAreaOfSite(t.name) : "";
+}
+/** 今日入职 / 离职：人资名单里 entryTime / leaveTime 落在今天的骑手。 */
+function scaleStaffPeople(kind, key) {
+  const today = todayYmd();
+  const out = [];
+  for (const s of staffMap(state.staffList || []).values()) {
+    const raw = String((kind === "entry" ? s.entryTime : s.leaveTime) || "");
+    if (raw.slice(0, 10) !== today) continue;
+    const area = scaleAreaOfTeam(s.departmentId) || "未识别站点";
+    if (key && key !== "*" && area !== key) continue;
+    out.push({
+      rid: normId(s.knightId == null ? s.id : s.knightId),
+      name: String(s.staffName || s.knightName || ""),
+      area, time: raw.slice(5, 16).replace("T", " "), orders: null
+    });
+  }
+  return out;
+}
+/** 今日首跑：直接复用逐人判定明细里「计入首跑」的那批人。 */
+function scaleFirstPeople(key) {
+  return (state.scale.firstDiag || [])
+    .filter((x) => x.status === "new" && (!key || key === "*" || x.area === key))
+    .map((x) => ({ rid: x.rid, name: x.name, area: x.area, time: "", orders: x.orders }));
+}
+function scalePeopleRows() {
+  const { kind, key } = peopleState;
+  const list = kind === "firstRun" ? scaleFirstPeople(key) : scaleStaffPeople(kind, key);
+  const q = String(($("sp-search") || {}).value || "").trim().toLowerCase();
+  const hit = !q ? list : list.filter((x) =>
+    String(x.name || "").toLowerCase().includes(q) || String(x.rid).includes(q)
+    || String(x.area || "").toLowerCase().includes(q));
+  return hit.sort((a, b) =>
+    String(a.area || "").localeCompare(String(b.area || ""), "zh-CN")
+    || String(a.name || a.rid).localeCompare(String(b.name || b.rid), "zh-CN"));
+}
+function renderScalePeople() {
+  const p = $("scale-people");
+  if (!p) return;
+  const { kind, key } = peopleState;
+  const meta = SCALE_PEOPLE[kind] || SCALE_PEOPLE.entry;
+  const all = kind === "firstRun" ? scaleFirstPeople(key) : scaleStaffPeople(kind, key);
+  const rows = scalePeopleRows();
+  const title = $("sp-title");
+  if (title) title.textContent = `${meta.title} · ${scaleAreaNameOf(key)} · ${all.length} 人`;
+  const sum = $("sp-sum");
+  if (sum) {
+    sum.textContent = `${meta.title}共 ${all.length} 人 ｜ 口径：${meta.tip}` +
+      (all.length ? `；按商圈片列出，点表格里某个片区的数字只看该片区，点汇总行看全部。` : "。");
+  }
+  const col = $("sp-col4");
+  if (col) col.textContent = meta.col;
+  const hint = $("sp-hint");
+  if (hint) hint.textContent = kind === "firstRun"
+    ? "历史按骑手全局对比（换站点不算首跑），已排除离职状态"
+    : "来源：人资综合服务 → 成员管理（全部状态）";
+  const box = $("sp-body");
+  if (!box) return;
+  box.innerHTML = rows.length ? rows.map((x) => `<tr>` +
+    `<td class="sfd-name">${esc(x.name || "未命名")}<em>${esc(x.rid)}</em></td>` +
+    `<td>${esc(x.rid)}</td><td>${esc(x.area || "未识别站点")}</td>` +
+    `<td>${kind === "firstRun" ? int(x.orders) : esc(x.time || "—")}</td></tr>`).join("")
+    : `<tr><td colspan="4" class="c-empty">没有匹配的骑手</td></tr>`;
+}
+function openScalePeople(kind, key) {
+  const p = $("scale-people");
+  if (!p) return;
+  closeScaleSettings(); closeScaleAdj(); closeFirstDetail(); closePop();
+  peopleState = { kind: SCALE_PEOPLE[kind] ? kind : "entry", key: key || "*" };
+  const s = $("sp-search");
+  if (s) s.value = "";
+  renderScalePeople();
+  p.hidden = false;
+}
+function closeScalePeople() { const p = $("scale-people"); if (p) p.hidden = true; }
+function bindScalePeople() {
+  const tb = $("wf-scale-table"), p = $("scale-people");
+  if (!tb || !p) return;
+  tb.addEventListener("click", (e) => {
+    const td = e.target && e.target.closest ? e.target.closest("td[data-people]") : null;
+    if (!td) return;
+    e.stopPropagation();
+    openScalePeople(td.dataset.people, td.dataset.row);
+  });
+  for (const id of ["sp-close", "sp-done"]) {
+    const el = $(id);
+    if (el) el.addEventListener("click", closeScalePeople);
+  }
+  const search = $("sp-search");
+  if (search) search.addEventListener("input", renderScalePeople);
+  document.addEventListener("click", (e) => {
+    if (p.hidden || p.contains(e.target)) return;
+    if (e.target && e.target.closest && e.target.closest("td[data-people]")) return;
+    closeScalePeople();
+  });
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !p.hidden) closeScalePeople(); });
+}
+const adjState = { key: "", field: "onJob" };
+function adjFieldLabel(field) { return field === "eff" ? "有效出勤规模" : "在职规模"; }
+function renderAdjSum() {
+  const box = $("adj-sum");
+  const { key, field } = adjState;
+  const base = field === "eff"
+    ? (state.scale.effective.get(key) || new Set()).size
+    : (state.scale.onJob.get(key) || new Set()).size;
+  const adj = scaleAdj(key, field);
+  const now = Math.max(0, base + adj);
+  const t = $("adj-title");
+  if (t) t.textContent = `${adjFieldLabel(field)} · ${scaleAreaNameOf(key)}`;
+  if (!box) return;
+  box.innerHTML = `自动取数 <b>${int(base)}</b> 人` +
+    (adj ? ` ${adj > 0 ? "＋" : "−"} 手动 <b>${int(Math.abs(adj))}</b> 人` : "（暂未手动调整）") +
+    ` = 当前 <b>${int(now)}</b> 人`;
+}
+function openScaleAdj(td) {
+  const p = $("scale-adj");
+  if (!p) return;
+  adjState.key = td.dataset.row;
+  adjState.field = td.dataset.adj === "eff" ? "eff" : "onJob";
+  closeScaleSettings(); closeScalePeople(); closeFirstDetail(); closePop();
+  renderAdjSum();
+  const n = $("adj-n");
+  if (n) n.value = "1";
+  p.hidden = false;
+  const r = td.getBoundingClientRect();
+  const w = p.offsetWidth || 306, h = p.offsetHeight || 200;
+  const x = Math.min(Math.max(8, r.left), Math.max(8, window.innerWidth - w - 8));
+  let y = r.bottom + 6;
+  if (y + h > window.innerHeight - 8) y = Math.max(8, r.top - h - 6);
+  p.style.left = Math.round(x) + "px";
+  p.style.top = Math.round(y) + "px";
+}
+function closeScaleAdj() { const p = $("scale-adj"); if (p) p.hidden = true; }
+function applyScaleAdj(sign) {
+  const nEl = $("adj-n");
+  const n = Math.max(1, Math.round(Math.abs(Number(nEl && nEl.value) || 0)) || 1);
+  const cur = scaleAdj(adjState.key, adjState.field);
+  setScaleAdj(adjState.key, adjState.field, cur + sign * n);
+  renderScale();
+  renderAdjSum();
+}
+function resetScaleAdj() {
+  setScaleAdj(adjState.key, adjState.field, 0);
+  renderScale();
+  renderAdjSum();
+}
+function bindScaleAdj() {
+  const tb = $("wf-scale-table"), p = $("scale-adj");
+  if (!tb || !p) return;
+  tb.addEventListener("contextmenu", (e) => {
+    const td = e.target && e.target.closest ? e.target.closest("td[data-adj]") : null;
+    if (!td) return;
+    e.preventDefault();
+    if (td.dataset.row === "*") {
+      showNotice("汇总行 = 各商圈片合计（含手动增减），请在商圈片明细行上右键调整。", "blue");
+      return;
+    }
+    openScaleAdj(td);
+  });
+  for (const id of ["adj-close"]) {
+    const el = $(id);
+    if (el) el.addEventListener("click", closeScaleAdj);
+  }
+  const plus = $("adj-plus"), minus = $("adj-minus"), reset = $("adj-reset");
+  if (plus) plus.addEventListener("click", () => applyScaleAdj(1));
+  if (minus) minus.addEventListener("click", () => applyScaleAdj(-1));
+  if (reset) reset.addEventListener("click", resetScaleAdj);
+  const n = $("adj-n");
+  if (n) n.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); applyScaleAdj(1); } });
+  document.addEventListener("click", (e) => {
+    if (p.hidden || p.contains(e.target)) return;
+    if (e.target && e.target.closest && e.target.closest("td[data-adj]")) return;
+    closeScaleAdj();
+  });
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !p.hidden) closeScaleAdj(); });
+}
 function renderScale() {
   const box = $("wf-scale-table");
   if (!box) return;
@@ -1390,7 +1653,11 @@ function renderScale() {
       `<b>今日首跑</b> = 今日「完单量&gt;0」的出勤骑手里，T-${s.firstDays}~T-1（${esc(scaleShortFirstRange())}）` +
       `从未有过完单的「新增」骑手，历史按骑手全局对比（换站点 / 商圈片不算新增）、按今日所在商圈片计数` +
       `、汇总行再跨片区去重，同样排除离职；` +
-      `<b>规模达成率 = 有效出勤 ÷ 规模目标</b>，<b>净缺口 = 有效出勤 − 规模目标</b>。` +
+      `<b>规模达成率 = 在职规模 ÷ 规模目标</b>，<b>净缺口 = 在职规模 − 规模目标</b>；` +
+      `汇总行的净缺口<b>只累加缺口（负数）</b>，某片区超编的人不抵别的片区缺口` +
+      (total.surplus ? `（当前超编场景合计 +${int(total.surplus)} 人，未参与汇总）` : "") + `。` +
+      `<b>在职规模 / ${esc(heads[4][0])}</b> 单元格<u>右键</u>可手动增加 / 减少 n 人（按 ${esc(week)}、按商圈片记在本机，汇总行自动合计）；` +
+      `点 <b>今日入职 / 今日首跑 / 今日离职</b> 的数字可看骑手明细。` +
       `浅黄格（渠道名称 / 规模目标 / 招募目标 / 渠道招聘缺口）点击即可填写，按 ${esc(week)} 记在本机；` +
       `汇总行自动合计。数据源：站点列表 / 人资名单 / 线索结果明细 / 历史出勤明细 ` +
       `<code>exportStatisticsDetail</code>（T-N~T-1）＋ 今日实时考勤快照 ` +
@@ -1416,8 +1683,9 @@ function updateScaleDerived() {
     const r = td.dataset.row === "*" ? total : byId[td.dataset.row];
     if (!r || !td.dataset.cell) continue;
     const d = scaleCell(td.dataset.cell, r);
-    td.textContent = d.text;
+    if (d.html) td.innerHTML = d.html; else td.textContent = d.text;
     td.className = d.cls;
+    if (d.title) td.title = d.title; else td.removeAttribute("title");
   }
 }
 /** 汇总数据：站点→商圈片 / 人资统计 / 历史窗口 + 当天两段考勤明细；失败只提示，不挡主表。 */
@@ -2287,6 +2555,11 @@ window.__WF__ = { state, COLS, PAGE_COLS, buildRows, attachDetail, visibleRows, 
   openScaleSettings, closeScaleSettings, applyScaleSettings, bindScaleSettings,
   scaleDiagCount, firstDetailRows, renderFirstDetail, openFirstDetail, closeFirstDetail, bindFirstDetail,
   SCALE_FIRST_STATUS,
+  // v3.37.0：右键手动增减 + 三类人数骑手明细
+  scaleAdj, setScaleAdj, scaleAdjSum, adjFieldLabel, renderAdjSum, openScaleAdj, closeScaleAdj,
+  applyScaleAdj, resetScaleAdj, bindScaleAdj,
+  scaleAreaNameOf, scaleAreaOfTeam, scaleStaffPeople, scaleFirstPeople, scalePeopleRows,
+  renderScalePeople, openScalePeople, closeScalePeople, bindScalePeople, SCALE_PEOPLE,
   SCALE_LS, SCALE_LS_DAYS, SCALE_DAYS, SCALE_ONJOB_DAYS, SCALE_FIRST_DAYS,
   SCALE_DAYS_MIN, SCALE_DAYS_MAX, SCALE_ONJOB_DAYS_MIN, SCALE_ONJOB_DAYS_MAX,
   SCALE_FIRST_DAYS_MIN, SCALE_FIRST_DAYS_MAX,
@@ -2296,6 +2569,8 @@ window.__WF__ = { state, COLS, PAGE_COLS, buildRows, attachDetail, visibleRows, 
 (async function init() {
   bindScaleSettings();               // v3.34.0 / v3.35.0：规模设置按钮（三个可调天数）
   bindFirstDetail();                  // v3.35.0：点「今日首跑」表头看逐人判定明细
+  bindScalePeople();                  // v3.37.0：点今日入职 / 首跑 / 离职的数字看骑手明细
+  bindScaleAdj();                     // v3.37.0：在职规模 / 有效出勤规模 右键手动增减
   bindScaleEvents();                 // v3.31.0：先设好汇总默认区间（天数可配），再渲染
   $("month-picker").value = state.month;
   $("month-picker").min = shiftMonth(curMonth(), -MONTHS_BACK);

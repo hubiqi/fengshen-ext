@@ -229,6 +229,26 @@ table.tbl.wf-scale-table td.cell-pos { background: #E3F4E8 !important; color: #1
 table.tbl.wf-scale-table td.c-empty { color: #9CA3AF; }
 .wf-scale-loading { color: #6B7280; font-size: 11.5px; padding: 8px 2px; }
 
+/* ---------------------------------------------------------------- v3.37.0
+   两类规模可右键手动增减（单元格里带蓝色小上标），三类人数可点开骑手明细。
+   两个浮层都挂在 body 上，复制图片导出时不会出现。 */
+table.tbl.wf-scale-table tbody td.wf-adjable { cursor: context-menu; }
+table.tbl.wf-scale-table tbody td sup.wf-adj-mark { font-size: 9.5px; font-weight: 700;
+  color: #1D4ED8; margin-left: 1px; vertical-align: super; }
+table.tbl.wf-scale-table tbody td.wf-people { cursor: pointer;
+  text-decoration: underline dotted; text-underline-offset: 3px; }
+table.tbl.wf-scale-table tbody td.wf-people:hover { background: #EFF6FF; }
+.wf-pop.wf-scale-adj { width: 352px; }
+.wf-scale-adj .adj-row { display: flex; align-items: center; gap: 6px; margin: 10px 0 4px;
+  flex-wrap: nowrap; }
+.wf-scale-adj .adj-row label { font-weight: 700; color: #1F2937; white-space: nowrap; flex: 0 0 auto; }
+.wf-scale-adj .adj-row input.adj-n { width: 62px; height: 28px; padding: 0 7px;
+  border: 1px solid #C7D2E5; border-radius: 5px; font-size: 12px; text-align: center; }
+.wf-scale-adj .adj-row button { padding: 4px 10px; font-size: 11.5px; white-space: nowrap; }
+.wf-scale-adj .ss-note { margin: 9px 0 2px; padding: 7px 9px; border-radius: 5px;
+  background: #F3F6FC; font-size: 11.5px; color: #374151; line-height: 1.6; }
+.wf-pop.wf-scale-people { top: 12%; width: 660px; }
+
 @media (max-width: 1260px) {
   .wf-summary, .wf-note, .wf-scale { padding-left: 12px; padding-right: 12px; }
 }
