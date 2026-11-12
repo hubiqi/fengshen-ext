@@ -23,7 +23,8 @@
     workforce: HAS_EXT ? chrome.runtime.getURL("workforce.html") : "workforce.html",
     schedule: HAS_EXT ? chrome.runtime.getURL("schedule.html") : "schedule.html",
     rent: HAS_EXT ? chrome.runtime.getURL("rent.html") : "rent.html",
-    realtime: HAS_EXT ? chrome.runtime.getURL("realtime.html") : "realtime.html"
+    realtime: HAS_EXT ? chrome.runtime.getURL("realtime.html") : "realtime.html",
+    quality: HAS_EXT ? chrome.runtime.getURL("quality.html") : "quality.html"
   };
   const POS_KEY = "wb_assess_launcher_pos";   // 只有一颗总按钮，位置只记一份
   const DEF_TOP = DEFAULT_TOP;
@@ -33,7 +34,8 @@
     workforce: { title: "运力模块", sub: "骑手账单 · 人资在职 · 三方人资" },
     schedule: { title: "排班模块", sub: "每日排班缺口 · 排班率 · 4排班占比" },
     rent: { title: "物资租用", sub: "电动车 / 住宿 · 逐条与批量登记" },
-    realtime: { title: "实时出勤监控", sub: "商圈片 应排 / 实排 / 在线 / 异常 · 30 秒自动刷新" }
+    realtime: { title: "实时出勤监控", sub: "商圈片 应排 / 实排 / 在线 / 异常 · 30 秒自动刷新" },
+    quality: { title: "质量运营", sub: "整商 / 商圈片 / 站点 / 骑手 · 炸班次 / 坏单日期矩阵" }
   };
 
   // ---------------------------------------------------------------- 样式（Shadow DOM 隔离）
@@ -100,6 +102,7 @@
   .wb-menu-item.schedule .mi-ico { background: #0E7490; }
   .wb-menu-item.rent .mi-ico { background: #C2410C; }
   .wb-menu-item.realtime .mi-ico { background: #1D4ED8; }
+  .wb-menu-item.quality .mi-ico { background: #0D9488; }
   .wb-menu-item .mi-sub { display: block; font-size: 10px; font-weight: 400; color: #6B7280;
     margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
@@ -236,6 +239,10 @@
         <span class="mi-ico">${ICON_RT}</span>
         <span>实时出勤监控<span class="mi-sub">商圈片 应排 / 实排 / 在线 / 异常</span></span>
       </button>
+      <button class="wb-menu-item quality" id="wbMenuQl">
+        <span class="mi-ico">${ICON_RT}</span>
+        <span>质量运营<span class="mi-sub">炸班次 / 坏单 · 日期矩阵</span></span>
+      </button>
     </div>
     <div class="wb-mask" id="wbMask">
       <div class="wb-panel" id="wbPanel">
@@ -250,6 +257,7 @@
             <button class="wb-tab" id="wbTabSch" title="切到排班模块（独立页面）">排班模块</button>
             <button class="wb-tab" id="wbTabRent" title="切到物资租用（独立页面）">物资租用</button>
             <button class="wb-tab" id="wbTabRt" title="切到实时出勤监控（独立页面）">实时出勤</button>
+            <button class="wb-tab" id="wbTabQl" title="切到质量运营（独立页面）">质量运营</button>
           </div>
           <button class="wb-btn" id="wbReload" title="重新拉取当前看板的数据">↻ 刷新</button>
           <button class="wb-btn" id="wbNewTab" title="把当前看板在独立标签页打开">↗ 新标签打开</button>
@@ -262,6 +270,7 @@
         <iframe class="wb-frame" id="wbFrameSch" title="风神排班模块" allow="clipboard-write *" allowtransparency="false" hidden></iframe>
         <iframe class="wb-frame" id="wbFrameRent" title="风神物资租用" allow="clipboard-write *" allowtransparency="false" hidden></iframe>
         <iframe class="wb-frame" id="wbFrameRt" title="风神实时出勤监控" allow="clipboard-write *" allowtransparency="false" hidden></iframe>
+        <iframe class="wb-frame" id="wbFrameQl" title="风神质量运营" allow="clipboard-write *" allowtransparency="false" hidden></iframe>
       </div>
     </div>`;
   if (root === host) {
@@ -272,9 +281,9 @@
   }
   const q = (id) => root.getElementById ? root.getElementById(id) : document.getElementById(id);
   const ball = q("wbBall"), tip = q("wbTip"), mask = q("wbMask"), menu = q("wbMenu");
-  const frames = { assess: q("wbFrame"), attendance: q("wbFrameAtt"), workforce: q("wbFrameWf"), schedule: q("wbFrameSch"), rent: q("wbFrameRent"), realtime: q("wbFrameRt") };
-  const tabs = { assess: q("wbTabAssess"), attendance: q("wbTabAtt"), workforce: q("wbTabWf"), schedule: q("wbTabSch"), rent: q("wbTabRent"), realtime: q("wbTabRt") };
-  const MODES = ["assess", "attendance", "workforce", "schedule", "rent", "realtime"];
+  const frames = { assess: q("wbFrame"), attendance: q("wbFrameAtt"), workforce: q("wbFrameWf"), schedule: q("wbFrameSch"), rent: q("wbFrameRent"), realtime: q("wbFrameRt"), quality: q("wbFrameQl") };
+  const tabs = { assess: q("wbTabAssess"), attendance: q("wbTabAtt"), workforce: q("wbTabWf"), schedule: q("wbTabSch"), rent: q("wbTabRent"), realtime: q("wbTabRt"), quality: q("wbTabQl") };
+  const MODES = ["assess", "attendance", "workforce", "schedule", "rent", "realtime", "quality"];
 
   // ---------------------------------------------------------------- 自动更新角标（挂在总按钮上）
   let updateState = null;
@@ -420,6 +429,7 @@
   q("wbMenuSch").addEventListener("click", () => { setMenu(false); setOpen(true, "schedule"); });
   q("wbMenuRent").addEventListener("click", () => { setMenu(false); setOpen(true, "rent"); });
   q("wbMenuRt").addEventListener("click", () => { setMenu(false); setOpen(true, "realtime"); });
+  q("wbMenuQl").addEventListener("click", () => { setMenu(false); setOpen(true, "quality"); });
   // 点页面其他地方 / 按 Esc：先收起菜单，再收起面板
   document.addEventListener("pointerdown", (e) => {
     if (!menuOpen) return;
@@ -437,6 +447,7 @@
   tabs.schedule.addEventListener("click", () => setOpen(true, "schedule"));
   tabs.rent.addEventListener("click", () => setOpen(true, "rent"));
   tabs.realtime.addEventListener("click", () => setOpen(true, "realtime"));
+  tabs.quality.addEventListener("click", () => setOpen(true, "quality"));
   q("wbReload").addEventListener("click", () => {
     frames[mode].src = PAGES[mode] + "?_t=" + Date.now();
   });
@@ -454,7 +465,7 @@
   window.addEventListener("message", (e) => {
     if (e.source !== frames.assess.contentWindow && e.source !== frames.attendance.contentWindow &&
         e.source !== frames.workforce.contentWindow && e.source !== frames.schedule.contentWindow &&
-        e.source !== frames.rent.contentWindow) return;
+        e.source !== frames.rent.contentWindow && e.source !== frames.quality.contentWindow) return;
     const d = e.data;
     if (!d || d.__wbAssess !== true) return;
     if (d.type === "CLOSE") setOpen(false);

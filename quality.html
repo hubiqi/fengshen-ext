@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>质量运营 · 炸班次 / 坏单 日期矩阵</title>
+  <link rel="stylesheet" href="dashboard.css">
+  <link rel="stylesheet" href="quality.css">
+</head>
+<body class="ql-page">
+
+<!-- 工具条 -->
+<div class="toolbar" id="toolbar">
+  <div class="tb-left">
+    <strong>质量运营</strong>
+    <span class="tb-ver" id="tb-ver"></span>
+    <span class="tb-sub" id="sub">正在读取当前浏览器登录态…</span>
+    <span class="ql-state" id="ql-state"></span>
+  </div>
+  <div class="tb-right">
+    <div class="date-pick">
+      <button id="btn-prev-month" class="date-step" type="button" title="上一个月" aria-label="上一个月"></button>
+      <input type="month" id="month-picker" aria-label="月份">
+      <button id="btn-next-month" class="date-step" type="button" title="下一个月" aria-label="下一个月"></button>
+    </div>
+    <button id="btn-this-month" class="ghost" title="切回当前月份">本月</button>
+    <div class="ql-dims" role="group" aria-label="维度切换">
+      <button class="ql-dim active" id="dim-agency" data-dim="agency" title="整商：全部站点汇总">整商</button>
+      <button class="ql-dim" id="dim-area" data-dim="area" title="按商圈片查看">商圈片</button>
+      <button class="ql-dim" id="dim-site" data-dim="site" title="按站点查看">站点</button>
+      <button class="ql-dim" id="dim-rider" data-dim="rider" title="按骑手查看">骑手</button>
+    </div>
+    <select id="ql-scope" class="wf-select" aria-label="范围" hidden></select>
+    <div class="ql-views" role="group" aria-label="视图切换">
+      <button class="ql-view active" id="view-shift" data-view="shift" title="每个日期 × 每个班次：绿 = 有排班且全部达标，红 = 有排班且有未达标，点击看骑手明细">炸班次</button>
+      <button class="ql-view" id="view-bad" data-view="bad" title="每个日期 × 坏单类型：绿 = 无坏单，红 = 有坏单（显示单数），点击看订单明细">坏单</button>
+    </div>
+    <button id="btn-refresh" class="primary" title="重新拉取本月出勤明细与坏单明细">立即刷新</button>
+  </div>
+</div>
+
+<div class="notice" id="notice" hidden></div>
+
+<div class="progress-wrap" id="progress-wrap" hidden>
+  <div class="progress"><div class="bar" id="bar"></div></div>
+  <span class="progress-text" id="progress-text">准备中…</span>
+</div>
+
+<main id="sheet">
+  <div class="ql-title" id="ql-title"></div>
+  <div class="tbl-scroll" id="matrix-wrap"></div>
+  <div class="doc-foot small" id="ql-foot"></div>
+</main>
+
+<!-- 单元格详情弹层（挂在 #sheet 外，不出现在导出画面里） -->
+<div class="ql-pop-mask" id="ql-pop-mask" hidden>
+  <div class="ql-pop" id="ql-pop" role="dialog" aria-modal="true">
+    <div class="ql-pop-head">
+      <strong id="ql-pop-title">明细</strong>
+      <button id="ql-pop-close" class="ghost" title="关闭（Esc）">×</button>
+    </div>
+    <div class="ql-pop-body" id="ql-pop-body"></div>
+  </div>
+</div>
+
+<script src="xlsx.js"></script>
+<script src="quality.js"></script>
+</body>
+</html>

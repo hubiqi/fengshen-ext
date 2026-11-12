@@ -51,6 +51,7 @@ jobs:
             schedule.html schedule.css schedule.js \
             rent.html rent.css rent.js \
             realtime.html realtime.css realtime.js \
+            quality.html quality.css quality.js \
             assess.js sync.js capture.js xlsx.js \
             scripts/hot-update.command \
             native/host.js install-native.command
