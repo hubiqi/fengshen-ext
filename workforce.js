@@ -40,6 +40,8 @@ const API_BILL = XT + "xtop.lpd.price.mng.zsSalaryBillQueryFs.pageQuerySalaryBil
 const API_CLUE = XT + "xtop.knight.task.mng.growth.knightRecruitResultRead.queryAgencyKnightRecruitResult/1.0";
 const API_STAFF = "https://app2-edu.ele.me/kunkka-svr/ehr/staff/knight/list";
 const API_ATT_DETAIL = XT + "xtop.fs.special.examine.exportStatisticsDetail/1.0";
+// v3.36.0：与「出勤达成」T0 同源 —— 实时考勤当日快照（忽略日期参数，永远返回当前实时数据）
+const API_ATT_LIVE = XT + "xtop.fs.special.realtimeattendance.exportAttendance/1.0";
 const API_KPI_DETAIL = XT + "xtop.performance.fs.opp.perfDetail.queryDetailList/1.0";
 const API_TEAMS = XT + "xtop.lpd.intelligentConfig.getTeamsAll/1.0";
 const SCALE_LS = "wb_wf_scale_v1";        // v3.31.0：手填的规模目标 / 招募目标 / 招聘缺口 / 渠道名称
@@ -212,7 +214,8 @@ const state = {
     effective: new Map(), onJob: new Map(), firstRun: new Map(), left: new Set(),
     firstDiag: [],                 // v3.35.0：今日首跑逐人判定明细（姓名 / 完单 / 排除原因）
     manual: loadScaleManual(), ready: false, onJobReady: false, firstReady: false,
-    sheets: null, loading: false, err: "", attAt: ""
+    sheets: null, todayRows: null, liveToday: false,
+    loading: false, err: "", attAt: ""
   },
   // 主表先出图，这两组明细异步补：失败只让对应列显示「—」，不阻断出表
   // 三组明细统一以「骑手id \u0001 站点id」为键（站点id 缺失时用 "*" 通配）
@@ -943,11 +946,14 @@ function scaleStaffStats(list, today) {
  *  · 计数按「今日所在商圈片 + 骑手」归类，汇总行调用方再跨片区去重；
  *  · 与两类规模一样排除人资名单里已离职 / 非在职状态的骑手；
  *  · 只看「完单量」，不看有效在线时长 / 是否达成 / 时段，也不依赖人资入职日期。
+ *  v3.36.0：今日骑手优先由 opts.todayRows 提供（T0 实时考勤快照解析结果）；
+ *  不传时仍可从 sheets 里找「考勤日期=今天」的行（快照失败时回退当天导出明细）。
  *  返回 Map(商圈片 -> Set(骑手id))，与 effective / onJob 的返回结构一致。 */
 function scaleFirstRunFromSheets(sheets, nameToId, today, start, end, opts) {
   const o = opts || {};
   const left = o.left || new Set();
   const diag = o.diag;                 // v3.35.0：可选的判定明细，供「今日首跑」表头点开自查
+  const todayRows = o.todayRows;       // v3.36.0：T0 实时快照的今日骑手（含姓名 / 商圈片 / 全天完单）
   const hist = new Set(), histDay = new Map();
   const todayByArea = new Map(), todayInfo = new Map();
   for (const sh of sheets || []) {
@@ -970,6 +976,7 @@ function scaleFirstRunFromSheets(sheets, nameToId, today, start, end, opts) {
       if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) continue;
       const isToday = day === today;
       if (!isToday && !(start && day >= start && end && day <= end)) continue;
+      if (isToday && todayRows) continue;              // v3.36.0：今日改由实时快照提供，避免重复/串数
       const name = iName === undefined ? "" : String(r[iName] == null ? "" : r[iName]).trim();
       const siteName = iN === undefined ? "" : String(r[iN] == null ? "" : r[iN]).trim();
       let tid = iS !== undefined ? normId(r[iS]) : "";
@@ -995,6 +1002,23 @@ function scaleFirstRunFromSheets(sheets, nameToId, today, start, end, opts) {
       if (orders > 0) {                                  // 首跑只认完单量 > 0
         if (!todayByArea.has(key)) todayByArea.set(key, new Set());
         todayByArea.get(key).add(rid);
+      }
+    }
+  }
+  if (todayRows) {                                    // v3.36.0：T0 实时考勤快照的今日骑手
+    for (const r of todayRows) {
+      const key = r.area || ANY_SITE;
+      if (r.left) {
+        if (diag) todayInfo.set(r.rid, { rid: r.rid, name: r.name, site: r.site, area: key, orders: 0, left: true });
+        continue;
+      }
+      const prev = todayInfo.get(r.rid);
+      if (!prev || r.orders > prev.orders) {
+        todayInfo.set(r.rid, { rid: r.rid, name: r.name, site: r.site, area: key, orders: r.orders, left: false });
+      }
+      if (r.orders > 0) {
+        if (!todayByArea.has(key)) todayByArea.set(key, new Set());
+        todayByArea.get(key).add(r.rid);
       }
     }
   }
@@ -1093,6 +1117,61 @@ async function loadScaleSheets(start, end, teamIds) {
     if (segs.length > 1) await new Promise((r) => setTimeout(r, 180));
   }
   return sheets;
+}
+/** v3.36.0：T0 实时考勤快照（与「出勤达成」的 loadAttendanceSheets('live') 同一接口）。
+ *  exportAttendance/1.0 实测忽略 startDate/endDate，永远返回「当前实时」全站 xlsx，
+ *  所以只能用于今天；历史对比必须继续走 exportStatisticsDetail。 */
+async function loadScaleLiveSheets(teamIds, today) {
+  const j = await request(API_ATT_LIVE, "POST", {
+    params: { request: { teamIds, startDate: today, endDate: today } }
+  });
+  const d = (j && j.result && j.result.data) || {};
+  const url = d.url || d.downloadUrl;
+  if (!url || !/^https?:/.test(String(url))) throw new Error("实时考勤快照未返回下载链接");
+  return await XLSX_READER.read(await fetchBinary(String(url)));
+}
+/** 从实时考勤快照里取「今天出勤的骑手」：按骑手 id 去重，
+ *  完单量取「全天完单量」与「时段完单量」的最大值（全天是当天累计，实时可用）。
+ *  返回数组 [{rid,name,site,area,orders,left}]，orders=0 的也保留以便诊断显示原因。 */
+function scaleTodayFromLiveSheets(liveSheets, nameToId, opts) {
+  const o = opts || {};
+  const left = o.left || new Set();
+  const byRid = new Map();
+  for (const sh of liveSheets || []) {
+    const rows = sh && sh.rows;
+    if (!rows || rows.length < 2) continue;
+    const col = Object.create(null);
+    rows[0].forEach((h, i) => {
+      const k = String(h == null ? "" : h).trim();
+      if (k && col[k] === undefined) col[k] = i;
+    });
+    const idx = (...names) => { for (const n of names) if (col[n] !== undefined) return col[n]; return undefined; };
+    const iR = idx("骑手id", "骑手ID", "骑手Id");
+    const iName = idx("姓名", "骑手姓名", "骑手名称");
+    const iN = idx("站点名称", "团队名称", "站点");
+    const iS = idx("站点ID", "站点id", "站点Id", "站点id");
+    const iFull = idx("全天完单量", "完单量");
+    const iPer = idx("时段完单量");
+    if (iR === undefined) continue;
+    for (const r of rows.slice(1)) {
+      const rid = normId(r[iR]);
+      if (!rid) continue;
+      const site = iN === undefined ? "" : String(r[iN] == null ? "" : r[iN]).trim();
+      const name = iName === undefined ? "" : String(r[iName] == null ? "" : r[iName]).trim();
+      // 快照里的「站点id」常是 9.17534432E8 这类科学计数法，商圈片以站点名称为准
+      const tid = (iS !== undefined ? normId(r[iS]) : "") || nameToId[site] || "";
+      const orders = Math.max(iFull === undefined ? 0 : num(r[iFull]),
+        iPer === undefined ? 0 : num(r[iPer]));
+      const prev = byRid.get(rid);
+      if (!prev || orders > prev.orders) {
+        byRid.set(rid, {
+          rid, name, site, orders, left: left.has(rid),
+          area: (o.areaOf ? o.areaOf(tid, site) : "") || tid || ANY_SITE
+        });
+      }
+    }
+  }
+  return [...byRid.values()];
 }
 /** 组装商圈片行与汇总行；两类人数在汇总行再跨片区按骑手全局去重，其余按片区相加。 */
 function computeScaleRows() {
@@ -1210,10 +1289,10 @@ function renderFirstDetail() {
   const diag = state.scale.firstDiag || [];
   if (sum) {
     sum.textContent = diag.length
-      ? `今日出勤明细 ${diag.length} 人 ｜ 计入首跑 ${scaleDiagCount("new")} ｜ ` +
+      ? `今日实时考勤快照 ${diag.length} 人 ｜ 计入首跑 ${scaleDiagCount("new")} ｜ ` +
         `窗口内已有完单 ${scaleDiagCount("old")} ｜ 今日完单=0 ${scaleDiagCount("no-order")} ｜ ` +
         `离职排除 ${scaleDiagCount("left")} ｜ 对比窗口 T-${state.scale.firstDays}~T-1`
-      : "没有取到今日出勤明细：当天的考勤明细通常要等结算才产出，可点「立即刷新」重试；" +
+      : "没有取到今日实时考勤快照（exportAttendance/1.0）：点「立即刷新」重试；" +
         "对比窗口（T-N~T-1）内有过完单的骑手也不算首跑。";
   }
   const q = $("sfd-search") ? $("sfd-search").value : "";
@@ -1296,7 +1375,9 @@ function renderScale() {
       ` · 按商圈片聚合（${int(rows.length)} 个商圈片 / ${int((s.teams || []).length)} 站点）` +
       `<span class="wf-scale-sub">口径：${esc(SCALE_MODE_LABEL[s.mode] || SCALE_MODE_LABEL.any)}` +
       ` · 在职规模 T-${s.onJobDays}~T-1（${esc(scaleShortOnJobRange())}）全天有效出勤` +
-      ` · 今日首跑对比 T-${s.firstDays}~T-1（${esc(scaleShortFirstRange())}）新增 · 两类规模均已排除离职` +
+      ` · 今日首跑对比 T-${s.firstDays}~T-1（${esc(scaleShortFirstRange())}）新增` +
+      ` · 今日骑手 ${s.liveToday ? "T0 实时考勤快照" : "当天明细"}` +
+      ` · 两类规模均已排除离职` +
       (s.attAt ? ` · 出勤数据 ${esc(s.attAt)}` : "") + "</span>";
   }
   const note = $("wf-scale-note");
@@ -1311,13 +1392,15 @@ function renderScale() {
       `、汇总行再跨片区去重，同样排除离职；` +
       `<b>规模达成率 = 有效出勤 ÷ 规模目标</b>，<b>净缺口 = 有效出勤 − 规模目标</b>。` +
       `浅黄格（渠道名称 / 规模目标 / 招募目标 / 渠道招聘缺口）点击即可填写，按 ${esc(week)} 记在本机；` +
-      `汇总行自动合计。数据源：站点列表 / 人资名单 / 线索结果明细 / 出勤明细 exportStatisticsDetail。` +
+      `汇总行自动合计。数据源：站点列表 / 人资名单 / 线索结果明细 / 历史出勤明细 ` +
+      `<code>exportStatisticsDetail</code>（T-N~T-1）＋ 今日实时考勤快照 ` +
+      `<code>exportAttendance/1.0</code>（T0，与「出勤达成」同源，含当天累计完单量，快照失败才回退当天明细）。` +
       `<br><b>今日首跑自查</b>：点表头「今日首跑」看逐人判定；` +
       (s.firstDiag && s.firstDiag.length
-        ? `今日出勤明细 ${int(s.firstDiag.length)} 人 → 计入 ${int(scaleDiagCount("new"))} 人 / ` +
+        ? `今日实时快照 ${int(s.firstDiag.length)} 人 → 计入 ${int(scaleDiagCount("new"))} 人 / ` +
           `对比窗口内已有完单 ${int(scaleDiagCount("old"))} 人 / 今日完单=0 ${int(scaleDiagCount("no-order"))} 人 / ` +
           `离职排除 ${int(scaleDiagCount("left"))} 人。`
-        : `今日出勤明细暂未取到（当天数据通常要等结算），首跑会显示「—」或 0。`) +
+        : `今日实时考勤快照暂未取到，点「立即刷新」重试；首跑会显示「—」或 0。`) +
       (s.loading ? ` <span class="wf-scale-loading">正在读取汇总数据…</span>` : "") +
       (s.err ? ` <span class="wf-scale-loading">汇总取数提示：${esc(s.err)}（其余数据不受影响）</span>` : "");
   }
@@ -1362,12 +1445,13 @@ async function loadScaleData(gen) {
     const [fs, fe] = scaleFirstRange();
     const today = todayYmd();
     const ids = base.map((t) => t.id);
-    // 三类口径的历史区间都止于 T-1：取最早的起点一次导出共用，段间已有错峰；
-    // 当天明细单独一段，若当天还没产出，只让「今日首跑」显示 —，不影响两类规模。
+    // 三类口径的历史区间都止于 T-1：取最早的起点一次导出共用，段间已有错峰。
+    // v3.36.0：今日骑手改走「出勤达成」T0 同款实时考勤快照 exportAttendance（当天完单实时可得）；
+    // 快照不可用时才回退当天的 exportStatisticsDetail 明细（可能尚未结算）。
     const last = shiftDay(today, -1);
     const histStart = [s.start, os, fs].filter(Boolean).sort()[0] || fs;
     const histEnd = [s.end, oe, fe, last].filter(Boolean).sort().pop() || last;
-    let hist = null, todays = null;
+    let hist = null, liveRows = null, todaySheets = null;
     try {
       // 与整月明细的导出请求错峰，避免同一个导出接口被并发限流
       await new Promise((r) => setTimeout(r, 120));
@@ -1382,13 +1466,24 @@ async function loadScaleData(gen) {
     }
     try {
       await new Promise((r) => setTimeout(r, 180));
-      todays = await loadScaleSheets(today, today, ids);
+      liveRows = scaleTodayFromLiveSheets(await loadScaleLiveSheets(ids, today), nameToId, opts);
+      s.liveToday = true;
     } catch (e) {
-      s.err = (s.err ? s.err + "；" : "") + "今日首跑：" + String((e && e.message) || e);
+      s.liveToday = false;
+      s.err = (s.err ? s.err + "；" : "") + "实时考勤快照：" + String((e && e.message) || e);
+      try {
+        await new Promise((r) => setTimeout(r, 180));
+        todaySheets = await loadScaleSheets(today, today, ids);
+        s.err += "（已回退当天导出明细，可能尚未结算）";
+      } catch (e2) {
+        s.err = (s.err ? s.err + "；" : "") + "今日首跑回退：" + String((e2 && e2.message) || e2);
+      }
     }
-    if (hist && todays) {
-      s.sheets = hist.concat(todays);
-      s.firstRun = scaleFirstRunFromSheets(s.sheets, nameToId, today, fs, fe, opts);
+    if (hist && (liveRows || todaySheets)) {
+      s.sheets = hist.concat(todaySheets || []);
+      s.todayRows = liveRows;
+      const firstOpts = liveRows ? Object.assign({}, opts, { todayRows: liveRows }) : opts;
+      s.firstRun = scaleFirstRunFromSheets(s.sheets, nameToId, today, fs, fe, firstOpts);
       s.firstReady = true;
     }
   } finally {
@@ -1397,14 +1492,15 @@ async function loadScaleData(gen) {
     renderScale();
   }
 }
-/** v3.35.0：明细补完后用已缓存的汇总出勤明细重算「今日首跑」，不重新请求网络。 */
+/** v3.36.0：明细补完后用已缓存的汇总出勤明细 + 今日实时快照重算「今日首跑」，不发请求。 */
 function refreshScaleFirstRun() {
   const s = state.scale;
   if (!s.sheets) return;
   const nameToId = Object.create(null);
   for (const t of (s.teams || [])) nameToId[t.name] = t.id;
   const [fs, fe] = scaleFirstRange();
-  s.firstRun = scaleFirstRunFromSheets(s.sheets, nameToId, todayYmd(), fs, fe, scaleSheetOpts(s));
+  const opts = Object.assign({}, scaleSheetOpts(s), s.todayRows ? { todayRows: s.todayRows } : {});
+  s.firstRun = scaleFirstRunFromSheets(s.sheets, nameToId, todayYmd(), fs, fe, opts);
   s.firstReady = true;
   renderScale();
 }
@@ -2124,13 +2220,19 @@ window.__SET_WORKFORCE__ = (obj) => {
     const opts = scaleSheetOpts(sc);
     const [os, oe] = Array.isArray(o.onJobRange) ? o.onJobRange : scaleOnJobRange();
     const [fs, fe] = Array.isArray(o.firstRange) ? o.firstRange : scaleFirstRange();
+    const nameToId = Object.create(null);
+    for (const t of sc.teams) nameToId[t.name] = t.id;
+    // v3.36.0：真机回归可直接注入 T0 实时考勤快照样本（与线上 exportAttendance 的列一致）
+    sc.todayRows = Array.isArray(o.liveSheets)
+      ? scaleTodayFromLiveSheets(o.liveSheets, nameToId, opts)
+      : (Array.isArray(o.todayRows) ? o.todayRows : null);
+    sc.liveToday = !!sc.todayRows;
     if (Array.isArray(o.sheets)) {
-      const nameToId = Object.create(null);
-      for (const t of sc.teams) nameToId[t.name] = t.id;
       sc.effective = scaleEffectiveFromSheets(o.sheets, sc.mode, nameToId, sc.start, sc.end, opts);
       sc.onJob = scaleOnJobFromSheets(o.sheets, sc.mode, nameToId, os, oe, opts);
       sc.onJobReady = true;
-      sc.firstRun = scaleFirstRunFromSheets(o.sheets, nameToId, o.today || todayYmd(), fs, fe, opts);
+      const firstOpts = sc.todayRows ? Object.assign({}, opts, { todayRows: sc.todayRows }) : opts;
+      sc.firstRun = scaleFirstRunFromSheets(o.sheets, nameToId, o.today || todayYmd(), fs, fe, firstOpts);
       sc.firstReady = true;
       sc.sheets = o.sheets;
     }
@@ -2178,7 +2280,8 @@ window.__WF__ = { state, COLS, PAGE_COLS, buildRows, attachDetail, visibleRows, 
   scaleAreaOfSite, scaleAreaGroups, scaleAreaKey, scaleSheetOpts, scaleLeftRiders,
   scaleTeamsFromBills, loadScaleTeams, scaleTeamsWithAgency, scaleStaffStats,
   scaleFirstRunFromSheets, scaleEffectiveFromSheets, scaleOnJobFromSheets,
-  loadScaleSheets, computeScaleRows, scaleCell, renderScale,
+  loadScaleSheets, loadScaleLiveSheets, scaleTodayFromLiveSheets, API_ATT_LIVE,
+  computeScaleRows, scaleCell, renderScale,
   updateScaleDerived, loadScaleData, refreshScaleFirstRun, bindScaleEvents,
   clampScaleDays, loadScaleDays, saveScaleDays,
   openScaleSettings, closeScaleSettings, applyScaleSettings, bindScaleSettings,
