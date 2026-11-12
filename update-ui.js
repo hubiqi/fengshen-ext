@@ -216,51 +216,168 @@
   });
 
   // ---------------------------------------------------------------- 一键热更新
-  // 点「热更新」：把扩展内置的 scripts/hot-update.command 下载到「下载」文件夹，
-  // 同时把脚本文本显示出来（浏览器拦截可执行下载时可直接复制自建）。双击脚本即自动更新。
+  // 优先级：若本机已安装「本地助手」（Native Messaging），点一下全自动（下载→覆盖→重载）；
+  // 否则回退到「下载安装助手（一次性）」+ 显示扩展 ID + 复制手动脚本兜底。
   const btnHot = $("btn-hot");
   const hotPanel = $("hot-panel");
   const hpScript = $("hp-script");
   const hpTip = $("hp-tip");
   const hpCopied = $("hp-copied");
+  const hpIdRow = $("hp-id-row");
+  const hpId = $("hp-id");
+  const HOST_NAME = "com.fengshen.hotupdate";
   const b64u = (s) => {
     const bytes = new TextEncoder().encode(s);
     let bin = "";
     bytes.forEach((b) => { bin += String.fromCharCode(b); });
     return btoa(bin);
   };
-  if (btnHot) btnHot.addEventListener("click", async () => {
-    let text = "";
+
+  function readScript(name) {
+    return fetch(chrome.runtime.getURL(name) + "?t=" + Date.now()).then((r) => r.text()).catch(() => "");
+  }
+  async function downloadText(filename, text) {
     try {
-      const resp = await fetch(chrome.runtime.getURL("scripts/hot-update.command") + "?t=" + Date.now());
-      text = await resp.text();
-    } catch (e) { text = ""; }
-    hpScript.value = text;
+      await chrome.downloads.download({
+        url: "data:application/octet-stream;base64," + b64u(text),
+        filename, saveAs: false, conflictAction: "overwrite"
+      });
+      return true;
+    } catch (e) { return false; }
+  }
+
+  // 探测本地助手是否安装
+  function pingNative() {
+    return new Promise((resolve) => {
+      let port;
+      try { port = chrome.runtime.connectNative(HOST_NAME); }
+      catch (e) { return resolve(false); }
+      if (!port) return resolve(false);
+      let done = false;
+      const t = setTimeout(() => { if (!done) { done = true; try { port.disconnect(); } catch (e) {} resolve(false); } }, 4000);
+      port.onMessage.addListener((m) => {
+        if (done) return;
+        if (m && m.ok) { done = true; clearTimeout(t); resolve(true); }
+      });
+      port.onDisconnect.addListener(() => {
+        if (done) return;
+        done = true; clearTimeout(t); resolve(false);
+      });
+      try { port.postMessage({ type: "ping" }); }
+      catch (e) { done = true; clearTimeout(t); resolve(false); }
+    });
+  }
+
+  function applyViaNative(name) {
+    return new Promise((resolve) => {
+      let port;
+      try { port = chrome.runtime.connectNative(HOST_NAME); }
+      catch (e) { return resolve(false); }
+      if (!port) return resolve(false);
+      let done = false;
+      const t = setTimeout(() => { if (!done) { done = true; try { port.disconnect(); } catch (e) {} resolve(false); } }, 90000);
+      port.onMessage.addListener((m) => {
+        if (done) return;
+        if (m && m.ok) { done = true; clearTimeout(t); resolve(true); }
+        else if (m && m.ok === false) { done = true; clearTimeout(t); resolve(false); }
+      });
+      port.onDisconnect.addListener(() => {
+        if (done) return;
+        done = true; clearTimeout(t); resolve(false);
+      });
+      try { port.postMessage({ type: "apply", name }); }
+      catch (e) { done = true; clearTimeout(t); resolve(false); }
+    });
+  }
+
+  function waitDownload(id) {
+    return new Promise((resolve) => {
+      const t0 = Date.now();
+      const tick = async () => {
+        try {
+          const items = await chrome.downloads.search({ id });
+          const it = items && items[0];
+          if (it && it.state === "complete" && it.filename) return resolve(it.filename);
+        } catch (e) { /* ignore */ }
+        if (Date.now() - t0 > 150000) return resolve(null);
+        setTimeout(tick, 800);
+      };
+      tick();
+    });
+  }
+
+  // 全自动流程：检查→下载→本地助手覆盖→重载
+  async function runNativeUpdate() {
     hotPanel.hidden = false;
-    if (text) {
-      try {
-        await chrome.downloads.download({
-          url: "data:application/octet-stream;base64," + b64u(text),
-          filename: "fengshen-hot-update.command",
-          saveAs: false,
-          conflictAction: "overwrite"
-        });
-        hpTip.innerHTML = "脚本已放到「下载」文件夹（<code>fengshen-hot-update.command</code>）。<b>去「下载」里双击它</b>即可自动下载新版、覆盖到插件目录并在 1 分钟内自动重载。若双击后提示选择目录，选中你加载扩展的那个文件夹即可。";
-      } catch (e) {
-        hpTip.innerHTML = "浏览器拦截了脚本下载（常见于可执行文件）。请直接<b>复制下方文本</b>，粘贴到一个新建文件并命名为 <code>fengshen-hot-update.command</code>，再双击运行即可。";
-      }
+    hpIdRow.hidden = true;
+    hpTip.textContent = "正在连接 GitHub 检查版本…";
+    let chk;
+    try { chk = await send({ type: "WB_UPD_CHECK" }); } catch (e) { chk = null; }
+    if (!chk || !chk.ok) { hpTip.textContent = "检查版本失败，请稍后重试（网络或后台异常）。"; return; }
+    if (!chk.hasNew) {
+      hpTip.innerHTML = "已是最新版本 v" + ((chk.state && chk.state.current) || chrome.runtime.getManifest().version) + "，无需更新。";
+      return;
+    }
+    const latest = chk.state.latest;
+    hpTip.textContent = "发现 v" + latest + "，正在下载…";
+    let dl;
+    try { dl = await send({ type: "WB_UPD_DOWNLOAD" }); } catch (e) { dl = null; }
+    if (!dl || !dl.ok) { hpTip.textContent = "下载失败：" + ((dl && dl.error) || "未知错误"); return; }
+    hpTip.textContent = "下载中…";
+    const filename = await waitDownload(dl.downloadId);
+    if (!filename) { hpTip.textContent = "下载完成但找不到文件，请到「下载」文件夹手动处理。"; return; }
+    hpTip.textContent = "下载完成，正在由本地助手覆盖插件目录…";
+    const ok = await applyViaNative(filename);
+    if (ok) {
+      hpTip.textContent = "已覆盖新版本，正在自动重载…";
+      setTimeout(() => { try { chrome.runtime.reload(); } catch (e) {} }, 600);
     } else {
-      hpTip.textContent = "未能读取内置脚本，请直接到扩展目录的 scripts/hot-update.command 双击运行，或复制下方文本自建脚本。";
+      hpTip.innerHTML = "本地助手覆盖失败。请确认助手已正确安装（看板点「热更新」会提示扩展 ID），或改用下方手动脚本。";
+    }
+  }
+
+  // 无本地助手：引导安装 + 手动脚本兜底
+  async function showHotPanelFallback() {
+    hotPanel.hidden = false;
+    const extId = chrome.runtime.id || "";
+    hpIdRow.hidden = false;
+    hpId.textContent = extId;
+    hpTip.innerHTML = "检测到本机尚未安装「本地助手」，所以暂不能全自动。请先点 <b>下载安装助手（一次性）</b> 并双击运行（会让你填上面的扩展 ID，可先点「复制」）；装好后以后每次点「热更新」都全自动。下面也保留了手动脚本兜底。";
+    const text = await readScript("scripts/hot-update.command");
+    hpScript.value = text;
+  }
+
+  if (btnHot) btnHot.addEventListener("click", async () => {
+    const nativeOk = await pingNative();
+    if (nativeOk) { await runNativeUpdate(); return; }
+    await showHotPanelFallback();
+  });
+
+  if ($("hp-close")) $("hp-close").addEventListener("click", () => { hotPanel.hidden = true; });
+
+  if ($("hp-install")) $("hp-install").addEventListener("click", async () => {
+    const text = await readScript("install-native.command");
+    const ok = await downloadText("fengshen-install-native.command", text);
+    if (ok) {
+      hpTip.innerHTML = "安装助手已放到「下载」文件夹（<code>fengshen-install-native.command</code>）。<b>去「下载」双击它</b>即可完成一次性安装（会让你填扩展 ID，可先复制上方 ID）。装好后重新点「热更新」即全自动。";
+    } else {
+      hpTip.innerHTML = "浏览器拦截了下载。请直接<b>复制下方脚本文本</b>，存为 <code>fengshen-install-native.command</code> 再双击运行；或到扩展目录直接双击 <code>install-native.command</code>。";
+      const t2 = await readScript("install-native.command");
+      hpScript.value = t2;
     }
   });
-  if ($("hp-close")) $("hp-close").addEventListener("click", () => { hotPanel.hidden = true; });
+
+  if ($("hp-copy-id")) $("hp-copy-id").addEventListener("click", async () => {
+    try { await navigator.clipboard.writeText(hpId.textContent); }
+    catch (e) { if (window.getSelection) { const r = document.createRange(); r.selectNode(hpId); const s = window.getSelection(); s.removeAllRanges(); s.addRange(r); if (document.execCommand) document.execCommand("copy"); } }
+    hpCopied.hidden = false;
+    setTimeout(() => { hpCopied.hidden = true; }, 1500);
+  });
+
   if ($("hp-copy")) $("hp-copy").addEventListener("click", async () => {
-    try {
-      await navigator.clipboard.writeText(hpScript.value);
-    } catch (e) {
-      hpScript.select();
-      if (document.execCommand) document.execCommand("copy");
-    }
+    const val = hpScript.value || (await readScript("scripts/hot-update.command"));
+    try { await navigator.clipboard.writeText(val); }
+    catch (e) { hpScript.value = val; hpScript.select(); if (document.execCommand) document.execCommand("copy"); }
     hpCopied.hidden = false;
     setTimeout(() => { hpCopied.hidden = true; }, 1500);
   });

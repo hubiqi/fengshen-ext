@@ -32,7 +32,7 @@
     <button id="btn-clean" class="ghost">纯净看板</button>
     <button id="btn-full" class="ghost" title="清掉记住的站点范围并重新拉取（换账号 / 站点增减后用它重置）">重识站点</button>
     <button id="btn-update" class="ghost" title="检查 GitHub 上是否有新版本">检查更新</button>
-    <button id="btn-hot" class="ghost" title="下载一键热更新脚本到「下载」文件夹，双击即可自动下载+覆盖+重载">热更新</button>
+    <button id="btn-hot" class="ghost" title="点一下自动下载新版本并由本地助手静默覆盖+重载；首次需先运行「安装助手」（面板里可下载）">热更新</button>
   </div>
 </div>
 
@@ -62,18 +62,23 @@
 
 <div class="notice" id="notice" hidden></div>
 
-<!-- 一键热更新：点「热更新」按钮后弹出，内含脚本文本（可复制兜底）与使用说明 -->
+<!-- 一键热更新：点「热更新」按钮后弹出。若已装本地助手则走全自动；否则引导安装并保留手动脚本兜底 -->
 <div class="hot-panel" id="hot-panel" hidden>
   <div class="hp-head">
     <strong>一键热更新</strong>
     <button class="hp-close" id="hp-close" title="关闭">×</button>
   </div>
-  <p class="hp-tip" id="hp-tip">脚本已放到「下载」文件夹（<code>fengshen-hot-update.command</code>）。<b>去「下载」里双击它</b>即可自动下载新版、覆盖到插件目录并在 1 分钟内自动重载。若双击后提示选择目录，选中你加载扩展的那个文件夹即可。</p>
-  <textarea id="hp-script" class="hp-script" readonly spellcheck="false"></textarea>
+  <p class="hp-tip" id="hp-tip"></p>
+  <div class="hp-id-row" id="hp-id-row" hidden>
+    <span>本扩展 ID：</span><code id="hp-id"></code>
+    <button id="hp-copy-id" class="ghost small" title="复制扩展 ID 供安装助手使用">复制</button>
+  </div>
   <div class="hp-actions">
-    <button id="hp-copy" class="ghost">复制脚本</button>
+    <button id="hp-install" class="ghost" title="下载一次性安装助手，双击运行后即可让热更新全自动">下载安装助手（一次性）</button>
+    <button id="hp-copy" class="ghost" title="复制手动更新脚本（无本地助手时兜底）">复制手动脚本</button>
     <span id="hp-copied" class="hp-copied" hidden>已复制</span>
   </div>
+  <textarea id="hp-script" class="hp-script" readonly spellcheck="false"></textarea>
 </div>
 
 <div class="progress-wrap" id="progress-wrap">
