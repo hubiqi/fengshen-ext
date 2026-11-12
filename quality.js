@@ -1,25 +1,24 @@
-/* 质量运营模块（v3.42.0，独立页面）
+/* 质量运营模块（v3.45.0，独立页面）
  * ---------------------------------------------------------------------------
- * 整商 / 商圈片 / 站点 / 骑手（按钮切换）× 炸班次 / 坏单（视图切换）的本月日期矩阵：
- *   炸班次：行 = 日期，列 = 班次（按数据动态生成）。
- *     绿 = 有排班且全部达成；红 = 有排班且有未达成；琥珀 = 达成标记缺失（今日实时快照）；
- *     灰 = 该班次当天无排班。点单元格弹骑手明细（姓名 / 站点 / 时段 / 达成 / 完单 / 有效在线）。
- *   坏单：行 = 日期，列 = 物流责 / 投诉 / 差评 / 提前点（+ 合计）。
- *     绿 = 该类型当天 0 单；红 = 坏单数。点单元格弹运单明细（运单ID / 骑手 / 站点 / 类型）。
+ * 整商 / 商圈片 / 站点 / 骑手（按钮切换）× 炸班次 / 坏单（视图切换）的本月日期矩阵，
+ * 行主体随维度变化（v3.45.0）：整商 = 1 行汇总；商圈片 / 站点 = 各一行；
+ * 骑手 = 只显示本月有炸班或坏单的骑手。列 = 本月 1 ~ 今日。
+ *   炸班次单元格：只显示炸掉的班次（红，含「全天」按系统标记），同一班次炸多人显示
+ *     「班次*n」（人数降序）；空白 = 全部达成或无排班；实时快照缺达成标记 → 琥珀「统计中」。
+ *   坏单单元格：只显示非零类型（红「类型*N」，一个订单命中多个标签各计一次）。
+ *   点单元格弹该行当天的明细（班次：骑手 / 达成 / 完单 / 有效在线；坏单：运单 + 标签）。
  *
  * 数据源全部复用运力模块已验证的接口：
  *   1) 出勤统计 → 导出明细数据 exportStatisticsDetail/1.0（本月按 7 天分段拉 xlsx）
- *      列：骑手ID / 站点ID / 站点名称 / 考勤日期 / 时段 / 是否排班 / 是否达成 / 时段完单量 / 时段有效在线时长
- *      口径：只看非「全天」班次（系统全天标记不可信，与运力模块班次异常口径一致）；
- *      「是否排班」列存在时按它过滤，缺列时一律视为有排班。
- *   2) 出勤达成同款实时快照 exportAttendance/1.0 —— 仅当月用于补今天（历史日期 T+1 结算）。
- *      快照缺「是否达成」列时对应单元格显示「统计中」。
+ *      「是否排班」取值为 排班/未排班/休息 —— 只保留「排班」行（v3.44.0 修复统计中满天飞）。
+ *   2) 出勤达成同款实时快照 exportAttendance/1.0 —— 仅当月用于补今天（历史 T+1 结算），
+ *      快照按「排班时段」计划列过滤（时段不在计划里的行跳过）。
  *   3) KPI管理 → 考核运单明细 perfDetail.queryDetailList/1.0（tabCode=TRACK_UB）：
  *      4 个 Radio 筛选各查一次 + 违规处罚列表（violationOrderAeolusCenterApi.queryList/1.0，
  *      违规状态=成立、分类=差评+投诉、单次窗口 ≤2 天按 2 天分段）的运单号去重后
  *      逗号拼接 50 单/批回查 —— 与运力模块 v3.41.0 同一套并集口径，不漏不重。
  *
- * 与另两个页面一样：直连优先、失败自动切「静默桥接」；跟随当前登录态，不依赖本地服务。
+ * 与另两个页面一样：直连优先、失败自动切「静默桥接」；限频错误退避重试不切通道。
  * 站点列表走 getTeamsAll/1.0；商圈片沿用运力模块同一套站点→商圈片映射，未映射站点自成一组。
  */
 
@@ -245,21 +244,9 @@ function areaList() {
   for (const t of state.teams) set.add(SITE_TO_AREA[t.name] || t.name);
   return [...set];
 }
-function riderList() {
-  // 骑手清单与矩阵行同源（主站点取班次最多的站点），出勤或坏单任一有数据即可选
-  return riderRows().map((r) => ({ rid: r.rid, name: r.name, teamId: r.teamId }));
-}
-function inScope(rec) {
-  const d = state.dim;
-  if (d === "agency") return true;
-  if (d === "area") return areaOf(rec.teamId, rec.siteName) === state.scopeKey;
-  if (d === "site") return normId(rec.teamId) === normId(state.scopeKey);
-  if (d === "rider") return normId(rec.rid) === normId(state.scopeKey);
-  return true;
-}
-function scopeLabel() {
-  if (state.dim === "agency") return "整商";
-  return state.scopeKey || "—";
+function inScope() { return true; }   // v3.45.0：行实体随维度分组，不再按范围过滤记录（保留空实现兼容旧引用）
+function dimNameCn() {
+  return { agency: "整商", area: "商圈片", site: "站点", rider: "骑手" }[state.dim] || "";
 }
 
 // ---------------------------------------------------------------- 数据源 1/2：出勤明细（含今天实时快照）
@@ -527,7 +514,6 @@ async function loadAll() {
   setProgress(100, "");
   setProgress(null);
   // 范围下拉按新数据重建（骑手清单来自出勤 + 坏单明细）
-  fillScopeSelect(true);
   renderAll();
   const errs = [state.teamErr && "站点列表", state.attErr && "出勤明细", state.kpiErr && "坏单明细"].filter(Boolean);
   if (errs.length) showNotice("部分数据源未取到：" + errs.join("、") + "，对应行列显示「—」，可点「立即刷新」重试。");
@@ -537,16 +523,62 @@ async function loadAll() {
 }
 
 // ---------------------------------------------------------------- 矩阵聚合（行 = 骑手，列 = 日期）
-/** 范围内的骑手行清单：姓名 / 主站点 / 商圈片，按姓名排序。
- *  主站点 = 该骑手本月班次数最多的站点（跨站骑手不再取"第一条记录"而归错站）。 */
-function riderRows() {
-  const map = new Map();   // rid -> { rid, name, sites: Map("teamId\u0001siteName" -> count), orders }
+/** 行实体随维度变化（v3.45.0）：整商 = 1 行汇总；商圈片 / 站点 = 各一行；
+ *  骑手 = 只显示本月有炸班或坏单的骑手。返回 [{key, name, sub}]。 */
+function entityRows() {
+  const d = state.dim;
+  if (d === "agency") return [{ key: "__AGENCY__", name: "整商汇总", sub: "" }];
+  if (d === "area") {
+    const m = new Map();   // area -> {sites:Set}
+    for (const r of state.recs) {
+      const a = areaOf(r.teamId, r.siteName);
+      if (!m.has(a)) m.set(a, new Set());
+      m.get(a).add(normId(r.teamId) || a);
+    }
+    for (const o of state.orders) {
+      if (!(o.lgt || o.complain || o.negative || o.early)) continue;
+      const a = areaOf(o.teamId, o.siteName);
+      if (!m.has(a)) m.set(a, new Set());
+      m.get(a).add(normId(o.teamId) || a);
+    }
+    return [...m.entries()].map(([a, sites]) =>
+      ({ key: "A\u0001" + a, name: a, sub: `${sites.size} 个站点` }))
+      .sort((x, y) => x.name.localeCompare(y.name, "zh-CN"));
+  }
+  if (d === "site") {
+    const names = teamNameById();
+    const m = new Map();   // teamId -> name
+    for (const r of state.recs) m.set(normId(r.teamId) || normId(r.siteName), str(r.siteName));
+    for (const o of state.orders) {
+      if (!(o.lgt || o.complain || o.negative || o.early)) continue;
+      m.set(normId(o.teamId) || normId(o.siteName), str(o.siteName));
+    }
+    return [...m.entries()].map(([tid, sn]) =>
+      ({ key: "S\u0001" + tid, name: sn || names[tid] || ("站点 " + tid),
+        sub: areaOf(tid, sn) }))
+      .sort((x, y) => x.name.localeCompare(y.name, "zh-CN"));
+  }
+  // 骑手维度：只显示有异常（炸班或坏单）的骑手
+  const infos = riderInfoMap();
+  const badRiders = new Set();
+  for (const o of state.orders) {
+    if (o.lgt || o.complain || o.negative || o.early) badRiders.add(normId(o.rid));
+  }
+  const failRiders = new Set();
+  for (const r of state.recs) if (r.ok === 0) failRiders.add(normId(r.rid));
+  return [...infos.values()]
+    .filter((r) => failRiders.has(r.rid) || badRiders.has(r.rid))
+    .map((r) => ({ key: "R\u0001" + r.rid, name: r.name || r.rid, sub: r.siteName || r.area }))
+    .sort((x, y) => x.name.localeCompare(y.name, "zh-CN"));
+}
+/** 骑手信息（主站点 = 本月班次最多的站点），供骑手维度行与弹层使用。 */
+function riderInfoMap() {
+  const map = new Map();
   const riderOf = (rid) => {
-    if (!map.has(rid)) map.set(rid, { rid, name: "", sites: new Map(), hasOrder: false });
+    if (!map.has(rid)) map.set(rid, { rid, name: "", sites: new Map() });
     return map.get(rid);
   };
   for (const rec of state.recs) {
-    if (!inScope(rec)) continue;
     const rid = normId(rec.rid);
     if (!rid || rid === "0") continue;
     const r = riderOf(rid);
@@ -555,59 +587,57 @@ function riderRows() {
     r.sites.set(key, (r.sites.get(key) || 0) + 1);
   }
   for (const o of state.orders) {
-    if (!inScope(o)) continue;
     const rid = normId(o.rid);
     if (!rid || rid === "0") continue;
     const r = riderOf(rid);
     if (o.rname && !r.name) r.name = o.rname;
-    r.hasOrder = true;
     if (!r.sites.size) {
       const key = normId(o.teamId) + "\u0001" + str(o.siteName);
       r.sites.set(key, (r.sites.get(key) || 0) + 1);
     }
   }
-  const arr = [];
   for (const r of map.values()) {
-    if (!r.name && !r.sites.size && !r.hasOrder) continue;
     let best = "", bestN = -1;
     for (const [k, n] of r.sites) if (n > bestN) { bestN = n; best = k; }
     const [teamId, siteName] = best ? best.split("\u0001") : ["", ""];
-    arr.push({
-      rid: r.rid, name: r.name,
-      teamId, siteName,
-      area: areaOf(teamId, siteName),
-      shifts: [...r.sites.values()].reduce((a, b) => a + b, 0)
-    });
+    r.teamId = teamId; r.siteName = siteName;
+    r.area = areaOf(teamId, siteName);
   }
-  arr.sort((a, b) => (a.name || a.rid).localeCompare(b.name || b.rid, "zh-CN"));
-  return arr;
+  return map;
 }
-/** 炸班次：Map(rid -> Map(day -> {fails:[班次名], sched, bad, unk, list}))。
- *  fails 只收「未达成」的班次名（含全天，按用户要求直接展示系统标记）。 */
-function shiftRiderMatrix() {
+/** 记录（出勤行 / 坏单）→ 当前维度下的行实体键（与 entityRows 的 key 一一对应）。 */
+function entityKeyOf(rec) {
+  const d = state.dim;
+  if (d === "agency") return "__AGENCY__";
+  if (d === "area") return "A\u0001" + areaOf(rec.teamId, rec.siteName);
+  if (d === "site") return "S\u0001" + (normId(rec.teamId) || normId(rec.siteName));
+  return "R\u0001" + normId(rec.rid);          // rider
+}
+/** 按行实体分组的炸班次矩阵：Map(key -> Map(day -> {fails:Map(班次->人数), sched, unk, list}))。 */
+function shiftMatrix() {
   const cells = new Map();
   for (const r of state.recs) {
-    if (!inScope(r)) continue;
-    let m = cells.get(r.rid);
-    if (!m) cells.set(r.rid, m = new Map());
+    const ek = entityKeyOf(r);
+    let m = cells.get(ek);
+    if (!m) cells.set(ek, m = new Map());
     let c = m.get(r.day);
-    if (!c) m.set(r.day, c = { fails: [], sched: 0, bad: 0, unk: 0, list: [] });
+    if (!c) m.set(r.day, c = { fails: new Map(), sched: 0, unk: 0, list: [] });
     c.sched++;
-    if (r.ok === 0) { c.bad++; c.fails.push(r.per); }
+    if (r.ok === 0) c.fails.set(r.per, (c.fails.get(r.per) || 0) + 1);
     else if (r.ok === -1) c.unk++;
     c.list.push(r);
   }
   return cells;
 }
-/** 坏单：Map(rid -> Map(day -> {lgt, complain, negative, early, list}))。
+/** 按行实体分组的坏单矩阵：Map(key -> Map(day -> {lgt, complain, negative, early, list}))。
   * 一个订单命中多个标签时每个标签各计一次（用户口径）。 */
-function badRiderMatrix() {
+function badMatrix() {
   const cells = new Map();
   for (const o of state.orders) {
-    if (!inScope(o)) continue;
     if (!(o.lgt || o.complain || o.negative || o.early)) continue;
-    let m = cells.get(o.rid);
-    if (!m) cells.set(o.rid, m = new Map());
+    const ek = entityKeyOf(o);
+    let m = cells.get(ek);
+    if (!m) cells.set(ek, m = new Map());
     let c = m.get(o.day);
     if (!c) m.set(o.day, c = { lgt: 0, complain: 0, negative: 0, early: 0, list: [] });
     for (const [k] of BAD_COLS) if (o[k]) c[k]++;
@@ -617,12 +647,14 @@ function badRiderMatrix() {
 }
 
 // ---------------------------------------------------------------- 渲染
-/** 炸班次单元格：只显示炸掉的班次名（红，一行一个，含全天按系统标记）；空白 = 全部达成或无排班；
+/** 炸班次单元格：只显示炸掉的班次（红，一行一个，含全天按系统标记）；
+ *  同一班次炸的人数 > 1 时显示「班次*n」（人数降序）；空白 = 全部达成或无排班；
  *  实时快照缺「是否达成」列时显示琥珀「统计中」。 */
 function shiftCellHtml(c) {
   if (!c) return "";
   let html = "";
-  for (const per of c.fails) html += `<span class="qf">${esc(per)}</span>`;
+  const fails = [...c.fails.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], "zh-CN"));
+  for (const [per, n] of fails) html += `<span class="qf">${esc(per)}${n > 1 ? "*" + n : ""}</span>`;
   if (html) return html;
   if (c.unk > 0) return '<span class="qu">统计中</span>';
   return "";
@@ -639,11 +671,10 @@ function badCellHtml(c) {
 function renderAll() {
   const month = state.month;
   const b = monthBounds(month);
-  $("ql-scope").hidden = state.dim === "agency";
   const viewName = state.view === "shift" ? "炸班次" : "坏单";
   const dimName = { agency: "整商", area: "商圈片", site: "站点", rider: "骑手" }[state.dim];
   $("ql-title").innerHTML =
-    `${esc(viewName)}矩阵 · <b>${esc(scopeLabel())}</b>` +
+    `${esc(viewName)}矩阵 · <b>${esc(dimName)}</b>` +
     ` <span class="ql-sub">${esc(month)}（1 ~ ${b.maxDay} 日）· ${esc(dimName)}维度` +
     ` · 出勤明细 ${state.recs.length} 行 · 坏单 ${state.orders.length} 单</span>`;
   const wrap = $("matrix-wrap");
@@ -652,33 +683,37 @@ function renderAll() {
     renderFoot();
     return;
   }
-  renderRiderTable(wrap, month, b);
+  renderMatrixTable(wrap, month, b);
   renderFoot();
 }
-/** 骑手 × 日期矩阵：行 = 范围内骑手（首列冻结），列 = 本月 1 ~ maxDay 日。 */
-function renderRiderTable(wrap, month, b) {
-  const riders = riderRows();
-  const mat = state.view === "shift" ? shiftRiderMatrix() : badRiderMatrix();
-  if (!riders.length) {
-    wrap.innerHTML = '<div class="ql-pop-empty">该范围内本月没有骑手数据</div>';
+/** 行主体随维度变化的日期矩阵：行 = 行实体（首列冻结），列 = 本月 1 ~ maxDay 日。 */
+let lastRows = [];          // 供点击弹层按行键查行名
+function renderMatrixTable(wrap, month, b) {
+  const rows = entityRows();
+  lastRows = rows;
+  const mat = state.view === "shift" ? shiftMatrix() : badMatrix();
+  if (!rows.length) {
+    wrap.innerHTML = state.dim === "rider"
+      ? '<div class="ql-pop-empty">本月没有炸班或坏单的骑手</div>'
+      : '<div class="ql-pop-empty">本月暂无数据</div>';
     return;
   }
   const isShift = state.view === "shift";
   const mn = Number(month.slice(5, 7));
-  let html = '<table class="ql-tbl"><thead><tr><th class="lft ql-rider">骑手姓名</th>';
+  const headLabel = { agency: "整商", area: "商圈片", site: "站点", rider: "骑手姓名" }[state.dim];
+  let html = `<table class="ql-tbl"><thead><tr><th class="lft ql-rider">${esc(headLabel)}</th>`;
   for (let d = 1; d <= b.maxDay; d++) html += `<th title="${esc(month)}-${padDay(d)}">${mn}月${d}日</th>`;
   html += "</tr></thead><tbody>";
-  for (const rd of riders) {
-    const m = mat.get(rd.rid);
-    const sub = rd.siteName || rd.area || "";
-    html += `<th class="lft ql-rider"><span class="qr-name">${esc(rd.name || rd.rid)}</span>` +
-      `<span class="qr-sub">${esc(rd.name ? rd.rid : "")}${sub ? (rd.name ? " · " : "") + esc(sub) : ""}</span></th>`;
+  for (const rd of rows) {
+    const m = mat.get(rd.key);
+    html += `<th class="lft ql-rider"><span class="qr-name">${esc(rd.name)}</span>` +
+      `<span class="qr-sub">${esc(rd.sub || "")}</span></th>`;
     for (let d = 1; d <= b.maxDay; d++) {
       const ymd = `${month}-${padDay(d)}`;
       const c = m && m.get(ymd);
       const body = isShift ? shiftCellHtml(c) : badCellHtml(c);
-      const has = isShift ? (c && (c.bad || c.unk)) : (c && c.list.length);
-      html += `<td class="ql-cell${has ? " clickable" : ""}"${has ? ` data-rid="${esc(rd.rid)}" data-day="${ymd}" title="点击看 ${esc(rd.name || rd.rid)} ${ymd} 的${isShift ? "班次" : "坏单"}明细"` : ""}>${body}</td>`;
+      const has = isShift ? (c && (c.fails.size || c.unk)) : (c && c.list.length);
+      html += `<td class="ql-cell${has ? " clickable" : ""}"${has ? ` data-key="${esc(rd.key)}" data-day="${ymd}" title="点击看 ${esc(rd.name)} ${ymd} 的${isShift ? "班次" : "坏单"}明细"` : ""}>${body}</td>`;
     }
     html += "</tr>";
   }
@@ -688,12 +723,12 @@ function renderRiderTable(wrap, month, b) {
 function renderFoot() {
   const isCur = state.month === curMonth();
   $("ql-foot").innerHTML =
-    "行 = 范围内的骑手（整商 = 全部骑手；商圈片 / 站点 / 骑手按钮 + 下拉切换范围），列 = 本月日期。" +
-    "骑手名下的站点 = 该骑手本月班次数最多的站点（跨站骑手取主站点）。<br>" +
+    "行随维度切换：整商 = 全部数据汇总成一行；商圈片 / 站点 = 每个商圈片 / 站点一行（副标题为站点数 / 所属商圈片）；" +
+    "骑手 = 只显示本月有炸班或坏单的骑手（名下站点 = 该骑手本月班次最多的站点）。列 = 本月日期。<br>" +
     "炸班次 = 出勤统计「导出明细数据」的骑手 × 时段明细（本月按 7 天分段；当月今天取 T0 实时考勤快照），" +
-    "只统计「是否排班 = 排班」的班次；红字 = 当天炸掉的班次名（含「全天」，按系统「是否达成」标记），" +
+    "只统计「是否排班 = 排班」的班次；红字 = 当天炸掉的班次（同一班次炸多人显示「班次*n」，人数降序；含「全天」，按系统「是否达成」标记），" +
     "空白 = 全部达成或无排班；快照缺达成标记时显示琥珀「统计中」（当日数据 T+1 结算）；" +
-    "点击单元格看该骑手当天全部排班班次明细（含完单量 / 有效在线）。<br>" +
+    "点击单元格看该行当天的排班班次明细（骑手 / 班次 / 完单量 / 有效在线）。<br>" +
     "坏单 = KPI 考核运单明细 4 类问题订单筛选 + 违规处罚列表（违规状态=成立、违规分类=差评+投诉）" +
     "运单号去重后逗号拼接批量回查，两路按运单取并集、不重复计数（与运力模块投诉 / 差评同口径）；" +
     "红字「类型*N」 = 当天各类型坏单数，一个订单命中多个标签时每个标签单独计算；点击单元格看运单明细。" +
@@ -707,33 +742,47 @@ function openPop(title, tableHtml) {
   $("ql-pop-mask").hidden = false;
 }
 function closePop() { $("ql-pop-mask").hidden = true; }
-/** 骑手某天的班次明细：全部排班班次 + 达成标记 + 完单 + 有效在线。 */
-function shiftPop(month, rid, day) {
-  const list = state.recs.filter((r) => r.rid === rid && r.day === day);
+/** 某行某天的班次明细：该实体当天全部排班班次 + 达成标记 + 完单 + 有效在线。 */
+function shiftPop(month, key, day) {
+  const list = state.recs.filter((r) => entityKeyOf(r) === key && r.day === day);
   if (!list.length) { openPop(`${day} 班次明细`, '<div class="ql-pop-empty">该日无排班记录</div>'); return; }
-  const name = list[0].name || rid;
-  let html = '<table><thead><tr><th>姓名</th><th>站点</th><th>班次</th><th>是否达成</th><th>完单</th><th class="lft">有效在线</th></tr></thead><tbody>';
-  const ordered = list.slice().sort((a, b) => a.per.localeCompare(b.per, "zh-CN"));
+  const row = lastRows.find((r) => r.key === key);
+  const name = row ? row.name : dimNameCn();
+  const showRider = state.dim !== "rider";
+  const showSite = state.dim === "agency" || state.dim === "area";
+  let html = "<table><thead><tr>";
+  if (showRider) html += "<th>骑手</th>";
+  if (showSite) html += "<th>站点</th>";
+  html += '<th>班次</th><th>是否达成</th><th>完单</th><th class="lft">有效在线</th></tr></thead><tbody>';
+  const ordered = list.slice().sort((a, b) =>
+    a.per.localeCompare(b.per, "zh-CN") || (a.name || "").localeCompare(b.name || "", "zh-CN"));
   for (const r of ordered) {
     const mk = r.ok === 1 ? '<span class="mk yes">达成</span>'
       : r.ok === 0 ? '<span class="mk no">未达成</span>' : '<span class="mk tp">统计中</span>';
-    html += `<tr><td>${esc(r.name || rid)}</td><td>${esc(r.siteName || areaOf(r.teamId, r.siteName))}</td>` +
-      `<td>${esc(r.per)}</td><td>${mk}</td><td>${int(r.orders)}</td><td class="lft">${esc(r.online || "—")}</td></tr>`;
+    html += "<tr>";
+    if (showRider) html += `<td>${esc(r.name || r.rid)}</td>`;
+    if (showSite) html += `<td>${esc(r.siteName || areaOf(r.teamId, r.siteName))}</td>`;
+    html += `<td>${esc(r.per)}</td><td>${mk}</td><td>${int(r.orders)}</td><td class="lft">${esc(r.online || "—")}</td></tr>`;
   }
   html += "</tbody></table>";
   const bad = list.filter((r) => r.ok === 0).length;
   openPop(`${name} · ${day} 班次明细 · 排班 ${list.length} 班${bad ? ` · 炸 ${bad} 班` : " · 全部达成"}`, html);
 }
-/** 骑手某天的坏单明细：运单ID + 类型标签（多标签全列）。 */
-function badPop(month, rid, day) {
-  const list = state.orders.filter((o) => o.rid === rid && o.day === day && (o.lgt || o.complain || o.negative || o.early));
+/** 某行某天的坏单明细：运单ID + 类型标签（多标签全列）。 */
+function badPop(month, key, day) {
+  const list = state.orders.filter((o) => entityKeyOf(o) === key && o.day === day && (o.lgt || o.complain || o.negative || o.early));
   if (!list.length) { openPop(`${day} 坏单明细`, '<div class="ql-pop-empty">该日无坏单记录</div>'); return; }
-  const name = list[0].rname || list[0].rid || rid;
-  let html = '<table><thead><tr><th>日期</th><th class="lft">运单ID</th><th>骑手</th><th>站点</th><th class="lft">类型</th></tr></thead><tbody>';
+  const row = lastRows.find((r) => r.key === key);
+  const name = row ? row.name : dimNameCn();
+  const showRider = state.dim !== "rider";
+  let html = "<table><thead><tr><th>日期</th><th class=\"lft\">运单ID</th>";
+  if (showRider) html += "<th>骑手</th><th>站点</th>";
+  html += '<th class="lft">类型</th></tr></thead><tbody>';
   for (const o of list) {
     const chips = BAD_COLS.filter(([k]) => o[k]).map(([, n]) => `<span class="mk tp">${esc(n)}</span>`).join(" ");
-    html += `<tr><td>${esc(o.day)}</td><td class="lft">${esc(o.tid)}</td><td>${esc(o.rname || o.rid || "—")}</td>` +
-      `<td>${esc(o.siteName || areaOf(o.teamId, o.siteName))}</td><td class="lft">${chips || "—"}</td></tr>`;
+    html += `<tr><td>${esc(o.day)}</td><td class="lft">${esc(o.tid)}</td>`;
+    if (showRider) html += `<td>${esc(o.rname || o.rid || "—")}</td><td>${esc(o.siteName || areaOf(o.teamId, o.siteName))}</td>`;
+    html += `<td class="lft">${chips || "—"}</td></tr>`;
   }
   html += "</tbody></table>";
   const tags = list.reduce((n, o) => n + BAD_COLS.filter(([k]) => o[k]).length, 0);
@@ -742,27 +791,10 @@ function badPop(month, rid, day) {
 }
 function badName(k) { const f = BAD_COLS.find(([key]) => key === k); return f ? f[1] : k; }
 
-function badName(k) { const f = BAD_COLS.find(([key]) => key === k); return f ? f[1] : k; }
-
 // ---------------------------------------------------------------- 控件
-function fillScopeSelect(keep) {
-  const sel = $("ql-scope");
-  const prev = keep ? state.scopeKey : "";
-  let opts = [];
-  if (state.dim === "area") opts = areaList().map((a) => [a, a]);
-  else if (state.dim === "site") opts = state.teams.slice().sort((a, b) => a.name.localeCompare(b.name, "zh-CN")).map((t) => [t.id, t.name]);
-  else if (state.dim === "rider") opts = riderList().map((r) => [r.rid, r.name ? `${r.name}（${r.rid}）` : r.rid]);
-  sel.innerHTML = opts.map(([v, n]) => `<option value="${esc(v)}">${esc(n)}</option>`).join("")
-    || '<option value="">（本月暂无数据）</option>';
-  if (prev && opts.some(([v]) => v === prev)) state.scopeKey = prev;
-  else state.scopeKey = opts.length ? opts[0][0] : "";
-  sel.value = state.scopeKey;
-  sel.hidden = state.dim === "agency";
-}
 function setDim(d) {
   state.dim = d;
   for (const b of document.querySelectorAll(".ql-dim")) b.classList.toggle("active", b.dataset.dim === d);
-  fillScopeSelect(false);
   renderAll();
 }
 function setView(v) {
@@ -799,12 +831,11 @@ function boot() {
   $("btn-refresh").addEventListener("click", () => loadAll());
   for (const b of document.querySelectorAll(".ql-dim")) b.addEventListener("click", () => setDim(b.dataset.dim));
   for (const b of document.querySelectorAll(".ql-view")) b.addEventListener("click", () => setView(b.dataset.view));
-  $("ql-scope").addEventListener("change", () => { state.scopeKey = $("ql-scope").value; renderAll(); });
   $("matrix-wrap").addEventListener("click", (ev) => {
     const td = ev.target.closest("td.ql-cell.clickable");
-    if (!td || !td.dataset.rid || !td.dataset.day) return;
-    if (state.view === "shift") shiftPop(state.month, td.dataset.rid, td.dataset.day);
-    else badPop(state.month, td.dataset.rid, td.dataset.day);
+    if (!td || !td.dataset.key || !td.dataset.day) return;
+    if (state.view === "shift") shiftPop(state.month, td.dataset.key, td.dataset.day);
+    else badPop(state.month, td.dataset.key, td.dataset.day);
   });
   $("ql-pop-close").addEventListener("click", closePop);
   $("ql-pop-mask").addEventListener("click", (ev) => { if (ev.target === $("ql-pop-mask")) closePop(); });
@@ -815,8 +846,8 @@ function boot() {
 // 测试桩（离线单元回归可用 window.__QL__ 取纯函数）
 Object.assign(window.__QL__ = window.__QL__ || {}, {
   state, parseAttSheets, parseBadRows, loadViolationTrackingIds,
-  monthBounds, monthSegments, riderRows, shiftRiderMatrix, badRiderMatrix,
-  inScope, areaOf, areaList, riderList, shiftCellHtml, badCellHtml, requestRL,
+  monthBounds, monthSegments, entityRows, shiftMatrix, badMatrix, entityKeyOf,
+  areaOf, shiftCellHtml, badCellHtml, requestRL, riderInfoMap,
   API_ATT_DETAIL, API_ATT_LIVE, API_TEAMS, API_KPI_DETAIL, API_VIOLATION,
   SITE_TO_AREA, KPI_FILTERS, KPI_COLS, BAD_COLS, VIOL_SEG_DAYS, VIOL_BATCH,
   setDim, setView, setMonth, loadAll, renderAll, shiftPop, badPop
