@@ -1,17 +1,31 @@
 #!/bin/bash
 # 风神看板 · 热更新本地助手（一次性安装）
 #
-# 用法：把本文件放在扩展根目录（fengshen-data/ext），双击运行即可。
+# 用法：从看板「热更新」面板点「下载安装助手」把它下到「下载」文件夹后双击；
+# 或从扩展根目录（fengshen-data/ext）内直接双击。两者都会引导到正确的扩展目录。
 # 它会把本地助手装到 ~/Library/Application Support/FengshenNative/，
 # 并在 Chrome 的 NativeMessagingHosts 里登记，使「热更新」按钮能一键自动更新。
 # 只需安装这一次，之后每次更新都由按钮全自动完成。
 set -euo pipefail
 
-# 本脚本应在扩展根目录内被双击，因此自身所在目录即扩展目录
+# 优先用脚本自身所在目录作为扩展目录（从扩展文件夹内双击时成立）；
+# 若从「下载」文件夹双击（看板「下载安装助手」下载的就是这种情况），则弹出 Finder 让用户选扩展目录。
 EXT_DIR="$(cd "$(dirname "$0")" && pwd)"
 if [ ! -f "$EXT_DIR/manifest.json" ]; then
-  osascript -e 'display dialog "找不到扩展目录的 manifest.json，请确认是从扩展文件夹内双击本脚本。" buttons {"好"} default button 1 with icon stop' >/dev/null 2>&1 || true
-  exit 1
+  PICK="$(osascript 2>/dev/null <<'EOF'
+tell application "System Events"
+  activate
+  set f to choose folder with prompt "请选择你加载扩展的那个文件夹（里面要有 manifest.json）"
+  POSIX path of f
+end tell
+EOF
+)"
+  if [ -n "${PICK:-}" ] && [ -f "$PICK/manifest.json" ]; then
+    EXT_DIR="$PICK"
+  else
+    osascript -e 'display dialog "未找到扩展目录的 manifest.json，安装已中止。请重新运行并选对文件夹。" buttons {"好"} default button 1 with icon stop' >/dev/null 2>&1 || true
+    exit 1
+  fi
 fi
 
 # 去掉代理变量（与 git 推送 / 下载踩过的坑同源），避免后续命令被代理挡住
