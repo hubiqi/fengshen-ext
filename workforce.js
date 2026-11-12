@@ -1088,10 +1088,12 @@ function renderScale() {
   const head = "<thead><tr>" + heads.map(([t, g]) => `<th class="${g}">${esc(t)}</th>`).join("") + "</tr></thead>";
   const subhead = '<tbody><tr class="wf-scale-subhead">' + subs.map((t, i) =>
     `<th class="${heads[i][1]}">${esc(t)}</th>`).join("") + "</tr></tbody>";
-  const body = "<tbody>" + scaleRowHtml(total, true) + "</tbody>" +
-    "<tbody>" + (rows.length ? rows.map((r) => scaleRowHtml(r, false)).join("")
-      : `<tr><td colspan="12" class="c-empty">没有取到商圈片，点「立即刷新」重试</td></tr>`) + "</tbody>";
-  box.innerHTML = colgroup + head + subhead + body;
+  // v3.33.0：按参考图「上半渠道汇总 1 行 / 下半代理商名称 · 商圈片名称明细 N 行」，
+  // 渠道汇总行紧跟主表头，明细子表头移到汇总行下面（原来第 2 / 3 行对调）。
+  const totalBody = "<tbody>" + scaleRowHtml(total, true) + "</tbody>";
+  const detailBody = "<tbody>" + (rows.length ? rows.map((r) => scaleRowHtml(r, false)).join("")
+    : `<tr><td colspan="12" class="c-empty">没有取到商圈片，点「立即刷新」重试</td></tr>`) + "</tbody>";
+  box.innerHTML = colgroup + head + totalBody + subhead + detailBody;
 
   const title = $("wf-scale-title");
   if (title) {
