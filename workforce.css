@@ -247,6 +247,9 @@ table.tbl.wf-scale-table tbody td.wf-people:hover { background: #EFF6FF; }
 .wf-scale-adj .adj-row button { padding: 4px 10px; font-size: 11.5px; white-space: nowrap; }
 .wf-scale-adj .ss-note { margin: 9px 0 2px; padding: 7px 9px; border-radius: 5px;
   background: #F3F6FC; font-size: 11.5px; color: #374151; line-height: 1.6; }
+.wf-scale-adj .adj-synced { margin: 7px 0 0; padding: 6px 9px; border-radius: 5px;
+  background: #ECFDF3; border: 1px solid #BBF0CC; font-size: 11px; color: #067647;
+  line-height: 1.5; }
 .wf-pop.wf-scale-people { top: 12%; width: 660px; }
 
 @media (max-width: 1260px) {

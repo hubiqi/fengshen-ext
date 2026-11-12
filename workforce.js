@@ -1281,14 +1281,16 @@ function scaleCell(field, r) {
   if (field === "onJob" || field === "effective") {
     const adj = field === "onJob" ? r.onJobAdj : r.effAdj;
     const base = field === "onJob" ? r.onJobBase : r.effBase;
-    const html = int(v) + (adj
-      ? `<sup class="wf-adj-mark">${adj > 0 ? "+" : ""}${int(adj)}</sup>` : "");
+    // v3.38.0：不再显示右上角蓝色增减上标，单元格直接显示调整后的最终人数
+    const html = int(v);
     const tip = adj
       ? `自动 ${int(base)} ${adj > 0 ? "＋" : "−"} 手动 ${int(Math.abs(adj))} = ${int(v)}；右键可继续调整`
       : (r.isTotal ? "汇总 = 各商圈片合计（含手动增减）；请在明细行右键调整"
         : "右键可手动增加 / 减少 n 人");
     const cls = "num wf-adjable" + (r.isTotal ? " wf-adj-total" : "");
-    return { text: int(v), html, cls, attrs: attrs + ` data-adj="${field}"`, title: tip };
+    // data-adj 用归一化值："effective" → "eff"，与 openScaleAdj 的判定一致（否则右键有效出勤规模会被误路由到在职规模）
+    const adjKey = field === "effective" ? "eff" : field;
+    return { text: int(v), html, cls, attrs: attrs + ` data-adj="${adjKey}"`, title: tip };
   }
   if (field === "entry" || field === "firstRun" || field === "leave") {
     const has = num(v) > 0;
@@ -1535,9 +1537,12 @@ function renderAdjSum() {
   const t = $("adj-title");
   if (t) t.textContent = `${adjFieldLabel(field)} · ${scaleAreaNameOf(key)}`;
   if (!box) return;
-  box.innerHTML = `自动取数 <b>${int(base)}</b> 人` +
+  let html = `自动取数 <b>${int(base)}</b> 人` +
     (adj ? ` ${adj > 0 ? "＋" : "−"} 手动 <b>${int(Math.abs(adj))}</b> 人` : "（暂未手动调整）") +
     ` = 当前 <b>${int(now)}</b> 人`;
+  // v3.38.0：在职规模增减会同步到同片区有效出勤规模，提示用户
+  if (field === "onJob") html += `<div class="adj-synced">在职规模增减会同步到同片区「有效出勤规模」</div>`;
+  box.innerHTML = html;
 }
 function openScaleAdj(td) {
   const p = $("scale-adj");
@@ -1563,11 +1568,17 @@ function applyScaleAdj(sign) {
   const n = Math.max(1, Math.round(Math.abs(Number(nEl && nEl.value) || 0)) || 1);
   const cur = scaleAdj(adjState.key, adjState.field);
   setScaleAdj(adjState.key, adjState.field, cur + sign * n);
+  // v3.38.0：在职规模增减时，同商圈片的有效出勤规模同步增减相同人数
+  if (adjState.field === "onJob") {
+    const effCur = scaleAdj(adjState.key, "eff");
+    setScaleAdj(adjState.key, "eff", effCur + sign * n);
+  }
   renderScale();
   renderAdjSum();
 }
 function resetScaleAdj() {
   setScaleAdj(adjState.key, adjState.field, 0);
+  if (adjState.field === "onJob") setScaleAdj(adjState.key, "eff", 0);
   renderScale();
   renderAdjSum();
 }
