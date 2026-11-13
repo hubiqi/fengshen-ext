@@ -1,8 +1,12 @@
-/* 质量运营模块（v3.47.0，独立页面）
+/* 质量运营模块（v3.48.0，独立页面）
  * ---------------------------------------------------------------------------
  * 整商 / 商圈片 / 站点 / 骑手（按钮切换）× 炸班次 / 坏单（视图切换）的本月日期矩阵，
  * 行主体随维度变化（v3.45.0）：整商 = 1 行汇总；商圈片 / 站点 = 各一行；
  * 骑手 = 只显示本月有炸班或坏单的骑手。列 = 本月 1 ~ 今日 + 「本月合计」，表尾有「合计」行。
+ * v3.48.0：「全天」班次单独定义达标标准（默认 完单量 ≥ 18 单 且 有效在线时长 ≥ 6 小时），
+ *   不采信系统「是否达成」标记；工具条「全天标准」可编辑、本机记忆、改完立即重算矩阵。
+ *   历史明细读「完单量 / 有效在线时长」，T0 实时快照读「全天完单量 / 全天有效在线时长」
+ *   并按「排班状态」过滤（全天汇总行不在「排班时段」计划里）。
  * v3.47.0：违规处罚分类（成立 COMPLAIN / BAD_REVIEW）作为「投诉 / 差评」独立标签计入，
  *   与考核运单明细 4 列取并集 —— 提前点送达类订单同时被判投诉 / 差评时，两类标签分别单独算。
  *   真机实测：违规处罚 149 个成立单（147 投诉 / 2 差评）在考核运单明细里「是否投诉单 /
@@ -133,6 +137,48 @@ function monthSegments(month) {
 
 // ---------------------------------------------------------------- 网络层（与运力模块同款）
 const SHARE_LS = "wb_wf_raw_v2_";     // 与运力模块同源共享的整月原始明细缓存
+const ALLDAY_LS = "wb_ql_allday_v1";            // v3.48.0：全天班次达标标准（本机记忆、可编辑）
+const ALLDAY_DEFAULT = { orders: 18, hours: 6 };// 默认：完单量 ≥ 18 单 且 有效在线时长 ≥ 6 小时
+function loadAllDayCfg() {
+  try {
+    const v = JSON.parse(localStorage.getItem(ALLDAY_LS) || "null");
+    if (v && isFinite(v.orders) && isFinite(v.hours)) {
+      return {
+        orders: Math.max(0, Math.min(200, Math.round(Number(v.orders)))),
+        hours: Math.max(0, Math.min(24, Math.round(Number(v.hours) * 10) / 10))
+      };
+    }
+  } catch (e) { /* 坏数据用默认值 */ }
+  return Object.assign({}, ALLDAY_DEFAULT);
+}
+/** 「11小时06分钟」/「6小时」/「6」→ 小时数；空或无法识别 → null。 */
+function parseHours(v) {
+  const t = String(v == null ? "" : v).trim();
+  if (!t) return null;
+  let m = t.match(/^(\d+)\s*小时\s*(\d+)\s*分/);
+  if (m) return Number(m[1]) + Number(m[2]) / 60;
+  m = t.match(/^(\d+)\s*分/);
+  if (m) return Number(m[1]) / 60;
+  m = t.match(/^(\d+(?:\.\d+)?)\s*(?:小时|时|h)$/i);
+  if (m) return Number(m[1]);
+  if (/^\d+(?:\.\d+)?$/.test(t)) return Number(t);
+  return null;
+}
+/** 全天班次按自定义标准判定：完单量 ≥ N 且 有效时长 ≥ H 才算达标，否则炸班；
+ *  两项都没有数据 → -1「统计中」（不把无数据行误判成炸班）。 */
+function allDayVerdict(rec, cfg) {
+  const c = cfg || state.allDay || ALLDAY_DEFAULT;
+  const orders = num(rec && rec.orders);
+  const hours = parseHours(rec && rec.online);
+  if (hours === null && !orders) return -1;
+  return (orders >= c.orders && (hours || 0) >= c.hours) ? 1 : 0;
+}
+/** 统一的班次达成判定：全天走自定义标准，其余班次仍采信系统「是否达成」标记。 */
+function recOk(rec) {
+  if (!rec) return -1;
+  return rec.per === "全天" ? allDayVerdict(rec, state.allDay) : rec.ok;
+}
+function allDayLabel() { return `${state.allDay.orders}单 / ${state.allDay.hours}小时`; }
 const state = {
   // v3.46.0：面板 iframe 内默认走「静默桥接」（后台标签取数，登录态稳定）；
   // 独立标签页默认直连。任一通道失败自动切另一条再试一次。
@@ -143,6 +189,7 @@ const state = {
   recs: [], attErr: "",
   orders: [], kpiErr: "",
   violMap: new Map(),         // v3.47.0：违规处罚运单 → 投诉/差评独立标签 + 兜底元信息
+  allDay: loadAllDayCfg(),    // v3.48.0：全天班次达标标准（可编辑）
   liveUsed: false
 };
 /** 读取运力模块写下的整月原始明细（localStorage 在扩展各页面间同源共享）。 */
@@ -334,9 +381,12 @@ function parseAttSheets(sheets, defaultDay) {
     const iP = idx("时段", "班次");
     const iOk = idx("是否达成");
     const iSched = idx("是否排班");
+    const iStatus = idx("排班状态");    // 实时快照
     const iPlan = idx("排班时段");      // 实时快照：当天排班计划（「午高峰、晚高峰、…」）
     const iO = idx("时段完单量", "完单量");
     const iV = idx("时段有效在线时长", "有效在线时长", "有效在线");
+    const iAO = idx("全天完单量");       // 实时快照的全天汇总行专用列
+    const iAV = idx("全天有效在线时长");
     if (iR === undefined || iP === undefined) continue;
     for (const r of rows.slice(1)) {
       const rid = normId(r[iR]);
@@ -347,24 +397,30 @@ function parseAttSheets(sheets, defaultDay) {
       const d8 = rawDay.replace(/\D/g, "").slice(0, 8);
       const day = /^\d{8}$/.test(d8) ? `${d8.slice(0, 4)}-${d8.slice(4, 6)}-${d8.slice(6, 8)}` : rawDay.slice(0, 10);
       if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) continue;
+      const isAllDay = per === "全天";
       // 「是否排班」实际取值为 排班 / 未排班 / 休息 —— 只保留「排班」；
       // 未排班 / 休息行的「是否达成」必为空，不滤掉会把整片格子染成「统计中」。
-      if (iSched !== undefined && str(r[iSched]) !== "排班") continue;
-      // 实时快照没有「是否排班」列，用「排班时段」判断：时段不在当天排班计划里 → 不是真排班班次
-      if (iSched === undefined && iPlan !== undefined) {
+      if (iSched !== undefined) {
+        if (str(r[iSched]) !== "排班") continue;
+      } else if (isAllDay) {
+        // 实时快照的「全天」是汇总行，不在「排班时段」计划里 —— 改按「排班状态」判断
+        if (iStatus !== undefined && str(r[iStatus]) !== "排班") continue;
+      } else if (iPlan !== undefined) {
         const plan = str(r[iPlan]);
-        const planArr = plan.split(/[、,，]/).map((s) => s.trim()).filter(Boolean);
+        const planArr = plan.split(/[、,，]/).map((x) => x.trim()).filter(Boolean);
         if (!planArr.includes(per)) continue;
       }
       const okRaw = iOk !== undefined ? str(r[iOk]) : "";
       const ok = okRaw === "达成" ? 1 : (okRaw === "未达成" ? 0 : -1);
+      // 全天行优先取「全天完单量 / 全天有效在线时长」列（实时快照），
+      // 历史明细只有「完单量 / 有效在线时长」，iAO/iAV 为 undefined 时自动回退。
+      const orders = (isAllDay && iAO !== undefined) ? num(r[iAO]) : (iO !== undefined ? num(r[iO]) : 0);
+      const online = (isAllDay && iAV !== undefined) ? str(r[iAV]) : (iV !== undefined ? str(r[iV]) : "");
       out.push({
         rid, name: iName !== undefined ? str(r[iName]) : "",
         teamId: iS !== undefined ? normId(r[iS]) : "",
         siteName: iN !== undefined ? str(r[iN]) : "",
-        day, per, ok,
-        orders: iO !== undefined ? num(r[iO]) : 0,
-        online: iV !== undefined ? str(r[iV]) : ""
+        day, per, ok, orders, online
       });
     }
   }
@@ -754,8 +810,9 @@ function shiftMatrix() {
     let c = m.get(r.day);
     if (!c) m.set(r.day, c = { fails: new Map(), sched: 0, unk: 0, list: [] });
     c.sched++;
-    if (r.ok === 0) c.fails.set(r.per, (c.fails.get(r.per) || 0) + 1);
-    else if (r.ok === -1) c.unk++;
+    const ok = recOk(r);        // 全天按可编辑标准判定，其它班次采信系统标记
+    if (ok === 0) c.fails.set(r.per, (c.fails.get(r.per) || 0) + 1);
+    else if (ok === -1) c.unk++;
     c.list.push(r);
   }
   return cells;
@@ -808,6 +865,7 @@ function renderAll() {
     `${esc(viewName)}矩阵 · <b>${esc(dimName)}</b>` +
     ` <span class="ql-sub">${esc(month)}（1 ~ ${b.maxDay} 日）· ${esc(dimName)}维度` +
     ` · 出勤明细 ${state.recs.length} 行 · 坏单 ${state.orders.length} 单` +
+    (state.view === "shift" ? ` · 全天标准 ${esc(allDayLabel())}` : "") +
     ` · ${state.fromShared ? "运力模块缓存" : "独立取数"}</span>`;
   const wrap = $("matrix-wrap");
   if (!state.recs.length && !state.orders.length) {
@@ -879,8 +937,9 @@ function renderFoot() {
     "行随维度切换：整商 = 全部数据汇总成一行；商圈片 / 站点 = 每个商圈片 / 站点一行（副标题为站点数 / 所属商圈片）；" +
     "骑手 = 只显示本月有炸班或坏单的骑手（名下站点 = 该骑手本月班次最多的站点）。列 = 本月日期。<br>" +
     "炸班次 = 出勤统计「导出明细数据」的骑手 × 时段明细（本月按 7 天分段；当月今天取 T0 实时考勤快照），" +
-    "只统计「是否排班 = 排班」的班次；红字 = 当天炸掉的班次（同一班次炸多人显示「班次*n」，人数降序；含「全天」，按系统「是否达成」标记），" +
-    "空白 = 全部达成或无排班；快照缺达成标记时显示琥珀「统计中」（当日数据 T+1 结算）；" +
+    "只统计「是否排班 = 排班」的班次；红字 = 当天炸掉的班次（同一班次炸多人显示「班次*n」，人数降序）。" +
+    `<b>「全天」单独定义、不采信系统「是否达成」标记</b>：完单量 ≥ ${state.allDay.orders} 单 <b>且</b> 有效在线时长 ≥ ${state.allDay.hours} 小时才算达标，否则计为炸班 —— 工具条「全天标准 <b>${esc(allDayLabel())}</b>」可编辑、本机记忆，改完立即重算；其余班次仍按系统标记。` +
+    "空白 = 全部达成或无排班；数据缺失时显示琥珀「统计中」（当日 T0 实时快照次日 T+1 结算）；" +
     "点击单元格看该行当天的排班班次明细（骑手 / 班次 / 完单量 / 有效在线）。<br>" +
     "坏单 = KPI 考核运单明细 4 类问题订单筛选 + 违规处罚列表（违规状态=成立、违规分类=差评+投诉）" +
     "运单号去重后逗号拼接批量回查，两路按运单取并集、不重复计数（与运力模块投诉 / 差评同口径）；" +
@@ -888,7 +947,8 @@ function renderFoot() {
     "违规处罚列表按违规分类（成立投诉 / 差评）独立计入投诉 / 差评标签，与考核运单明细 4 列取并集 —— " +
     "提前点送达类订单同时被判投诉 / 差评时，两个标签都要单独算（真机实测该类单在明细里「是否投诉单」列为否）。" +
     "右侧「本月合计」= 该行整月汇总数量（点击看整月明细），表尾「合计」= 每个日期的全维度汇总；" +
-    "数据优先复用运力模块已取到的整月明细（同源缓存，零重复请求），点「立即刷新」强制重拉。" +
+    "数据优先复用运力模块已取到的整月明细（同源缓存，零重复请求），点「立即刷新」强制重拉；" +
+    "缓存只含 T+1 历史明细，看当天 T0 的全天数据请点「立即刷新」。" +
     (isCur ? "今天为 T+1 结算数据，当日的班次 / 坏单次日才完整。" : "");
 }
 
@@ -943,15 +1003,23 @@ function shiftPop(month, key, day) {
   const ordered = list.slice().sort((a, b) =>
     a.per.localeCompare(b.per, "zh-CN") || (a.name || "").localeCompare(b.name || "", "zh-CN"));
   for (const r of ordered) {
-    const mk = r.ok === 1 ? '<span class="mk yes">达成</span>'
-      : r.ok === 0 ? '<span class="mk no">未达成</span>' : '<span class="mk tp">统计中</span>';
+    const ok = recOk(r);
+    const mk = ok === 1 ? '<span class="mk yes">达成</span>'
+      : ok === 0 ? '<span class="mk no">未达成</span>' : '<span class="mk tp">统计中</span>';
+    const perCell = r.per === "全天"
+      ? `<span title="按自定义全天标准判定">全天<sup class="ql-sup">自定义</sup></span>` : esc(r.per);
     html += "<tr>";
     if (showRider) html += `<td>${esc(r.name || r.rid)}</td>`;
     if (showSite) html += `<td>${esc(r.siteName || areaOf(r.teamId, r.siteName))}</td>`;
-    html += `<td>${esc(r.per)}</td><td>${mk}</td><td>${int(r.orders)}</td><td class="lft">${esc(r.online || "—")}</td></tr>`;
+    html += `<td>${perCell}</td><td>${mk}</td><td>${int(r.orders)}</td><td class="lft">${esc(r.online || "—")}</td></tr>`;
   }
   html += "</tbody></table>";
-  const bad = list.filter((r) => r.ok === 0).length;
+  if (list.some((r) => r.per === "全天")) {
+    html += `<div class="ql-pop-note">「全天」班次不采信系统「是否达成」标记，按自定义标准判定：` +
+      `完单量 ≥ ${state.allDay.orders} 单 <b>且</b> 有效在线时长 ≥ ${state.allDay.hours} 小时为达标，否则计为炸班` +
+      `（工具条「全天标准」可修改，当前 ${esc(allDayLabel())}）。</div>`;
+  }
+  const bad = list.filter((r) => recOk(r) === 0).length;
   openPop(`${name} · ${day || "整月"} 班次明细 · 排班 ${list.length} 班${bad ? ` · 炸 ${bad} 班` : " · 全部达成"}`, html);
 }
 /** 某行某天的坏单明细：运单ID + 类型标签（多标签全列）。 */
@@ -1000,6 +1068,31 @@ function setMonth(m) {
   loadAll();
 }
 
+// ---------------------------------------------------------------- 全天标准设置（v3.48.0）
+function openAllDayCfg() {
+  $("cfg-orders").value = state.allDay.orders;
+  $("cfg-hours").value = state.allDay.hours;
+  $("ql-cfg-mask").hidden = false;
+}
+function closeAllDayCfg() { $("ql-cfg-mask").hidden = true; }
+function saveAllDayCfg(reset) {
+  let o, h;
+  if (reset) { o = ALLDAY_DEFAULT.orders; h = ALLDAY_DEFAULT.hours; }
+  else {
+    o = Number($("cfg-orders").value); h = Number($("cfg-hours").value);
+    if (!isFinite(o) || o < 0 || o > 200 || !isFinite(h) || h < 0 || h > 24) {
+      showNotice("全天标准请输入有效范围：完单量 0~200 单、有效在线时长 0~24 小时。");
+      return;
+    }
+  }
+  state.allDay = { orders: Math.round(o), hours: Math.round(h * 10) / 10 };
+  try { localStorage.setItem(ALLDAY_LS, JSON.stringify(state.allDay)); } catch (e) { /* 配额不足 */ }
+  $("allday-cfg").textContent = allDayLabel();
+  closeAllDayCfg();
+  renderAll();                 // 只重算矩阵，不重新取数
+  showNotice(`全天标准已设为「完单 ≥ ${state.allDay.orders} 单 且 有效时长 ≥ ${state.allDay.hours} 小时」，矩阵已立即重算。`, "blue");
+}
+
 // ---------------------------------------------------------------- 启动
 function boot() {
   try {
@@ -1015,6 +1108,12 @@ function boot() {
   $("btn-next-month").addEventListener("click", () => setMonth(shiftMonth(state.month, 1)));
   $("btn-this-month").addEventListener("click", () => setMonth(curMonth()));
   $("btn-refresh").addEventListener("click", () => loadAll(true));   // 强制重拉，跳过运力模块缓存
+  $("allday-cfg").textContent = allDayLabel();
+  $("btn-allday").addEventListener("click", openAllDayCfg);
+  $("ql-cfg-close").addEventListener("click", closeAllDayCfg);
+  $("cfg-reset").addEventListener("click", () => saveAllDayCfg(true));
+  $("cfg-save").addEventListener("click", () => saveAllDayCfg(false));
+  $("ql-cfg-mask").addEventListener("click", (ev) => { if (ev.target === $("ql-cfg-mask")) closeAllDayCfg(); });
   $("ql-pop-newtab").addEventListener("click", popInNewTab);
   for (const b of document.querySelectorAll(".ql-dim")) b.addEventListener("click", () => setDim(b.dataset.dim));
   for (const b of document.querySelectorAll(".ql-view")) b.addEventListener("click", () => setView(b.dataset.view));
@@ -1031,7 +1130,9 @@ function boot() {
   });
   $("ql-pop-close").addEventListener("click", closePop);
   $("ql-pop-mask").addEventListener("click", (ev) => { if (ev.target === $("ql-pop-mask")) closePop(); });
-  document.addEventListener("keydown", (ev) => { if (ev.key === "Escape") closePop(); });
+  document.addEventListener("keydown", (ev) => {
+    if (ev.key === "Escape") { closePop(); closeAllDayCfg(); }
+  });
   setMonth(validMonth($("month-picker").value) ? $("month-picker").value : curMonth());
 }
 
@@ -1042,6 +1143,8 @@ Object.assign(window.__QL__ = window.__QL__ || {}, {
   areaOf, shiftCellHtml, badCellHtml, requestRL, riderInfoMap,
   readShared, writeShared, cellCount, popInNewTab, renderMatrixTable,
   violationFlags, applyViolationFlags,
+  parseHours, allDayVerdict, recOk, loadAllDayCfg, saveAllDayCfg, openAllDayCfg, closeAllDayCfg,
+  allDayLabel, ALLDAY_DEFAULT, ALLDAY_LS,
   API_ATT_DETAIL, API_ATT_LIVE, API_TEAMS, API_KPI_DETAIL, API_VIOLATION,
   SITE_TO_AREA, KPI_FILTERS, KPI_COLS, BAD_COLS, VIOL_SEG_DAYS, VIOL_BATCH,
   setDim, setView, setMonth, loadAll, renderAll, shiftPop, badPop

@@ -24,6 +24,7 @@
       <button id="btn-next-month" class="date-step" type="button" title="下一个月" aria-label="下一个月"></button>
     </div>
     <button id="btn-this-month" class="ghost" title="切回当前月份">本月</button>
+    <button id="btn-allday" class="ghost" title="设置「全天」班次的达标标准（完单量 / 有效在线时长），可编辑">全天标准 <b id="allday-cfg">18单 / 6小时</b></button>
     <div class="ql-dims" role="group" aria-label="维度切换">
       <button class="ql-dim active" id="dim-agency" data-dim="agency" title="整商：全部站点汇总">整商</button>
       <button class="ql-dim" id="dim-area" data-dim="area" title="按商圈片查看">商圈片</button>
@@ -62,6 +63,23 @@
       </span>
     </div>
     <div class="ql-pop-body" id="ql-pop-body"></div>
+  </div>
+</div>
+
+<!-- v3.48.0：全天班次达标标准设置（本机记忆） -->
+<div class="ql-cfg-mask" id="ql-cfg-mask" hidden>
+  <div class="ql-cfg" role="dialog" aria-modal="true">
+    <div class="ql-cfg-head"><strong>全天班次达标标准</strong><button id="ql-cfg-close" class="ghost" title="关闭">×</button></div>
+    <div class="ql-cfg-body">
+      <p>「全天」班次<b>不采信系统「是否达成」标记</b>，按下述两个条件判定；<b>两项同时满足</b>才算达标，否则计为炸班。</p>
+      <label>完单量 ≥ <input id="cfg-orders" type="number" min="0" max="200" step="1"> 单</label>
+      <label>有效在线时长 ≥ <input id="cfg-hours" type="number" min="0" max="24" step="0.5"> 小时</label>
+      <p class="ql-cfg-tip">有效时长取自出勤明细「有效在线时长」列（如 11小时06分钟 = 11.1 小时；实时快照取「全天有效在线时长」）。修改后矩阵立即重算、无需重新取数，设置只保存在本机。</p>
+    </div>
+    <div class="ql-cfg-acts">
+      <button id="cfg-reset" class="ghost">恢复默认（18单 / 6小时）</button>
+      <button id="cfg-save" class="primary">保存并重算</button>
+    </div>
   </div>
 </div>
 
