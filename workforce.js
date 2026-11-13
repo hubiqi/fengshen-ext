@@ -22,6 +22,9 @@
  *      4 个 Radio 筛选各查一次（物流责未完成单 / 不满意单_投诉单 / 不满意单_差评单 /
  *      不满意单_索赔单），按运单ID去重后读 4 个「是否XX单」列，按复合键计数
  *      → 物流责 / 投诉 / 差评 / 提前点
+ *   v3.51.0：坏单链路与质量运营完全对齐 —— 违规 / 申诉明细只做回查匹配、
+ *      坏单只认考核明细 4 列（hasKpiTag / keepKpiTagged 单一真源）、
+ *      写共享缓存的原始出勤行用 settledRows 过滤当天 T0。
  *   6) v3.41.0 差评 / 投诉补全：违规处罚（targetId=57532 / ZSViolationPunish）
  *      POST xtop.lpd.quality.control.violation.violationOrderAeolusCenterApi.queryList/1.0
  *      违规状态=成立、违规分类=差评+投诉，接口单次窗口 ≤2 天 → 按 2 天分段拉整月；
@@ -499,6 +502,15 @@ function keepKpiTagged(seen) {
   }
   return dropped;
 }
+/** v3.51.0：与质量运营 settledRecs 同口径 —— 共享缓存只写 T+1 结算的历史出勤行。
+ *  当天 T0 未结算，若写进缓存会被质量运营按「全天」自定义标准误判成大片炸班。
+ *  运力模块自身的主表 / 规模汇总不受影响（那里用独立的实时快照）。 */
+function settledRows(rows, month) {
+  const m = month || state.month;
+  if (m !== curMonth()) return rows || [];
+  const t = todayYmd();
+  return (rows || []).filter((r) => r.day !== t);
+}
 function parseKpiRows(j, seen) {
   const d = (j && j.result && j.result.data) || {};
   const heads = (d.multiHeaders || [])[0] || [];
@@ -624,7 +636,7 @@ async function loadKpiFlags(month) {
   keepKpiTagged(seen);
   // v3.46.0：把带日期 / 运单号 / 骑手 / 站点的原始坏单留给质量运营复用
   state.rawOrders = [...seen.values()]
-    .filter((v) => v.tid && v.day && (v.lgt || v.complain || v.negative || v.early))
+    .filter((v) => v.tid && v.day && hasKpiTag(v))
     .map((v) => ({ tid: v.tid, day: v.day, rid: v.rid, rname: v.rname || "",
       teamId: normId(v.teamId || ""), siteName: v.siteName || "",
       lgt: v.lgt, complain: v.complain, negative: v.negative, early: v.early }));
@@ -2383,6 +2395,7 @@ function renderMeta() {
     "另用申诉 / 违规处罚列表（违规状态=成立、分类=差评+投诉、接口按 2 天分段）的运单号去重后" +
     "逗号拼接批量回查匹配考核运单明细，两路按运单去重；坏单标签与数量一律以考核运单明细 4 列为准，" +
     "违规分类本身不算标签、回查命中但 4 列全「否」的单不计入（与质量运营同口径）；" +
+    "共享缓存只写 T+1 结算的历史出勤行，当天 T0 未结算数据不进缓存（与质量运营炸班次口径一致）；" +
     "出勤异常 / 首跑 / 4 类坏单均按「骑手id＋站点id」归集，同一骑手跨站点各站分开计、不重复；金额单位人民币元。";
 }
 
@@ -2514,7 +2527,8 @@ async function loadDetailData(gen, teamIds) {
     const raw = {
       v: 3, month: state.month, ts: Date.now(), complete,
       teams: (teams || []).map((t) => ({ id: String(t.id), name: String(t.name || "") })),
-      recs: (a.status === "fulfilled" && Array.isArray(a.value.rows)) ? a.value.rows : [],
+      recs: (a.status === "fulfilled" && Array.isArray(a.value.rows))
+        ? settledRows(a.value.rows, state.month) : [],
       orders: state.rawOrders || []
     };
     // 半份数据不写缓存，避免质量运营复用后「坏单矩阵出不来」
@@ -2739,7 +2753,7 @@ window.__SET_WORKFORCE__ = (obj) => {
 window.__WF__ = { state, COLS, PAGE_COLS, buildRows, attachDetail, visibleRows, splitSep,
   staffMap, clueMap, money, attStatsFromSheets, monthSegments, monthBounds, exportCsv,
   applyData, loadKpiFlags, loadAttendance, KPI_FILTERS, violationMeta, applyViolationMeta,
-  hasKpiTag, keepKpiTagged,
+  hasKpiTag, keepKpiTagged, settledRows,
   // v3.41.0 差评 / 投诉补全（违规处罚 → 批量回查考核运单明细）
   parseKpiRows, loadViolationTrackingIds, API_VIOLATION, VIOL_SEG_DAYS, VIOL_BATCH,
   normId, pairKey, pairGet, hookPairMap,

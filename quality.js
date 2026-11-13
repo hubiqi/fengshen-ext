@@ -1,4 +1,4 @@
-/* 质量运营模块（v3.50.0，独立页面）
+/* 质量运营模块（v3.51.0，独立页面）
  * ---------------------------------------------------------------------------
  * 整商 / 商圈片 / 站点 / 骑手（按钮切换）× 炸班次 / 坏单（视图切换）的本月日期矩阵，
  * 行主体随维度变化（v3.45.0）：整商 = 1 行汇总；商圈片 / 站点 = 各一行；
@@ -8,6 +8,8 @@
  *   不采信系统「是否达成」标记；工具条「全天标准」可编辑、本机记忆、改完立即重算矩阵。
  *   历史明细读「完单量 / 有效在线时长」，T0 实时快照读「全天完单量 / 全天有效在线时长」
  *   并按「排班状态」过滤（全天汇总行不在「排班时段」计划里）。
+ * v3.51.0：骑手维度按整月汇总降序排序（当前视图合计优先、另一视图合计次之）；
+ *   筛选口径改用 recOk()（全天自定义标准也算「有问题」），与矩阵合计列完全一致。
  * v3.50.0：炸班次不再显示当天 T0 —— 停拉实时考勤快照、过滤当天出勤行、矩阵列只到昨天
  *   （真机 11-13 未结算的「全天」被判成 223 个炸班）；坏单视图不变。
  * v3.49.0：坏单口径回退到「只认考核运单明细标签」—— 申诉 / 违规处罚明细只提供运单号
@@ -750,18 +752,31 @@ function entityRows() {
         sub: areaOf(tid, sn) }))
       .sort((x, y) => x.name.localeCompare(y.name, "zh-CN"));
   }
-  // 骑手维度：只显示有异常（炸班或坏单）的骑手
+  // 骑手维度：只显示有异常（炸班或坏单）的骑手；v3.51.0 按整月汇总数量降序排列。
+  // 汇总口径与矩阵行末「本月合计」完全一致：炸班 = recOk()===0 的班次数，
+  // 坏单 = 4 个标签数之和（一个订单命中多个标签各计一次）。
   const infos = riderInfoMap();
-  const badRiders = new Set();
+  const shiftTotal = new Map(), badTotal = new Map();
+  const inc = (m, rid, n) => { const k = normId(rid); if (k) m.set(k, (m.get(k) || 0) + n); };
+  for (const r of state.recs) if (recOk(r) === 0) inc(shiftTotal, r.rid, 1);
   for (const o of state.orders) {
-    if (o.lgt || o.complain || o.negative || o.early) badRiders.add(normId(o.rid));
+    const n = (o.lgt || 0) + (o.complain || 0) + (o.negative || 0) + (o.early || 0);
+    if (n) inc(badTotal, o.rid, n);
   }
-  const failRiders = new Set();
-  for (const r of state.recs) if (r.ok === 0) failRiders.add(normId(r.rid));
-  return [...infos.values()]
-    .filter((r) => failRiders.has(r.rid) || badRiders.has(r.rid))
-    .map((r) => ({ key: "R|" + r.rid, name: r.name || r.rid, sub: r.siteName || r.area }))
-    .sort((x, y) => x.name.localeCompare(y.name, "zh-CN"));
+  const viewShift = state.view === "shift";
+  const list = [...infos.values()]
+    .filter((r) => (shiftTotal.get(r.rid) || 0) || (badTotal.get(r.rid) || 0));
+  // 主排序 = 当前视图的整月合计（多 → 少）；相同则按另一视图的整月合计（多 → 少）；最后按姓名
+  list.sort((a, b) => {
+    const as = shiftTotal.get(a.rid) || 0, bs = shiftTotal.get(b.rid) || 0;
+    const ab = badTotal.get(a.rid) || 0, bb = badTotal.get(b.rid) || 0;
+    const primary = viewShift ? bs - as : bb - ab;
+    if (primary) return primary;
+    const secondary = viewShift ? bb - ab : bs - as;
+    if (secondary) return secondary;
+    return String(a.name || a.rid).localeCompare(String(b.name || b.rid), "zh-CN");
+  });
+  return list.map((r) => ({ key: "R|" + r.rid, name: r.name || r.rid, sub: r.siteName || r.area }));
 }
 /** 骑手信息（主站点 = 本月班次最多的站点），供骑手维度行与弹层使用。 */
 function riderInfoMap() {
@@ -945,7 +960,8 @@ function renderFoot() {
   const isCur = state.month === curMonth();
   $("ql-foot").innerHTML =
     "行随维度切换：整商 = 全部数据汇总成一行；商圈片 / 站点 = 每个商圈片 / 站点一行（副标题为站点数 / 所属商圈片）；" +
-    "骑手 = 只显示本月有炸班或坏单的骑手（名下站点 = 该骑手本月班次最多的站点）。列 = 本月日期。<br>" +
+    "骑手 = 只显示本月有炸班或坏单的骑手（名下站点 = 该骑手本月班次最多的站点）；" +
+    "<b>骑手行按整月汇总排序</b>：当前视图的「本月合计」从多到少，相同则按另一视图的合计从多到少（炸班次↔坏单）。列 = 本月日期。<br>" +
     "炸班次 = 出勤统计「导出明细数据」的骑手 × 时段明细（本月按 7 天分段）；" +
     "<b>只取 T+1 结算的历史日期，当月今天 T0 实时快照不显示、不计数</b>（未结算的全天数据会误判成大片炸班），次日自动补上。" +
     "只统计「是否排班 = 排班」的班次；红字 = 当天炸掉的班次（同一班次炸多人显示「班次*n」，人数降序）。" +
