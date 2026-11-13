@@ -1,4 +1,4 @@
-/* 质量运营模块（v3.48.1，独立页面）
+/* 质量运营模块（v3.49.0，独立页面）
  * ---------------------------------------------------------------------------
  * 整商 / 商圈片 / 站点 / 骑手（按钮切换）× 炸班次 / 坏单（视图切换）的本月日期矩阵，
  * 行主体随维度变化（v3.45.0）：整商 = 1 行汇总；商圈片 / 站点 = 各一行；
@@ -8,11 +8,11 @@
  *   不采信系统「是否达成」标记；工具条「全天标准」可编辑、本机记忆、改完立即重算矩阵。
  *   历史明细读「完单量 / 有效在线时长」，T0 实时快照读「全天完单量 / 全天有效在线时长」
  *   并按「排班状态」过滤（全天汇总行不在「排班时段」计划里）。
- * v3.47.0：违规处罚分类（成立 COMPLAIN / BAD_REVIEW）作为「投诉 / 差评」独立标签计入，
- *   与考核运单明细 4 列取并集 —— 提前点送达类订单同时被判投诉 / 差评时，两类标签分别单独算。
- *   真机实测：违规处罚 149 个成立单（147 投诉 / 2 差评）在考核运单明细里「是否投诉单 /
- *   是否差评单」列几乎全为「否」，旧补全路只回查 KPI 明细导致这些单被整个漏掉。
- *   违规 item 的 violationTime / knightInfo / teamInfo 还用于 KPI 回查缺行时兜底建单。
+ * v3.49.0：坏单口径回退到「只认考核运单明细标签」—— 申诉 / 违规处罚明细只提供运单号
+ *   用于回查匹配，违规分类不再产生任何坏单标签；回查命中但 4 列全「否」的单直接剔除。
+ *   （v3.47.0 曾把 149 个成立违规单按分类计入，导致坏单虚高，本版按用户口径撤销。）
+ *   申诉 item 的 violationTime / knightInfo / teamInfo 只用于补全已命中坏单的元信息。
+ *   共享缓存升 v3，升级后旧缓存自动失效重取。
  * v3.46.0：① 数据优先复用运力模块写下的整月原始明细（同源 localStorage 缓存，零重复请求，
  *   「立即刷新」强制重拉）；② 坏单「日期」列实际是 20261111 紧凑格式，统一归一 YYYY-MM-DD
  *   （此前校验失败导致坏单全被过滤、矩阵空白）；③ 面板 iframe 内默认走静默桥接 + 弹层
@@ -137,7 +137,7 @@ function monthSegments(month) {
 }
 
 // ---------------------------------------------------------------- 网络层（与运力模块同款）
-const SHARE_LS = "wb_wf_raw_v2_";     // 与运力模块同源共享的整月原始明细缓存
+const SHARE_LS = "wb_wf_raw_v3_";     // 与运力模块同源共享的整月原始明细缓存
 const ALLDAY_LS = "wb_ql_allday_v1";            // v3.48.0：全天班次达标标准（本机记忆、可编辑）
 const ALLDAY_DEFAULT = { orders: 18, hours: 6 };// 默认：完单量 ≥ 18 单 且 有效在线时长 ≥ 6 小时
 function loadAllDayCfg() {
@@ -189,7 +189,7 @@ const state = {
   teams: [], teamErr: "",
   recs: [], attErr: "",
   orders: [], kpiErr: "",
-  violMap: new Map(),         // v3.47.0：违规处罚运单 → 投诉/差评独立标签 + 兜底元信息
+  violMap: new Map(),         // v3.49.0：申诉/违规明细运单 → 仅元信息（不产生坏单标签）
   allDay: loadAllDayCfg(),    // v3.48.0：全天班次达标标准（可编辑）
   liveUsed: false
 };
@@ -197,7 +197,7 @@ const state = {
 function readShared(month) {
   try {
     const raw = JSON.parse(localStorage.getItem(SHARE_LS + month) || "null");
-    if (!raw || raw.v !== 2 || raw.month !== month) return null;
+    if (!raw || raw.v !== 3 || raw.month !== month) return null;
     if (raw.complete === false) return null;      // 半份数据不复用
     if (!Array.isArray(raw.recs) || !Array.isArray(raw.orders)) return null;
     if (!raw.recs.length && !raw.orders.length) return null;
@@ -208,7 +208,7 @@ function readShared(month) {
 function writeShared(month, teams, recs, orders) {
   try {
     localStorage.setItem(SHARE_LS + month, JSON.stringify({
-      v: 2, month, ts: Date.now(),
+      v: 3, month, ts: Date.now(),
       teams: (teams || []).map((t) => ({ id: String(t.id), name: String(t.name || "") })),
       recs: recs || [], orders: orders || []
     }));
@@ -439,15 +439,14 @@ async function loadLiveToday(teamIds, today) {
 
 // ---------------------------------------------------------------- 数据源 3：坏单（Radio 4 筛选 + 违规处罚补全）
 /** 解析一页考核运单明细（带日期），按运单ID 去重合并进 seen（同单标记取并集）。 */
-/** 违规处罚 item → 差评 / 投诉独立标签（v3.47.0）。
- *  真机核实：违规分类 COMPLAIN 的单在考核运单明细里「是否投诉单」列仍是「否」，
- *  所以不能只靠回查 KPI 明细取标记 —— 违规分类本身就是一个独立的投诉 / 差评标签。
+/** 违规处罚 / 申诉明细 item → 仅解析元信息（v3.49.0）。
+ *  用户口径：申诉明细只提供运单号用于回查「匹配」考核运单明细，坏单标签一律以考核明细
+ *  的 4 个「是否XX单」列为准；违规分类（COMPLAIN / BAD_REVIEW）不再产生任何坏单标签。
  *  violationTime「2026-11-12T22:46:16」/ knightInfo「ID-姓名」/ teamInfo「ID-站点名」
- *  用于 KPI 回查没返回行时的兜底。 */
-function violationFlags(x) {
+ *  仅用于补全考核明细行缺失的日期 / 骑手 / 站点。 */
+function violationMeta(x) {
   const tid = str(x && x.trackingId);
   if (!tid) return null;
-  const cat = String((x && x.violationCategory) || "").toUpperCase();
   const d8 = String((x && x.violationTime) || "").replace(/\D/g, "").slice(0, 8);
   const day = /^\d{8}$/.test(d8) ? `${d8.slice(0, 4)}-${d8.slice(4, 6)}-${d8.slice(6, 8)}` : "";
   const ki = String((x && x.knightInfo) || "").split("-");
@@ -455,34 +454,34 @@ function violationFlags(x) {
   return {
     tid, day,
     rid: normId(ki[0] || ""), rname: ki.slice(1).join("-"),
-    teamId: normId(ti[0] || ""), siteName: ti.slice(1).join("-"),
-    complain: cat === "COMPLAIN" ? 1 : 0,
-    negative: cat === "BAD_REVIEW" ? 1 : 0
+    teamId: normId(ti[0] || ""), siteName: ti.slice(1).join("-")
   };
 }
-/** 把违规处罚的投诉 / 差评标记并入坏单明细（与考核运单明细 4 列取并集，同单不重复计数）。
- *  KPI 回查有行 → 只补标记；没返回行 → 用违规 item 的日期/骑手/站点直接建一条坏单。 */
-function applyViolationFlags(seen) {
-  let added = 0, boosted = 0;
+/** v3.49.0：申诉明细只补元信息 —— 绝不产生坏单标签、绝不新建坏单行。
+ *  仅当该运单已被考核明细命中且已有标签、但缺日期 / 骑手 / 站点时才补空字段。 */
+function applyViolationMeta(seen) {
+  let filled = 0;
   for (const [tid, v] of state.violMap) {
     const cur = seen.get(tid);
-    if (cur) {
-      if (v.complain && !cur.complain) { cur.complain = 1; boosted++; }
-      if (v.negative && !cur.negative) { cur.negative = 1; boosted++; }
-      if (!cur.day && v.day) cur.day = v.day;
-      if (!cur.rid && v.rid) cur.rid = v.rid;
-      if (!cur.rname && v.rname) cur.rname = v.rname;
-      if (!cur.teamId && v.teamId) cur.teamId = v.teamId;
-      if (!cur.siteName && v.siteName) cur.siteName = v.siteName;
-    } else if (v.day && (v.complain || v.negative)) {
-      seen.set(tid, {
-        tid, day: v.day, rid: v.rid, rname: v.rname, teamId: v.teamId, siteName: v.siteName,
-        lgt: 0, complain: v.complain, negative: v.negative, early: 0
-      });
-      added++;
-    }
+    if (!cur || !hasKpiTag(cur)) continue;
+    let hit = false;
+    if (!cur.day && v.day) { cur.day = v.day; hit = true; }
+    if (!cur.rid && v.rid) { cur.rid = v.rid; hit = true; }
+    if (!cur.rname && v.rname) { cur.rname = v.rname; hit = true; }
+    if (!cur.teamId && v.teamId) { cur.teamId = v.teamId; hit = true; }
+    if (!cur.siteName && v.siteName) { cur.siteName = v.siteName; hit = true; }
+    if (hit) filled++;
   }
-  return { added, boosted };
+  return { filled };
+}
+/** 坏单标签唯一来源 = 考核运单明细 4 列；全「否」的回查命中行不算坏单。 */
+function hasKpiTag(o) { return !!(o && (o.lgt || o.complain || o.negative || o.early)); }
+function keepKpiTagged(seen) {
+  let dropped = 0;
+  for (const [tid, o] of seen) {
+    if (!hasKpiTag(o)) { seen.delete(tid); dropped++; }
+  }
+  return dropped;
 }
 function parseBadRows(j, seen) {
   const d = (j && j.result && j.result.data) || {};
@@ -549,15 +548,15 @@ async function loadViolationTrackingIds(b) {
       const d0 = (j && j.result && j.result.data) || {};
       const list = Array.isArray(d0.violationEventList) ? d0.violationEventList : [];
       for (const x of list) {
-        const v = violationFlags(x);
+        const v = violationMeta(x);       // v3.49.0：只取运单号 + 元信息，不取违规分类标签
         if (!v) continue;
         tids.add(v.tid);
         const prev = state.violMap.get(v.tid);
         if (prev) {
-          prev.complain = Math.max(prev.complain, v.complain);
-          prev.negative = Math.max(prev.negative, v.negative);
           if (!prev.day && v.day) prev.day = v.day;
+          if (!prev.rid && v.rid) prev.rid = v.rid;
           if (!prev.rname && v.rname) prev.rname = v.rname;
+          if (!prev.teamId && v.teamId) prev.teamId = v.teamId;
           if (!prev.siteName && v.siteName) prev.siteName = v.siteName;
         } else {
           state.violMap.set(v.tid, v);
@@ -611,11 +610,13 @@ async function loadBadOrders(month, onStep) {
   } catch (e) {
     console.warn("[viol] 坏单补全失败（不影响 Radio 筛选结果）:", e && e.message);
   }
-  // v3.47.0：违规处罚分类（投诉 / 差评）是独立标签 —— 即使 KPI 明细里「是否投诉单 /
-  // 是否差评单」列为「否」（提前点送达类投诉违规实测 143 单全为否），也要单独计入。
-  // 与考核运单明细 4 列取并集；一个订单同时命中提前点与差评 / 投诉时各标签分别计数。
-  const vf = applyViolationFlags(seen);
-  if (vf.added || vf.boosted) setProgress(88, `违规处罚分类补全：${vf.boosted} 单补标记 / ${vf.added} 单新增`);
+  // v3.49.0：坏单数量一律以考核运单明细 4 个标签列为准。
+  // 申诉 / 违规明细只提供运单号用于回查匹配；命中但 4 列全「否」的单不计坏单
+  // （v3.47.0 曾把违规分类当独立标签，导致 149 个成立单被计入、坏单虚高）。
+  const vm = applyViolationMeta(seen);
+  const dropped = keepKpiTagged(seen);
+  if (vm.filled || dropped)
+    setProgress(88, `按考核明细标签定稿：${vm.filled} 单补元信息 / ${dropped} 单无标签剔除`);
   return [...seen.values()];
 }
 
@@ -637,7 +638,7 @@ async function loadAll(force) {
   if (shared) {
     state.teams = shared.teams || [];
     state.recs = shared.recs || [];
-    state.orders = shared.orders || [];
+    state.orders = (shared.orders || []).filter((o) => o.day && hasKpiTag(o));
     state.fromShared = true;
     if (!state.teams.length) { try { state.teams = await loadTeams(); } catch (e) { /* 站点名映射降级 */ } }
     setProgress(null);
@@ -693,7 +694,7 @@ async function loadAll(force) {
   }
   setProgress(55, "坏单明细拉取中…");
   try {
-    state.orders = (await loadBadOrders(state.month)).filter((o) => o.day);
+    state.orders = (await loadBadOrders(state.month)).filter((o) => o.day && hasKpiTag(o));
   } catch (e) {
     state.kpiErr = String((e && e.message) || e);
     state.orders = [];
@@ -942,11 +943,11 @@ function renderFoot() {
     `<b>「全天」单独定义、不采信系统「是否达成」标记</b>：完单量 ≥ ${state.allDay.orders} 单 <b>且</b> 有效在线时长 ≥ ${state.allDay.hours} 小时才算达标，否则计为炸班 —— 工具条「全天标准 <b>${esc(allDayLabel())}</b>」可编辑、本机记忆，改完立即重算；其余班次仍按系统标记。` +
     "空白 = 全部达成或无排班；数据缺失时显示琥珀「统计中」（当日 T0 实时快照次日 T+1 结算）；" +
     "点击单元格看该行当天的排班班次明细（骑手 / 班次 / 完单量 / 有效在线）。<br>" +
-    "坏单 = KPI 考核运单明细 4 类问题订单筛选 + 违规处罚列表（违规状态=成立、违规分类=差评+投诉）" +
-    "运单号去重后逗号拼接批量回查，两路按运单取并集、不重复计数（与运力模块投诉 / 差评同口径）；" +
-    "红字「类型*N」 = 当天各类型坏单数，一个订单命中多个标签时每个标签单独计算；点击单元格看运单明细。" +
-    "违规处罚列表按违规分类（成立投诉 / 差评）独立计入投诉 / 差评标签，与考核运单明细 4 列取并集 —— " +
-    "提前点送达类订单同时被判投诉 / 差评时，两个标签都要单独算（真机实测该类单在明细里「是否投诉单」列为否）。" +
+    "坏单 = KPI 考核运单明细 4 类问题订单筛选，另用申诉 / 违规明细（违规状态=成立、分类=差评+投诉）" +
+    "的运单号去重后逗号拼接<b>回查匹配</b>考核运单明细，两路按运单去重；" +
+    "<b>坏单标签与数量一律以考核运单明细的 4 个「是否XX单」列为准</b> —— 申诉明细的违规分类本身不算标签，" +
+    "回查命中但 4 列全「否」的单不计入坏单（避免虚高）；一个订单命中多个标签时每个标签单独计算。与运力模块同口径；" +
+    "红字「类型*N」 = 当天各类型坏单数，点击单元格看运单明细。" +
     "右侧「本月合计」= 该行整月汇总数量（点击看整月明细），表尾「合计」= 每个日期的全维度汇总；" +
     "数据优先复用运力模块已取到的整月明细（同源缓存，零重复请求），点「立即刷新」强制重拉；" +
     "缓存只含 T+1 历史明细，看当天 T0 的全天数据请点「立即刷新」。" +
@@ -1143,7 +1144,7 @@ Object.assign(window.__QL__ = window.__QL__ || {}, {
   monthBounds, monthSegments, entityRows, shiftMatrix, badMatrix, entityKeyOf,
   areaOf, shiftCellHtml, badCellHtml, requestRL, riderInfoMap,
   readShared, writeShared, cellCount, popInNewTab, renderMatrixTable,
-  violationFlags, applyViolationFlags,
+  violationMeta, applyViolationMeta, hasKpiTag, keepKpiTagged,
   parseHours, allDayVerdict, recOk, loadAllDayCfg, saveAllDayCfg, openAllDayCfg, closeAllDayCfg,
   allDayLabel, ALLDAY_DEFAULT, ALLDAY_LS,
   API_ATT_DETAIL, API_ATT_LIVE, API_TEAMS, API_KPI_DETAIL, API_VIOLATION,
