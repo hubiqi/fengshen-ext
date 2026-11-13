@@ -1,4 +1,4 @@
-/* 质量运营模块（v3.52.0，独立页面）
+/* 质量运营模块（v3.53.0，独立页面）
  * ---------------------------------------------------------------------------
  * 整商 / 商圈片 / 站点 / 骑手（按钮切换）× 炸班次 / 坏单（视图切换）的本月日期矩阵，
  * 行主体随维度变化（v3.45.0）：整商 = 1 行汇总；商圈片 / 站点 = 各一行；
@@ -8,13 +8,18 @@
  *   不采信系统「是否达成」标记；工具条「全天标准」可编辑、本机记忆、改完立即重算矩阵。
  *   历史明细读「完单量 / 有效在线时长」，T0 实时快照读「全天完单量 / 全天有效在线时长」
  *   并按「排班状态」过滤（全天汇总行不在「排班时段」计划里）。
+ * v3.53.0：T0（今天）炸班次参考「出勤达成」的方法恢复显示 —— 实时快照按
+ *   ASSESS.PERIOD_DEFS / PERIOD_STANDARDS 只统计已结束班次、用「有效在线时长 + 完单量」
+ *   双门槛判定（不采信系统标记），未结束 / 整班次数据未出显示琥珀「统计中」不算炸班；
+ *   T0「全天」默认不判（一天没过完 18单/6小时不准），工具条开关可临时打开仅供参考；
+ *   共享缓存仍只写 T+1 历史明细，T0 快照只存内存。撤销 v3.50.0 的「整列砍掉 T0」。
  * v3.52.0：骑手维度严格只显示「当前视图」有问题的骑手（旧版取炸班∪坏单并集，坏单视图里
  *   大量整行空白的骑手让人以为没过滤）；标题显示共/显示/隐藏人数，矩阵对整月合计为 0 的
  *   骑手行做二次剔除，骑手行副标题显示整月炸班 / 坏单数量，弹层问题记录优先。
  * v3.51.0：骑手维度按整月汇总降序排序（当前视图合计优先、另一视图合计次之）；
  *   筛选口径改用 recOk()（全天自定义标准也算「有问题」），与矩阵合计列完全一致。
- * v3.50.0：炸班次不再显示当天 T0 —— 停拉实时考勤快照、过滤当天出勤行、矩阵列只到昨天
- *   （真机 11-13 未结算的「全天」被判成 223 个炸班）；坏单视图不变。
+ * v3.50.0：曾把当天 T0 整列砍掉（未结算全天被判成 223 个炸班）—— v3.53.0 起改为
+ *   参考出勤达成口径恢复显示，仅保留「共享缓存只写 T+1 历史明细」这一条。
  * v3.49.0：坏单口径回退到「只认考核运单明细标签」—— 申诉 / 违规处罚明细只提供运单号
  *   用于回查匹配，违规分类不再产生任何坏单标签；回查命中但 4 列全「否」的单直接剔除。
  *   （v3.47.0 曾把 149 个成立违规单按分类计入，导致坏单虚高，本版按用户口径撤销。）
@@ -134,20 +139,77 @@ function monthBounds(month) {
     end: new Date(y, m - 1, maxDay, 23, 59, 59).getTime()
   };
 }
-/** v3.50.0：炸班次只取 T+1 结算的历史明细 —— 当月今天（T0 实时快照）不出数、不出列。
- *  实时快照的「全天有效在线时长 / 全天完单量」尚未结算，按自定义全天标准会把整批人
- *  误判成炸班（真机 11-13 出现「全天*223」）。次日结算后自动补上。 */
+/** v3.53.0：T0（今天）炸班次口径参考「出勤达成」—— 与 ASSESS.PERIOD_DEFS /
+ *  config.py PERIOD_STANDARDS 同源（start/end/timeMin 单位：分钟，orders：单）。
+ *  只统计「已结束」的班次；未结束/进行中的班次显示琥珀「统计中」、不算炸班。 */
+const T0_PERIODS = [
+  { name: "凌晨1",   start: 0,              end: 2 * 60,       timeMin: 90,  orders: 1 },
+  { name: "凌晨2",   start: 2 * 60,         end: 4 * 60,       timeMin: 78,  orders: 1 },
+  { name: "凌晨3",   start: 4 * 60,         end: 6 * 60,       timeMin: 72,  orders: 1 },
+  { name: "早餐1",   start: 6 * 60,         end: 8 * 60,       timeMin: 90,  orders: 1 },
+  { name: "早餐2",   start: 8 * 60,         end: 10 * 60 + 30, timeMin: 120, orders: 1 },
+  { name: "午高峰",  start: 10 * 60 + 30,   end: 13 * 60 + 30, timeMin: 150, orders: 5 },
+  { name: "下午茶1", start: 13 * 60 + 30,   end: 15 * 60 + 30, timeMin: 90,  orders: 2 },
+  { name: "下午茶2", start: 15 * 60 + 30,   end: 17 * 60 + 30, timeMin: 90,  orders: 2 },
+  { name: "晚高峰",  start: 17 * 60 + 30,   end: 20 * 60,      timeMin: 120, orders: 3 },
+  { name: "夜宵1",   start: 20 * 60,        end: 22 * 60,      timeMin: 90,  orders: 2 },
+  { name: "夜宵2",   start: 22 * 60,        end: 24 * 60,      timeMin: 90,  orders: 2 }
+];
+const t0PeriodOf = (per) => T0_PERIODS.find((p) => p.name === per);
+/** 当前时间该班次是否还没跑完（与出勤达成 ASSESS.build 的 ongoing 同口径：minute < end）。 */
+function t0Ongoing(per, now) {
+  const p = t0PeriodOf(per);
+  if (!p) return false;
+  const d = now || new Date();
+  return (d.getHours() * 60 + d.getMinutes()) < p.end;
+}
+/** T0 实时快照记录判定（参考出勤达成）：
+ *  - 未结束班次 / 整班次数据还没跑出来 → -1「统计中」，绝不误判成炸班；
+ *  - 已结束班次 → 双门槛「有效在线 ≥ timeMin 且 完单 ≥ orders」判达标，不采信系统标记；
+ *  - 「全天」是汇总行，一天没过完按 18单/6小时判不准 → 默认整行不参与，
+ *    工具条「T0 全天」开关打开时才按可编辑标准判定（仅供参考）。
+ *  历史日期仍走原来的口径（系统「是否达成」+ 全天自定义标准），不受影响。 */
+function applyT0Verdict(recs, now) {
+  const d = now || new Date();
+  const minute = d.getHours() * 60 + d.getMinutes();
+  const activity = new Map();     // 班次 -> 快照里是否已有任何有效数据
+  for (const r of recs) {
+    if (r.per === "全天") continue;
+    if (num(r.orders) > 0 || (parseHours(r.online) || 0) > 0) activity.set(r.per, true);
+  }
+  const out = [];
+  let ended = 0, ongoing = 0;
+  for (const r of recs) {
+    r.t0 = true;
+    if (r.per === "全天") {
+      if (!state.t0AllDay) continue;                 // T0 全天默认不判
+      r.ok = allDayVerdict(r, state.allDay);        // 开关打开时按 18单/6小时（仅供参考）
+      out.push(r);
+      continue;
+    }
+    const p = t0PeriodOf(r.per);
+    if (!p || minute < p.end) { r.ok = -1; ongoing++; out.push(r); continue; }
+    ended++;
+    if (!activity.get(r.per)) { r.ok = -1; out.push(r); continue; }  // 整班次数据未出
+    const h = parseHours(r.online);
+    r.ok = (h !== null && h * 60 >= p.timeMin && num(r.orders) >= p.orders) ? 1 : 0;
+    out.push(r);
+  }
+  return { recs: out, ended, ongoing };
+}
+
+/** v3.53.0：从出勤记录里剥掉「当天 T0」的历史行，用于① 读取共享缓存时去重
+ *  ② 写回共享缓存时保证缓存只含 T+1 结算明细。T0 实时快照另存 state.t0Raw / state.recs，
+ *  按出勤达成口径判定后参与矩阵，但绝不写入缓存（避免未结算数据污染其它模块）。 */
 function settledRecs(recs, month) {
   const m = month || state.month;
   if (m !== curMonth()) return recs || [];
   const t = todayYmd();
   return (recs || []).filter((r) => r.day !== t);
 }
-/** 炸班次视图的列范围：当前月只到昨天；历史月显示整月。坏单视图仍用 monthBounds 全量。 */
-function shiftDayMax(month, b) {
-  if (month !== curMonth()) return b.maxDay;
-  return Math.min(b.maxDay, Math.max(0, new Date().getDate() - 1));
-}
+/** v3.53.0：T0 参考出勤达成口径恢复显示 —— 两个视图的列范围都是本月 1 ~ 今天。
+ *  （保留函数供标题 / 渲染统一调用，兼容历史月份。） */
+function shiftDayMax(month, b) { return b.maxDay; }
 function monthSegments(month) {
   const b = monthBounds(month);
   const out = [];
@@ -198,6 +260,7 @@ function allDayVerdict(rec, cfg) {
 /** 统一的班次达成判定：全天走自定义标准，其余班次仍采信系统「是否达成」标记。 */
 function recOk(rec) {
   if (!rec) return -1;
+  if (rec.t0) return rec.ok;      // v3.53.0：T0 已按出勤达成口径（含全天开关）判定
   return rec.per === "全天" ? allDayVerdict(rec, state.allDay) : rec.ok;
 }
 function allDayLabel() { return `${state.allDay.orders}单 / ${state.allDay.hours}小时`; }
@@ -213,7 +276,9 @@ const state = {
   violMap: new Map(),         // v3.49.0：申诉/违规明细运单 → 仅元信息（不产生坏单标签）
   allDay: loadAllDayCfg(),    // v3.48.0：全天班次达标标准（可编辑）
   riderStats: null,           // v3.52.0：骑手维度过滤统计（共 N 名 / 显示 M 名 / 隐藏 X 名）
-  liveUsed: false
+  t0AllDay: (() => { try { return localStorage.getItem("wb_ql_t0_allday") === "on"; }
+    catch (e) { return false; } })(),   // v3.53.0：T0 全天开关（默认关，本机记忆）
+  t0Raw: [], t0Info: null, t0Err: "", liveUsed: false
 };
 /** 读取运力模块写下的整月原始明细（localStorage 在扩展各页面间同源共享）。 */
 function readShared(month) {
@@ -449,7 +514,8 @@ function parseAttSheets(sheets, defaultDay) {
   }
   return out;
 }
-// v3.50.0 起停用（炸班次不显示 T0），保留实现以便日后需要时恢复。
+/** 当天 T0 实时考勤快照（exportAttendance 忽略日期、永远返回当前实时数据）。
+ *  v3.53.0 恢复使用：由 loadT0() 解析后按出勤达成口径判定已结束班次。 */
 async function loadLiveToday(teamIds, today) {
   const j = await request(API_ATT_LIVE, "POST", {
     params: { request: { teamIds, startDate: today, endDate: today } }
@@ -643,6 +709,47 @@ async function loadBadOrders(month, onStep) {
   return [...seen.values()];
 }
 
+/** 用保存的 T0 原始快照重算判定（切换「T0 全天」开关 / 改全天标准时立即重算，不重新取数）。 */
+function refreshT0() {
+  const t = todayYmd();
+  const raw = (state.t0Raw || []).map((r) => Object.assign({}, r, { day: t }));
+  const v = applyT0Verdict(raw, new Date());
+  state.recs = [...(state.recs || []).filter((r) => !r.t0), ...v.recs];
+  state.t0Info = {
+    ended: v.ended, ongoing: v.ongoing,
+    rows: v.recs.length, allDay: state.t0AllDay, used: state.liveUsed
+  };
+}
+/** 当前月拉一次 T0 实时考勤快照，按出勤达成口径判定后并入 state.recs。
+ *  快照只在内存里用，绝不写进同源共享缓存（缓存只存 T+1 结算的历史明细）。 */
+async function loadT0(teamIds, gen) {
+  state.t0Raw = []; state.t0Info = null; state.t0Err = "";
+  if (state.month !== curMonth() || !teamIds || !teamIds.length) return;
+  try {
+    const live = await loadLiveToday(teamIds, todayYmd());
+    if (gen !== state.gen) return;
+    state.t0Raw = parseAttSheets(live, todayYmd());
+    state.liveUsed = true;
+    refreshT0();
+  } catch (e) {
+    state.t0Err = String((e && e.message) || e);
+    state.t0Raw = [];
+  }
+}
+function toggleT0AllDay() {
+  if (state.month !== curMonth()) {
+    showNotice("「T0 全天」只对当月今天生效；切回本月再调整。", "blue");
+    return;
+  }
+  state.t0AllDay = !state.t0AllDay;
+  try { localStorage.setItem("wb_ql_t0_allday", state.t0AllDay ? "on" : "off"); } catch (e) { /* 无痕忽略 */ }
+  if (state.t0Raw.length) refreshT0();
+  renderAll();
+  showNotice(state.t0AllDay
+    ? "T0「全天」已临时打开：一天没过完，这批人仅供参考，次日 T+1 结算后以历史明细为准。"
+    : "T0「全天」已关闭（默认）：当天不判全天，避免未结算数据被算成大片炸班。", "blue");
+}
+
 // ---------------------------------------------------------------- 取数总流程
 async function loadAll(force) {
   if (state.loading) return;
@@ -654,6 +761,7 @@ async function loadAll(force) {
   state.fromShared = false;
   state.teamErr = state.attErr = state.kpiErr = "";
   state.recs = []; state.orders = []; state.liveUsed = false;
+  state.t0Raw = []; state.t0Info = null; state.t0Err = "";   // v3.53.0：切月不残留 T0 快照
 
   // v3.46.0：运力模块已把整月原始明细写进同源缓存 —— 质量运营直接复用，零重复请求。
   // 「立即刷新」= force，跳过缓存重新拉一遍。
@@ -664,10 +772,13 @@ async function loadAll(force) {
     state.orders = (shared.orders || []).filter((o) => o.day && hasKpiTag(o));
     state.fromShared = true;
     if (!state.teams.length) { try { state.teams = await loadTeams(); } catch (e) { /* 站点名映射降级 */ } }
+    // v3.53.0：缓存只含 T+1 历史明细，当天 T0 另拉一次实时快照（出勤达成口径）
+    await loadT0(state.teams.map((t) => t.id), gen);
+    if (gen !== state.gen) { state.loading = false; return; }
     setProgress(null);
     renderAll();
     const at = new Date(shared.ts).toTimeString().slice(0, 5);
-    showNotice(`已复用运力模块 ${state.month} 的整月明细（${at} 取数）：出勤 ${state.recs.length} 行 / 坏单 ${state.orders.length} 单。需要最新数据点「立即刷新」强制重拉。`, "blue");
+    showNotice(`已复用运力模块 ${state.month} 的整月明细（${at} 取数）：出勤 ${state.recs.length} 行 / 坏单 ${state.orders.length} 单；当天 T0 按出勤达成口径单独取数。需要最新数据点「立即刷新」强制重拉。`, "blue");
     setStatus(`复用运力模块 · ${at}`);
     $("btn-refresh").disabled = false;
     state.loading = false;
@@ -699,8 +810,6 @@ async function loadAll(force) {
     state.attErr = String((e && e.message) || e);
     state.recs = [];
   }
-  // v3.50.0：不再拉 T0 实时考勤快照。当天未结算，按「全天」自定义标准会误判成大片炸班；
-  // 炸班次只展示到昨天，次日 T+1 结算后由历史明细自动出现（坏单视图不受影响）。
   setProgress(55, "坏单明细拉取中…");
   try {
     state.orders = (await loadBadOrders(state.month)).filter((o) => o.day && hasKpiTag(o));
@@ -709,9 +818,15 @@ async function loadAll(force) {
     state.orders = [];
   }
   if (gen !== state.gen) { state.loading = false; return; }
+  // v3.53.0：当天 T0 参考「出勤达成」—— 实时快照只统计已结束班次、双门槛判定，
+  // 未结束显示「统计中」、全天默认不判；恢复当天这一列，不再整列砍掉。
+  setProgress(92, "当天 T0 实时快照（出勤达成口径）…");
+  await loadT0(teamIds, gen);
+  if (gen !== state.gen) { state.loading = false; return; }
   setProgress(100, "");
   setProgress(null);
-  writeShared(state.month, state.teams, state.recs, state.orders);
+  // 共享缓存只写 T+1 结算的历史明细，T0 快照绝不入缓存
+  writeShared(state.month, state.teams, settledRecs(state.recs), state.orders);
   renderAll();
   const errs = [state.teamErr && "站点列表", state.attErr && "出勤明细", state.kpiErr && "坏单明细"].filter(Boolean);
   if (errs.length) showNotice("部分数据源未取到：" + errs.join("、") + "，对应行列显示「—」，可点「立即刷新」重试。");
@@ -852,6 +967,7 @@ function shiftMatrix() {
     const ok = recOk(r);        // 全天按可编辑标准判定，其它班次采信系统标记
     if (ok === 0) c.fails.set(r.per, (c.fails.get(r.per) || 0) + 1);
     else if (ok === -1) c.unk++;
+    if (r.t0) c.t0 = true;      // v3.53.0：T0 单元格即便已有炸班，也保留「统计中」提示
     c.list.push(r);
   }
   return cells;
@@ -882,9 +998,9 @@ function shiftCellHtml(c) {
   let html = "";
   const fails = [...c.fails.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], "zh-CN"));
   for (const [per, n] of fails) html += `<span class="qf">${esc(per)}${n > 1 ? "*" + n : ""}</span>`;
-  if (html) return html;
-  if (c.unk > 0) return '<span class="qu">统计中</span>';
-  return "";
+  // 历史日期有炸班时只显示炸班（沿用旧表现）；T0 还要保留「进行中班次统计中」提示
+  if (c.unk > 0 && (!html || c.t0)) html += '<span class="qu">统计中</span>';
+  return html;
 }
 /** 坏单单元格：只显示非零类型（红「类型*N」一行一个；一个订单命中多个标签各计一次）。 */
 function badCellHtml(c) {
@@ -900,11 +1016,13 @@ function titleHtml(month, b) {
   const viewName = state.view === "shift" ? "炸班次" : "坏单";
   const dimName = { agency: "整商", area: "商圈片", site: "站点", rider: "骑手" }[state.dim];
   const rs = state.dim === "rider" ? state.riderStats : null;
-  const lastDay = state.view === "shift" ? shiftDayMax(month, b) : b.maxDay;
+  const lastDay = shiftDayMax(month, b);
   return `${esc(viewName)}矩阵 · <b>${esc(dimName)}</b>` +
     ` <span class="ql-sub">${esc(month)}（1 ~ ${lastDay} 日）· ${esc(dimName)}维度` +
     ` · 出勤明细 ${state.recs.length} 行 · 坏单 ${state.orders.length} 单` +
     (state.view === "shift" ? ` · 全天标准 ${esc(allDayLabel())}` : "") +
+    (state.month === curMonth() && state.t0Info && state.view === "shift"
+      ? ` · <b class="ql-stat">T0 已结束 ${state.t0Info.ended} 班 / 进行中 ${state.t0Info.ongoing} 班 · 全天${state.t0Info.allDay ? "开" : "关"}</b>` : "") +
     (rs ? ` · <b class="ql-stat">骑手共 ${rs.total} 名 / 只显示 ${rs.shown} 名问题骑手 / 隐藏 ${rs.hidden} 名</b>` : "") +
     ` · ${state.fromShared ? "运力模块缓存" : "独立取数"}</span>`;
 }
@@ -1004,11 +1122,16 @@ function renderFoot() {
     "名下站点 = 该骑手本月班次最多的站点；" +
     "<b>骑手行按整月汇总排序</b>：当前视图的「本月合计」从多到少，相同则按另一视图的合计从多到少（炸班次↔坏单），" +
     "副标题同时显示该骑手整月炸班次数 / 坏单标签数。列 = 本月日期。<br>" +
-    "炸班次 = 出勤统计「导出明细数据」的骑手 × 时段明细（本月按 7 天分段）；" +
-    "<b>只取 T+1 结算的历史日期，当月今天 T0 实时快照不显示、不计数</b>（未结算的全天数据会误判成大片炸班），次日自动补上。" +
-    "只统计「是否排班 = 排班」的班次；红字 = 当天炸掉的班次（同一班次炸多人显示「班次*n」，人数降序）。" +
+    "炸班次 = 出勤统计「导出明细数据」的骑手 × 时段明细（本月按 7 天分段）+ 当天 T0 实时考勤快照；" +
+    "<b>历史日期（T+1 结算）</b>采信系统「是否达成」标记、全天走可编辑标准；" +
+    "<b>今天 T0 参考「出勤达成」的方法</b>：只统计<b>已结束</b>的班次（与 ASSESS.PERIOD_DEFS 同一套时段结束时间），" +
+    "用「有效在线时长 ≥ 时段标准 且 完单量 ≥ 时段标准」双门槛判定、不采信系统标记；" +
+    "未结束 / 整班次数据还没跑出来的显示琥珀「统计中」、<b>不算炸班</b>；" +
+    "T0「全天」默认不参与判定（一天没过完，18单/6小时判不准），工具条「T0 全天」开关可临时打开仅供参考，" +
+    "标题给出「T0 已结束 N 班 / 进行中 M 班」。只统计「是否排班 = 排班」的班次；" +
+    "红字 = 当天炸掉的班次（同一班次炸多人显示「班次*n」，人数降序）。" +
     `<b>「全天」单独定义、不采信系统「是否达成」标记</b>：完单量 ≥ ${state.allDay.orders} 单 <b>且</b> 有效在线时长 ≥ ${state.allDay.hours} 小时才算达标，否则计为炸班 —— 工具条「全天标准 <b>${esc(allDayLabel())}</b>」可编辑、本机记忆，改完立即重算；其余班次仍按系统标记。` +
-    "空白 = 全部达成或无排班；历史明细缺达成标记时显示琥珀「统计中」；" +
+    "空白 = 全部达成或无排班；历史明细缺达成标记、T0 未结束 / 数据未出时显示琥珀「统计中」（不算炸班）；" +
     "点击单元格看该行当天的排班班次明细（骑手 / 班次 / 完单量 / 有效在线）。<br>" +
     "坏单 = KPI 考核运单明细 4 类问题订单筛选，另用申诉 / 违规明细（违规状态=成立、分类=差评+投诉）" +
     "的运单号去重后逗号拼接<b>回查匹配</b>考核运单明细，两路按运单去重；" +
@@ -1017,8 +1140,8 @@ function renderFoot() {
     "红字「类型*N」 = 当天各类型坏单数，点击单元格看运单明细。" +
     "右侧「本月合计」= 该行整月汇总数量（点击看整月明细），表尾「合计」= 每个日期的全维度汇总；" +
     "数据优先复用运力模块已取到的整月明细（同源缓存，零重复请求），点「立即刷新」强制重拉；" +
-    "缓存只含 T+1 历史明细，与炸班次口径一致。" +
-    (isCur ? "今天（T0）不显示炸班次，次日 T+1 结算后自动出现在最后一列；坏单视图仍保留当天列。" : "");
+    "缓存只含 T+1 历史明细；T0 实时快照只存内存、绝不写入缓存。" +
+    (isCur ? "今天（T0）按出勤达成口径显示已结束班次的炸班，次日 T+1 结算后由历史明细覆盖。" : "");
 }
 
 // ---------------------------------------------------------------- 详情弹层
@@ -1091,6 +1214,11 @@ function shiftPop(month, key, day) {
       `完单量 ≥ ${state.allDay.orders} 单 <b>且</b> 有效在线时长 ≥ ${state.allDay.hours} 小时为达标，否则计为炸班` +
       `（工具条「全天标准」可修改，当前 ${esc(allDayLabel())}）。</div>`;
   }
+  if (list.some((r) => r.t0)) {
+    html += `<div class="ql-pop-note">今天（T0）参考「出勤达成」口径：只判已结束班次，` +
+      `按「有效在线时长 + 完单量」双门槛达标判定；未结束 / 数据未出显示「统计中」不算炸班；` +
+      `全天默认不判（当前${state.t0AllDay ? "已临时打开，仅供参考" : "关闭"}）。</div>`;
+  }
   const bad = list.filter((r) => recOk(r) === 0).length;
   openPop(`${name} · ${day || "整月"} 班次明细 · 排班 ${list.length} 班${bad ? ` · 炸 ${bad} 班` : " · 全部达成"}`, html);
 }
@@ -1161,6 +1289,7 @@ function saveAllDayCfg(reset) {
   try { localStorage.setItem(ALLDAY_LS, JSON.stringify(state.allDay)); } catch (e) { /* 配额不足 */ }
   $("allday-cfg").textContent = allDayLabel();
   closeAllDayCfg();
+  if (state.t0Raw && state.t0Raw.length) refreshT0();   // v3.53.0：T0 全天开关打开时同步重算
   renderAll();                 // 只重算矩阵，不重新取数
   showNotice(`全天标准已设为「完单 ≥ ${state.allDay.orders} 单 且 有效时长 ≥ ${state.allDay.hours} 小时」，矩阵已立即重算。`, "blue");
 }
@@ -1182,6 +1311,11 @@ function boot() {
   $("btn-refresh").addEventListener("click", () => loadAll(true));   // 强制重拉，跳过运力模块缓存
   $("allday-cfg").textContent = allDayLabel();
   $("btn-allday").addEventListener("click", openAllDayCfg);
+  try { $("t0-allday-cfg").textContent = state.t0AllDay ? "开" : "关"; } catch (e) { /* 测试桩 */ }
+  $("btn-t0-allday").addEventListener("click", () => {
+    toggleT0AllDay();
+    try { $("t0-allday-cfg").textContent = state.t0AllDay ? "开" : "关"; } catch (e) { /* 测试桩 */ }
+  });
   $("ql-cfg-close").addEventListener("click", closeAllDayCfg);
   $("cfg-reset").addEventListener("click", () => saveAllDayCfg(true));
   $("cfg-save").addEventListener("click", () => saveAllDayCfg(false));
@@ -1215,6 +1349,7 @@ Object.assign(window.__QL__ = window.__QL__ || {}, {
   areaOf, shiftCellHtml, badCellHtml, requestRL, riderInfoMap,
   readShared, writeShared, cellCount, popInNewTab, renderMatrixTable, titleHtml,
   violationMeta, applyViolationMeta, hasKpiTag, keepKpiTagged, settledRecs, shiftDayMax,
+  T0_PERIODS, t0Ongoing, applyT0Verdict, refreshT0, loadT0, toggleT0AllDay,
   parseHours, allDayVerdict, recOk, loadAllDayCfg, saveAllDayCfg, openAllDayCfg, closeAllDayCfg,
   allDayLabel, ALLDAY_DEFAULT, ALLDAY_LS,
   API_ATT_DETAIL, API_ATT_LIVE, API_TEAMS, API_KPI_DETAIL, API_VIOLATION,
