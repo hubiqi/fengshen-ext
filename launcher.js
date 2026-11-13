@@ -119,6 +119,11 @@
     border-radius: 14px; overflow: hidden; display: flex; flex-direction: column;
     box-shadow: 0 28px 90px rgba(0,0,0,.36), 0 0 0 1px rgba(255,255,255,.5);
   }
+  /* v3.55.0：面板默认占满整个视口（宽表如「三方人资监控」18 列需要横向空间），
+     可用标题栏「⛶ 窗口」切回原来的 1460×92vh 窗口模式，选择记在本机。 */
+  .wb-mask.full { align-items: stretch; }
+  .wb-mask.full .wb-panel { width: 100vw; height: 100vh; max-width: none; max-height: none;
+    border-radius: 0; box-shadow: none; }
   .wb-head {
     height: 52px; flex: 0 0 52px; display: flex; align-items: center; gap: 12px;
     padding: 0 14px 0 18px; color: #fff;
@@ -274,17 +279,18 @@
             <button class="wb-tab" id="wbTabQl" title="切到质量运营（独立页面）">质量运营</button>
           </div>
           <button class="wb-btn" id="wbReload" title="重新拉取当前看板的数据">↻ 刷新</button>
+          <button class="wb-btn" id="wbFull" title="面板占满整个屏幕（默认全屏）">⛶ 窗口</button>
           <button class="wb-btn" id="wbNewTab" title="把当前看板在独立标签页打开">↗ 新标签打开</button>
           <button class="wb-btn close" id="wbClose" title="关闭（Esc）">×</button>
         </div>
         <!-- clipboard-write：iframe 是扩展页（跨源），需显式授予才能写「复制图片」 -->
-        <iframe class="wb-frame" id="wbFrame" title="风神考核看板" allow="clipboard-write *" allowtransparency="false"></iframe>
-        <iframe class="wb-frame" id="wbFrameAtt" title="风神出勤达成看板" allow="clipboard-write *" allowtransparency="false" hidden></iframe>
-        <iframe class="wb-frame" id="wbFrameWf" title="风神运力模块" allow="clipboard-write *" allowtransparency="false" hidden></iframe>
-        <iframe class="wb-frame" id="wbFrameSch" title="风神排班模块" allow="clipboard-write *" allowtransparency="false" hidden></iframe>
-        <iframe class="wb-frame" id="wbFrameRent" title="风神物资租用" allow="clipboard-write *" allowtransparency="false" hidden></iframe>
-        <iframe class="wb-frame" id="wbFrameRt" title="风神实时出勤监控" allow="clipboard-write *" allowtransparency="false" hidden></iframe>
-        <iframe class="wb-frame" id="wbFrameQl" title="风神质量运营" allow="clipboard-write *" allowtransparency="false" hidden></iframe>
+        <iframe class="wb-frame" id="wbFrame" title="风神考核看板" allow="clipboard-write *; fullscreen *" allowtransparency="false"></iframe>
+        <iframe class="wb-frame" id="wbFrameAtt" title="风神出勤达成看板" allow="clipboard-write *; fullscreen *" allowtransparency="false" hidden></iframe>
+        <iframe class="wb-frame" id="wbFrameWf" title="风神运力模块" allow="clipboard-write *; fullscreen *" allowtransparency="false" hidden></iframe>
+        <iframe class="wb-frame" id="wbFrameSch" title="风神排班模块" allow="clipboard-write *; fullscreen *" allowtransparency="false" hidden></iframe>
+        <iframe class="wb-frame" id="wbFrameRent" title="风神物资租用" allow="clipboard-write *; fullscreen *" allowtransparency="false" hidden></iframe>
+        <iframe class="wb-frame" id="wbFrameRt" title="风神实时出勤监控" allow="clipboard-write *; fullscreen *" allowtransparency="false" hidden></iframe>
+        <iframe class="wb-frame" id="wbFrameQl" title="风神质量运营" allow="clipboard-write *; fullscreen *" allowtransparency="false" hidden></iframe>
         <div class="wb-frame-warn" id="wbFrameWarn" hidden>
           <div class="wb-warn-box">
             <strong>面板内容没能加载</strong>
@@ -337,6 +343,35 @@
   let menuOpen = false;
   let mode = "assess";
   const loaded = new Set();
+  // v3.55.0：面板默认全屏，标题栏按钮可切回窗口模式，选择记在本机
+  const FULL_KEY = "wb_panel_full";
+  let panelFull = true;
+  function applyPanelFull() {
+    mask.classList.toggle("full", panelFull);
+    const b = q("wbFull");
+    if (b) {
+      b.textContent = panelFull ? "⛶ 窗口" : "⛶ 全屏";
+      b.title = panelFull ? "切回窗口模式（1460×92vh）" : "面板占满整个屏幕";
+    }
+  }
+  function setPanelFull(v) {
+    panelFull = !!v;
+    applyPanelFull();
+    try {
+      if (chrome.storage && chrome.storage.local) { chrome.storage.local.set({ [FULL_KEY]: panelFull }); return; }
+    } catch (e) { /* 降级到 localStorage */ }
+    try { localStorage.setItem(FULL_KEY, String(panelFull)); } catch (e) { /* ignore */ }
+  }
+  applyPanelFull();
+  try {
+    if (chrome.storage && chrome.storage.local) {
+      chrome.storage.local.get(FULL_KEY, (o) => {
+        if (o && o[FULL_KEY] === false) { panelFull = false; applyPanelFull(); }
+      });
+    } else if (localStorage.getItem(FULL_KEY) === "false") {
+      panelFull = false; applyPanelFull();
+    }
+  } catch (e) { /* 存储不可用就用默认全屏 */ }
   // v3.48.1：iframe 就绪握手 —— 页面启动后上报 READY，3 秒没上报说明被拦截/加载失败
   const frameReady = new Set();
   let frameCheckTimer = null;
@@ -491,6 +526,7 @@
     frames[mode].src = PAGES[mode] + "?_t=" + Date.now();
     scheduleFrameCheck(mode);
   });
+  q("wbFull").addEventListener("click", () => setPanelFull(!panelFull));
   q("wbNewTab").addEventListener("click", () => {
     if (HAS_EXT) chrome.runtime.sendMessage({ type: "WB_OPEN_TAB", page: mode });
   });

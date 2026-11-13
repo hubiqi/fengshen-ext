@@ -247,8 +247,10 @@ const state = {
     // target 在 init() 里读 localStorage（常量定义在文件后半段，避免 TDZ）
     active: false, target: 16,
     sort: { key: "remainText", dir: 1 },
-    company: "", status: "", pendingOnly: false, rows: []
-  }
+    company: "", status: "", pendingOnly: false, cardFilter: "", rows: []
+  },
+  // v3.55.0：本月出勤明细原始「全天」行（含 day / orders），供 T-3 / T-2 / T-1 单量列使用
+  attRows: []
 };
 
 // ---------------------------------------------------------------- 请求通道
@@ -770,6 +772,17 @@ function attachDetail(rows) {
 const HR_LS = "wb_wf_hr_target_v1";
 const HR_TARGET_DEFAULT = 16;
 const HR_TARGET_MIN = 1, HR_TARGET_MAX = 90;
+const HR_NEAR_DAYS = 5;          // v3.55.0：概览卡片「差 ≤5 天」，与琥珀高亮同阈值
+const HR_CARDS = [
+  { k: "all", h: "三方骑手", cls: "" },
+  { k: "onJob", h: "在职", cls: "ok" },
+  { k: "reached", h: "已达标 / 已结算", cls: "ok" },
+  { k: "pending", h: "未达标", cls: "warn" },
+  { k: "near5", h: `差 ≤${HR_NEAR_DAYS} 天`, cls: "warn" },
+  { k: "leftPending", h: "离职未达标", cls: "risk" },
+  { k: "hasOrders", h: "达标单量合计", cls: "" },
+  { k: "hasBad", h: "本月异常合计", cls: "" }
+];
 const HR_COLS = [
   { h: "人资商", k: "company", csv: "company", cls: "h-company" },
   { h: "站点", k: "team", csv: "team", cls: "h-site" },
@@ -781,14 +794,17 @@ const HR_COLS = [
   { h: "首跑时间", k: "firstRun", csv: "firstRun", cls: "h-ts" },
   { h: "达标天数", k: "effDaysText", csv: "effDays", cls: "h-num" },
   { h: "达标单量", k: "finishText", csv: "finishOrders", cls: "h-num" },
+  { h: "T-3单量", k: "t3Text", csv: "t3", cls: "h-num h-day" },
+  { h: "T-2单量", k: "t2Text", csv: "t2", cls: "h-num h-day" },
+  { h: "T-1单量", k: "t1Text", csv: "t1", cls: "h-num h-day" },
   { h: "本月班次异常数", k: "badText", csv: "bad", cls: "h-num" },
   { h: "物流责", k: "lgtText", csv: "lgt", cls: "h-num" },
   { h: "投诉", k: "complainText", csv: "complain", cls: "h-num" },
   { h: "差评", k: "negativeText", csv: "negative", cls: "h-num" },
   { h: "提前点", k: "earlyText", csv: "early", cls: "h-num" }
 ];
-const HR_NUM_CSV = new Set(["remain", "effDays", "finishOrders", "bad",
-  "lgt", "complain", "negative", "early"]);
+const HR_NUM_CSV = new Set(["remain", "effDays", "finishOrders", "t3", "t2", "t1",
+  "bad", "lgt", "complain", "negative", "early"]);
 
 function loadHrTarget() {
   try {
@@ -832,6 +848,50 @@ function hrTime(v) {
   }
   return shortTime(s);
 }
+/** v3.55.0：T-3 / T-2 / T-1 的基准日 —— 当月取今天，历史月取该月最后一天。
+ *  T-1/T-2/T-3 分别是基准日往前 1/2/3 个自然日。
+ *  出勤明细是 T+1 / T+2 结算（真机 11-14 只有到 11-12 的数据），若 T-1 整天没数据，
+ *  就把「最近一个已结算日」当作 T-1，往前顺推 T-2 / T-3，避免整列恒为 0。
+ *  实际日期会显示在表头 title 与概览说明里，口径不藏着。 */
+function hrBaseDay() {
+  const b = monthBounds(state.month);
+  const d = state.month === curMonth() ? new Date() : new Date(b.y, b.m - 1, b.maxDay);
+  const p = (n) => String(n).padStart(2, "0");
+  const ymd = (x) => `${x.getFullYear()}-${p(x.getMonth() + 1)}-${p(x.getDate())}`;
+  const shift = (from, n) => ymd(new Date(from.getFullYear(), from.getMonth(), from.getDate() - n));
+  const base = ymd(d);
+  const stdT1 = shift(d, 1), stdT2 = shift(d, 2), stdT3 = shift(d, 3);
+  let dataDay = "";
+  for (const r of state.attRows || []) {
+    if (r && r.per === "全天" && r.day && r.day > dataDay) dataDay = r.day;
+  }
+  const shifted = !!dataDay && dataDay < stdT1;
+  if (shifted) {
+    const dd = new Date(dataDay + "T00:00:00");
+    return { base, t1: ymd(dd), t2: shift(dd, 1), t3: shift(dd, 2),
+      dataDay, shifted: true, stdT1 };
+  }
+  return { base, t1: stdT1, t2: stdT2, t3: stdT3, dataDay, shifted: false, stdT1 };
+}
+/** 本月出勤明细原始行里「全天」行的完单量，按「骑手id＋站点id＋日期」聚合。
+ *  同一键出现多行时取最大值（不重复累加），没有记录就是当天 0 单。 */
+function hrDayOrderMap() {
+  const m = new Map();
+  for (const r of state.attRows || []) {
+    if (!r || r.per !== "全天" || !r.day) continue;
+    const key = pairKey(r.rid, r.teamId) + "|" + r.day;
+    const v = num(r.orders);
+    if (!m.has(key) || m.get(key) < v) m.set(key, v);
+  }
+  return m;
+}
+function hrDayOrder(map, rid, keys, day) {
+  for (const k of keys) {
+    const v = map.get(pairKey(rid, k) + "|" + day);
+    if (v !== undefined) return v;
+  }
+  return undefined;
+}
 /** 按多个候选站点 id 依次查「骑手id＋站点id」明细（归属站点 → 账单站点）。 */
 function hrPick(map, rid, keys, dflt) {
   for (const k of keys) {
@@ -849,6 +909,8 @@ function hrReached(c, effDays, target, si) {
 }
 function hrBuildRows() {
   const target = state.hr.target;
+  const days = hrBaseDay();
+  const dayOrders = hrDayOrderMap();
   const billByRider = new Map();
   for (const r of state.rows || []) if (!billByRider.has(r.riderId)) billByRider.set(r.riderId, r);
   const staff = state.staff || new Map();
@@ -862,7 +924,7 @@ function hrBuildRows() {
     const team = String(c.resultTeamName || c.entryTeamName || c.pushingTeamName || "").trim()
       || (bill ? bill.team : "");
     const teamId = normId(c.resultTeam || c.entryTeam || c.pushingTeam || "");
-    const keys = [...new Set([teamId, bill ? bill.teamId : ""].filter(Boolean))];
+    const keys = [...new Set([teamId, bill ? bill.teamId : "", ANY_SITE].filter(Boolean))];
     const riderName = String(c.riderName || (bill && bill.riderName) || "").trim();
     const workStatus = st ? num(st.workStatus) : null;
     const onJob = workStatus === 1 ? "是" : (workStatus === 2 ? "否" : "—");
@@ -879,6 +941,12 @@ function hrBuildRows() {
     const f = hrPick(state.kpi, rid, keys, {}) || {};
     const bt = (n) => state.pendingAtt ? "…" : (state.attReady ? int(n) : "—");
     const kt = (n) => state.pendingKpi ? "…" : (state.kpiReady ? int(n) : "—");
+    // v3.55.0：T-3 / T-2 / T-1 单量 = 对应日期「全天」行完单量，未取到出勤明细显示「—」
+    const v3 = hrDayOrder(dayOrders, rid, keys, days.t3);
+    const v2 = hrDayOrder(dayOrders, rid, keys, days.t2);
+    const v1 = hrDayOrder(dayOrders, rid, keys, days.t1);
+    const ot = (v) => state.pendingAtt ? "…" : (state.attReady ? int(v || 0) : "—");
+    const oc = (v) => state.attReady ? num(v || 0) : "";
     out.push({
       riderId: rid, riderName, riderCsv: `${riderName} (${rid})`,
       riderHtml: `${esc(riderName)}<small>${esc(rid)}</small>`,
@@ -890,6 +958,8 @@ function hrBuildRows() {
       firstRun: firstRun || "—",
       effDays, effDaysText: int(effDays),
       finishOrders, finishText: int(finishOrders),
+      t3: oc(v3), t3Text: ot(v3), t2: oc(v2), t2Text: ot(v2),
+      t1: oc(v1), t1Text: ot(v1),
       bad, badText: bt(bad),
       lgt: num(f.lgt), lgtText: kt(num(f.lgt)),
       complain: num(f.complain), complainText: kt(num(f.complain)),
@@ -899,7 +969,8 @@ function hrBuildRows() {
       settleMonth: String(c.effectiveMonth || ""),
       level: c.level == null ? "" : String(c.level),
       remainText: reached ? (settleState === "结算完成" ? "已结算" : "已达标") : int(remain),
-      remainCls: reached ? "is-ok" : (onJob === "否" ? "is-risk" : (remain <= 3 ? "is-near" : "")),
+      remainCls: reached ? "is-ok" : (onJob === "否" ? "is-risk"
+        : (remain <= HR_NEAR_DAYS ? "is-near" : "")),
       remainTip: reached
         ? `已达标：达标天数 ${effDays} 天 ≥ 结算标准 ${target} 天` +
           `（结算状态 ${settleState || "—"}，档位 ${c.level == null ? "—" : c.level}）`
@@ -928,10 +999,24 @@ function hrCompare(a, b, key, dir) {
   if (a.effDays !== b.effDays) return b.effDays - a.effDays;
   return COLLATOR.compare(a.riderName, b.riderName);
 }
-function hrVisibleRows() {
+/** 点概览卡片后的快速筛选（v3.55.0）。all 表示清除，再点同一张卡片也清除。 */
+function hrCardMatch(r, f) {
+  switch (f) {
+    case "onJob": return r.onJob === "是";
+    case "reached": return !!r.reached;
+    case "pending": return !r.reached;
+    case "near5": return !r.reached && r.remain <= HR_NEAR_DAYS;
+    case "leftPending": return !r.reached && r.onJob === "否";
+    case "hasOrders": return num(r.finishOrders) > 0;
+    case "hasBad": return num(r.bad) > 0;
+    default: return true;
+  }
+}
+function hrVisibleRows(opts) {
   const q = String(state.query || "").trim().toLowerCase();
   const site = String(state.site || "");
   const h = state.hr;
+  const skipCard = !!(opts && opts.skipCard);
   const rows = (h.rows || []).filter((r) => {
     if (h.company && r.company !== h.company) return false;
     if (h.status && r.settleState !== h.status) return false;
@@ -939,15 +1024,22 @@ function hrVisibleRows() {
     if (site && r.team !== site) return false;
     if (q && !`${r.riderName} ${r.riderId} ${r.team} ${r.company} ${r.settleState}`
       .toLowerCase().includes(q)) return false;
+    if (!skipCard && h.cardFilter && !hrCardMatch(r, h.cardFilter)) return false;
     return true;
   });
   if (h.sort.key && h.sort.dir) rows.sort((a, b) => hrCompare(a, b, h.sort.key, h.sort.dir));
   return rows;
 }
+function hrSetCardFilter(f) {
+  const h = state.hr;
+  h.cardFilter = (!f || f === "all" || h.cardFilter === f) ? "" : f;
+  renderHr();
+}
 function renderHrCompanyOptions() {
   const sel = $("hr-company");
   if (!sel) return;
-  const keep = sel.value;
+  // 以 state 为准、DOM 兜底：避免筛选状态与下拉未同步时被重建逻辑清掉
+  const keep = state.hr.company || sel.value;
   const list = [...new Set((state.hr.rows || []).map((r) => r.company).filter(Boolean))]
     .sort((a, b) => COLLATOR.compare(a, b));
   sel.innerHTML = '<option value="">人资商：全部</option>'
@@ -955,44 +1047,52 @@ function renderHrCompanyOptions() {
   sel.value = list.includes(keep) ? keep : "";
   state.hr.company = sel.value;
 }
-function renderHrSummary(rows) {
+function renderHrSummary(base, visible) {
+  const rows = base || [];
   const all = state.hr.rows || [];
   const on = rows.filter((r) => r.onJob === "是").length;
   const reached = rows.filter((r) => r.reached).length;
   const pending = rows.length - reached;
-  const near = rows.filter((r) => !r.reached && r.remain <= 3).length;
+  const near = rows.filter((r) => !r.reached && r.remain <= HR_NEAR_DAYS).length;
   const leftPending = rows.filter((r) => !r.reached && r.onJob === "否").length;
   const sum = (k) => rows.reduce((a, r) => a + num(r[k]), 0);
-  const cards = [
-    ["三方骑手", int(rows.length), ""],
-    ["在职", int(on), "ok"],
-    ["已达标 / 已结算", int(reached), "ok"],
-    ["未达标", int(pending), "warn"],
-    ["差 ≤3 天", int(near), "warn"],
-    ["离职未达标", int(leftPending), "risk"],
-    ["达标单量合计", int(sum("finishOrders")), ""],
-    ["本月异常合计", int(sum("bad")), ""]
-  ];
-  $("hr-summary").innerHTML = cards.map(([k, v, cls]) =>
-    `<div class="wf-card hr-card ${cls}"><span class="k">${esc(k)}</span>`
-    + `<span class="v">${esc(v)}</span></div>`).join("");
+  const values = {
+    all: int(rows.length), onJob: int(on), reached: int(reached), pending: int(pending),
+    near5: int(near), leftPending: int(leftPending),
+    hasOrders: int(sum("finishOrders")), hasBad: int(sum("bad"))
+  };
+  const cur = state.hr.cardFilter || "all";
+  $("hr-summary").innerHTML = HR_CARDS.map((c) =>
+    `<button type="button" class="wf-card hr-card ${c.cls}${cur === c.k ? " active" : ""}"`
+    + ` data-hr-card="${c.k}" title="点击按「${esc(c.h)}」筛选，再点一次取消">`
+    + `<span class="k">${esc(c.h)}</span><span class="v">${esc(values[c.k])}</span></button>`).join("");
   const companies = new Set(all.map((r) => r.company).filter(Boolean)).size;
+  const days = hrBaseDay();
   const bits = [
-    `共 <b>${int(all.length)}</b> 名三方人资骑手（${int(companies)} 家人资商），当前筛选显示 <b>${int(rows.length)}</b> 名`,
-    `结算达标门槛 <b>${int(state.hr.target)}</b> 天`
+    `共 <b>${int(all.length)}</b> 名三方人资骑手（${int(companies)} 家人资商），当前筛选显示 <b>${int((visible || rows).length)}</b> 名`,
+    `结算达标门槛 <b>${int(state.hr.target)}</b> 天`,
+    `T-3 / T-2 / T-1 实际日期 ${days.t3} / ${days.t2} / ${days.t1}`
+      + (days.shifted ? "（出勤明细结算滞后，已按最近有数据日回退）" : "")
   ];
-  if (!state.attReady) bits.push("本月出勤明细未取到，班次异常数 / 首跑时间显示「—」");
+  if (state.hr.cardFilter) {
+    const card = HR_CARDS.find((c) => c.k === state.hr.cardFilter);
+    bits.push(`卡片筛选 <b>${esc(card ? card.h : state.hr.cardFilter)}</b>（再点该卡片取消）`);
+  }
+  if (!state.attReady) bits.push("本月出勤明细未取到，班次异常数 / 首跑时间 / T-1~T-3 显示「—」");
   if (!state.kpiReady) bits.push("考核运单明细未取到，4 类坏单显示「—」");
   $("hr-note").innerHTML = bits.join("　·　");
 }
 function renderHrTable(rows) {
   const t = $("hr-table");
   const h = state.hr;
+  const days = hrBaseDay();
+  const dayOf = { t3Text: days.t3, t2Text: days.t2, t1Text: days.t1 };
   const head = "<thead><tr>" + HR_COLS.map((c) => {
     const cls = (h.sort.key === c.k && h.sort.dir === 1) ? " sort-asc"
       : (h.sort.key === c.k && h.sort.dir === -1) ? " sort-desc" : "";
+    const tip = `${c.h}${dayOf[c.k] ? `（实际日期 ${dayOf[c.k]}）` : ""}：点击表头按此列排序（升序 → 降序 → 取消）`;
     return `<th class="${cls.trim()}" data-hsort="${esc(c.k)}"`
-      + ` title="${esc(c.h)}：点击表头按此列排序（升序 → 降序 → 取消）">${esc(c.h)}</th>`;
+      + ` title="${esc(tip)}">${esc(c.h)}</th>`;
   }).join("") + "</tr></thead>";
   const body = ["<tbody>"];
   if (!rows.length) {
@@ -1020,6 +1120,7 @@ function renderHrTable(rows) {
       company: `合计（${int(rows.length)} 人）`, team: "", riderHtml: "", onJobHtml: "",
       remainText: `未达标 ${int(rows.filter((r) => !r.reached).length)}`, entry: "", leave: "",
       firstRun: "", effDaysText: sum("effDays"), finishText: sum("finishOrders"),
+      t3Text: sum("t3"), t2Text: sum("t2"), t1Text: sum("t1"),
       badText: sum("bad"), lgtText: sum("lgt"), complainText: sum("complain"),
       negativeText: sum("negative"), earlyText: sum("early")
     };
@@ -1032,8 +1133,10 @@ function renderHrTable(rows) {
 function renderHr() {
   state.hr.rows = hrBuildRows();
   renderHrCompanyOptions();
+  // 卡片数字基于「工具条筛选后、不含卡片筛选」的集合，点卡片后其它卡片数字不跳动
+  const base = hrVisibleRows({ skipCard: true });
   const rows = hrVisibleRows();
-  renderHrSummary(rows);
+  renderHrSummary(base, rows);
   renderHrTable(rows);
   renderSiteOptions();     // 站点下拉按当前视图的数据源重建
   if (state.hr.active) renderViewState();
@@ -1055,6 +1158,7 @@ function setHrView(on) {
     ? "搜姓名 / 骑手id / 站点 / 人资商" : "搜姓名 / 骑手id / 站点 / 账单ID";
   // 换子模块时清掉上一视图的搜索 / 站点筛选，避免切过去看到一张空表
   state.query = ""; state.site = "";
+  state.hr.cardFilter = "";
   $("wf-search").value = ""; $("wf-site").value = "";
   closePop();
   renderMeta();
@@ -1116,6 +1220,49 @@ function resetHrTarget() {
   $("hrt-days").value = String(HR_TARGET_DEFAULT);
   $("hrt-note").textContent = "已填入默认值，点「保存并重算」生效。";
 }
+/** v3.55.0：与面板标题栏同款「↗ 新标签打开」—— 独立标签页打开当前子模块。
+ *  带上 view 参数，新标签加载后自动切到三方人资监控 / 骑手账单，不用再点一次页签。 */
+function hrOpenNewTab() {
+  const view = state.hr.active ? "hr" : "bill";
+  let url = "workforce.html?view=" + view;
+  try {
+    if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.getURL)
+      url = chrome.runtime.getURL(url);
+  } catch (e) { /* 本地静态打开时用相对路径 */ }
+  try {
+    if (typeof chrome !== "undefined" && chrome.tabs && chrome.tabs.create) {
+      chrome.tabs.create({ url });
+      showNotice(`已在独立标签页打开「${state.hr.active ? "三方人资监控" : "骑手账单"}」。`, "blue");
+      return;
+    }
+  } catch (e) { /* 退到 window.open */ }
+  window.open(url, "_blank");
+}
+/** 浏览器级全屏（F11 效果）；面板本身默认已占满视口，这里用于独立标签页。 */
+function hrToggleFullscreen() {
+  const btn = $("btn-hr-full");
+  try {
+    if (document.fullscreenElement) {
+      (document.exitFullscreen && document.exitFullscreen());
+    } else {
+      const el = document.documentElement;
+      const p = el.requestFullscreen && el.requestFullscreen();
+      if (p && p.catch) p.catch(() => showNotice("浏览器拒绝了全屏请求，可按 F11 手动全屏。"));
+    }
+  } catch (e) { showNotice("当前环境不支持网页全屏，可按 F11 手动全屏。"); }
+  if (btn) setTimeout(hrSyncFullBtn, 250);
+}
+function hrSyncFullBtn() {
+  const btn = $("btn-hr-full");
+  if (btn) btn.textContent = document.fullscreenElement ? "⛶ 退出全屏" : "⛶ 全屏";
+}
+/** URL ?view=hr 时直接打开三方人资监控（「↗ 新标签打开」用）。 */
+function hrViewFromUrl() {
+  try {
+    const v = new URLSearchParams(location.search).get("view");
+    if (v === "hr") setHrView(true);
+  } catch (e) { /* 忽略非法参数 */ }
+}
 function bindHrEvents() {
   $("wf-view-tabs").addEventListener("click", (e) => {
     const b = e.target.closest && e.target.closest("[data-view]");
@@ -1130,6 +1277,14 @@ function bindHrEvents() {
     const th = e.target.closest && e.target.closest("th[data-hsort]");
     if (th) hrToggleSort(th.dataset.hsort);
   });
+  // v3.55.0：点概览卡片直接筛选，再点同一张取消
+  $("hr-summary").addEventListener("click", (e) => {
+    const b = e.target.closest && e.target.closest("[data-hr-card]");
+    if (b) hrSetCardFilter(b.dataset.hrCard);
+  });
+  $("btn-hr-newtab").addEventListener("click", hrOpenNewTab);
+  $("btn-hr-full").addEventListener("click", hrToggleFullscreen);
+  document.addEventListener("fullscreenchange", hrSyncFullBtn);
   $("btn-hr-target").addEventListener("click", () => {
     if (!$("hr-target").hidden) { closeHrTarget(); return; }
     openHrTarget();
@@ -2650,6 +2805,10 @@ function renderViewState() {
     if (state.hr.company) bits.push(`人资商：${state.hr.company}`);
     if (state.hr.status) bits.push(`结算：${state.hr.status}`);
     if (state.hr.pendingOnly) bits.push("只看未达标");
+    if (state.hr.cardFilter) {
+      const card = HR_CARDS.find((x) => x.k === state.hr.cardFilter);
+      bits.push(`卡片：${card ? card.h : state.hr.cardFilter}`);
+    }
     $("wf-state").textContent = bits.join("　·　");
     $("btn-freeze").textContent = `冻结列 (${state.frozen.length})`;
     $("btn-clear-view").disabled = true;
@@ -2926,6 +3085,7 @@ async function loadDetailData(gen, teamIds) {
   state.attReady = false; state.kpiReady = false;
   state.errors.att = ""; state.errors.kpi = "";
   state.rawOrders = [];                 // v3.46.0：按月重置共享坏单明细
+  state.attRows = [];                   // v3.55.0：切月先清空 T-1~T-3 的原始出勤行
   applyData();                       // 先把「…」摆出来，别让格子像忘了做
   const [a, k] = await Promise.allSettled([
     loadAttendance(state.month, teamIds),
@@ -2933,9 +3093,11 @@ async function loadDetailData(gen, teamIds) {
   ]);
   if (gen !== state.gen) { state.detailLoading = false; return; }
   if (a.status === "fulfilled") {
-    state.attBad = a.value.bad; state.attRun = a.value.run; state.attReady = true;
+    state.attBad = a.value.bad; state.attRun = a.value.run;
+    state.attRows = Array.isArray(a.value.rows) ? a.value.rows : [];
+    state.attReady = true;
   } else {
-    state.attBad = new Map(); state.attRun = new Map();
+    state.attBad = new Map(); state.attRun = new Map(); state.attRows = [];
     state.errors.att = String((a.reason && a.reason.message) || a.reason);
   }
   if (k.status === "fulfilled") {
@@ -3118,6 +3280,8 @@ window.__SET_WORKFORCE__ = (obj) => {
   }
   if (Array.isArray(obj.staff)) state.staffList = obj.staff;
   if (Array.isArray(obj.clues)) state.clueList = obj.clues;
+  // v3.55.0：离线回归可直接注入本月出勤明细原始行（T-1~T-3 单量）
+  if (Array.isArray(obj.attRows)) state.attRows = obj.attRows;
   // v3.32.0：规模汇总样本（站点→商圈片 / 区间 / 出勤明细 sheets），全部离线，不发请求
   if (obj.scale) {
     const sc = state.scale, o = obj.scale;
@@ -3223,12 +3387,16 @@ window.__WF__ = { state, COLS, PAGE_COLS, buildRows, attachDetail, visibleRows, 
   SCALE_FIRST_DAYS_MIN, SCALE_FIRST_DAYS_MAX,
   SCALE_MODE_LABEL, SITE_TO_AREA, SCALE_AREA_ORDER, API_TEAMS,
   // v3.54.0 三方人资监控子模块
-  HR_LS, HR_TARGET_DEFAULT, HR_TARGET_MIN, HR_TARGET_MAX, HR_COLS, HR_NUM_CSV,
+  HR_LS, HR_TARGET_DEFAULT, HR_TARGET_MIN, HR_TARGET_MAX, HR_NEAR_DAYS, HR_CARDS,
+  HR_COLS, HR_NUM_CSV,
   loadHrTarget, saveHrTarget, hrSettlement, hrClueRank, hrClueRows, hrTime, hrPick,
+  hrBaseDay, hrDayOrderMap, hrDayOrder,
   hrReached, hrBuildRows, hrSortVal, hrCompare, hrVisibleRows,
+  hrCardMatch, hrSetCardFilter,
   renderHr, renderHrSummary, renderHrTable, renderHrCompanyOptions,
   setHrView, hrToggleSort, hrExportCsv,
-  openHrTarget, closeHrTarget, applyHrTarget, resetHrTarget, bindHrEvents };
+  openHrTarget, closeHrTarget, applyHrTarget, resetHrTarget, bindHrEvents,
+  hrOpenNewTab, hrToggleFullscreen, hrSyncFullBtn, hrViewFromUrl };
 
 // ---------------------------------------------------------------- 初始化
 (async function init() {
@@ -3240,6 +3408,7 @@ window.__WF__ = { state, COLS, PAGE_COLS, buildRows, attachDetail, visibleRows, 
   bindHrEvents();                     // v3.54.0：子模块页签 / 筛选 / 结算标准
   state.hr.target = loadHrTarget();
   $("btn-hr-target").textContent = `结算标准 ${state.hr.target}天`;
+  hrViewFromUrl();                    // v3.55.0：?view=hr 直接打开三方人资监控
   $("month-picker").value = state.month;
   $("month-picker").min = shiftMonth(curMonth(), -MONTHS_BACK);
   $("month-picker").max = curMonth();

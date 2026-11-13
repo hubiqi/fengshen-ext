@@ -63,6 +63,8 @@
     <button id="btn-clear-view" class="ghost bill-only" title="清除表头排序与列筛选，恢复默认显示顺序">清除排序/筛选</button>
     <button id="btn-export-csv" class="ghost" title="导出 CSV（含账单ID；页面与复制图片都不显示这一列）">导出 CSV</button>
     <button id="btn-copy-image" class="primary" title="把运力模块画面复制为高清 PNG，可直接粘贴到钉钉 / 微信；按住 Shift 点击则另存为 PNG 文件">复制图片</button>
+    <button id="btn-hr-newtab" class="ghost" title="在独立标签页打开当前子模块（三方人资监控 / 骑手账单）">↗ 新标签打开</button>
+    <button id="btn-hr-full" class="ghost" title="浏览器全屏显示（等同 F11），再点退出">⛶ 全屏</button>
     <button id="btn-clean" class="ghost">纯净看板</button>
   </div>
 </div>
@@ -109,7 +111,7 @@
     </div>
 
     <div class="doc-foot" id="hr-foot">一行 = 一名三方人资骑手（同一骑手多个结算批次只取最新一批）。「结算达标天数」门槛可在工具条「结算标准」里修改；达标天数 / 达标单量取线索结果明细的系统结算字段，本月班次异常数与 4 类坏单跟随账单月份。</div>
-    <div class="doc-foot small" id="hr-foot-small">口径：人资商 = 线索结果明细 headHunterCompanyName；站点 = 归属站点（resultTeamName）；是否在职 / 入职 / 离职取成员管理·全部；首跑时间取本月出勤明细里首个「全天」完单 &gt; 0 的日期（历史月份不在本月明细里则显示「—」）；达标天数 = effectiveRetentionDays（系统有效留存天数）；达标单量 = finishOrderNum（系统结算完单量）；结算剩余达标天数 = max(0, 结算标准 − 达标天数)，已出结算档位 / 已结算完成 / 达标天数已过门槛的显示「已达标」；本月班次异常数 = 出勤明细除「全天」外「是否达成=未达成」的班次数；物流责 / 投诉 / 差评 / 提前点 = 考核运单明细 4 类异常订单计数（与骑手账单、质量运营同口径）。全部数据复用运力模块已取到的五份明细，切换子模块不产生任何额外请求。</div>
+    <div class="doc-foot small" id="hr-foot-small">口径：人资商 = 线索结果明细 headHunterCompanyName；站点 = 归属站点（resultTeamName）；是否在职 / 入职 / 离职取成员管理·全部；首跑时间取本月出勤明细里首个「全天」完单 &gt; 0 的日期（历史月份不在本月明细里则显示「—」）；达标天数 = effectiveRetentionDays（系统有效留存天数）；达标单量 = finishOrderNum（系统结算完单量）；结算剩余达标天数 = max(0, 结算标准 − 达标天数)，已出结算档位 / 已结算完成 / 达标天数已过门槛的显示「已达标」；本月班次异常数 = 出勤明细除「全天」外「是否达成=未达成」的班次数；物流责 / 投诉 / 差评 / 提前点 = 考核运单明细 4 类异常订单计数（与骑手账单、质量运营同口径）。T-3 / T-2 / T-1 单量 = 本月出勤明细里对应日期「全天」行的完单量（按「骑手id＋站点id＋日期」归集，无记录为 0 单），基准日为当月今天、历史月为该月最后一天，三列分别是基准日往前 3 / 2 / 1 个自然日；概览卡片可点击直接筛选（差 ≤5 天、离职未达标等，再点一次取消），卡片数字不受自身筛选影响。全部数据复用运力模块已取到的五份明细，切换子模块不产生任何额外请求。</div>
   </section>
 </main>
 
