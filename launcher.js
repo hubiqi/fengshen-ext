@@ -5,7 +5,9 @@
  *   子入口分别打开 dashboard.html / attendance.html，各自独立刷新与复制图片。
  * v3.15.0：新增第三个独立入口「运力模块」（workforce.html）—— 骑手账单 × 人资 × 三方人资。
  * v3.17.0：新增第四个独立入口「排班模块」（schedule.html）—— 每日排班缺口 / 排班率。
- * 面板顶部四页签、四 iframe 各自保留状态，切回来不会重新拉数、也不会互相污染。
+ * 面板顶部各页签、各 iframe 独立保留状态，切回来不会重新拉数、也不会互相污染。
+ * v3.48.1：新增 iframe READY 握手 —— 质量运营页 3 秒未上报则显示「内容被拦截」提示层，
+ *   一键「↗ 新标签打开」/「↻ 重试加载」；manifest 需补 quality.* 到 web_accessible_resources。
  */
 (function () {
   "use strict";
@@ -112,6 +114,7 @@
   }
   .wb-mask.open { display: flex; }
   .wb-panel {
+    position: relative;
     width: min(1460px, 96vw); height: min(92vh, 980px); background: #fff;
     border-radius: 14px; overflow: hidden; display: flex; flex-direction: column;
     box-shadow: 0 28px 90px rgba(0,0,0,.36), 0 0 0 1px rgba(255,255,255,.5);
@@ -141,6 +144,17 @@
   .wb-btn.close { border-color: transparent; font-size: 19px; width: 30px; padding: 0; justify-content: center; line-height: 1; }
   .wb-frame { flex: 1; width: 100%; border: 0; background: #fff; display: block; }
   .wb-frame[hidden] { display: none !important; }
+  /* v3.48.1：iframe 被浏览器/其它扩展拦截时的兜底提示（面板内页面 3 秒未上报 READY） */
+  .wb-frame-warn { position: absolute; inset: 52px 0 0; z-index: 5; background: #F7F9FC;
+    display: flex; align-items: center; justify-content: center; padding: 24px; }
+  .wb-frame-warn[hidden] { display: none !important; }
+  .wb-warn-box { max-width: 440px; background: #fff; border: 1px solid #E5E7EB; border-radius: 12px;
+    padding: 20px 22px; box-shadow: 0 12px 40px rgba(0,0,0,.10); }
+  .wb-warn-box strong { font-size: 15px; color: #1F2937; }
+  .wb-warn-box p { margin: 10px 0 16px; font-size: 13px; line-height: 1.7; color: #4B5563; }
+  .wb-warn-acts { display: flex; gap: 10px; }
+  .wb-warn-box .wb-btn { background: #2F5597; border-color: #2F5597; color: #fff; }
+  .wb-warn-box .wb-btn.ghost { background: #fff; color: #2F5597; border-color: #C9D8EE; }
   .wb-loading { position: absolute; align-self: center; color: #fff; font-size: 13px; opacity: .85; display: none; }
 
   @media (max-width: 700px) {
@@ -271,6 +285,16 @@
         <iframe class="wb-frame" id="wbFrameRent" title="风神物资租用" allow="clipboard-write *" allowtransparency="false" hidden></iframe>
         <iframe class="wb-frame" id="wbFrameRt" title="风神实时出勤监控" allow="clipboard-write *" allowtransparency="false" hidden></iframe>
         <iframe class="wb-frame" id="wbFrameQl" title="风神质量运营" allow="clipboard-write *" allowtransparency="false" hidden></iframe>
+        <div class="wb-frame-warn" id="wbFrameWarn" hidden>
+          <div class="wb-warn-box">
+            <strong>面板内容没能加载</strong>
+            <p>浏览器或其它扩展拦截了内嵌页面（可能显示「此页面已被屏蔽」）。数据本身不受影响：点「↗ 新标签打开」即可正常使用；若是刚升级扩展，请到 <b>chrome://extensions</b> 重新加载本扩展后点「重试加载」。</p>
+            <div class="wb-warn-acts">
+              <button class="wb-btn" id="wbWarnNewTab">↗ 新标签打开</button>
+              <button class="wb-btn ghost" id="wbWarnRetry">↻ 重试加载</button>
+            </div>
+          </div>
+        </div>
       </div>
     </div>`;
   if (root === host) {
@@ -313,6 +337,18 @@
   let menuOpen = false;
   let mode = "assess";
   const loaded = new Set();
+  // v3.48.1：iframe 就绪握手 —— 页面启动后上报 READY，3 秒没上报说明被拦截/加载失败
+  const frameReady = new Set();
+  let frameCheckTimer = null;
+  function hideFrameWarn() { q("wbFrameWarn").hidden = true; }
+  function showFrameWarn() { q("wbFrameWarn").hidden = false; }
+  function scheduleFrameCheck(m) {
+    clearTimeout(frameCheckTimer);
+    if (m !== "quality" || frameReady.has("quality")) return;   // 只有质量运营页上报 READY
+    frameCheckTimer = setTimeout(() => {
+      if (open && mode === "quality" && !frameReady.has("quality")) showFrameWarn();
+    }, 3000);
+  }
 
   function showTip(show, x, y, text) {
     if (show) {
@@ -343,6 +379,7 @@
   }
 
   function applyMode() {
+    hideFrameWarn();
     q("wbTitle").textContent = HEAD[mode].title;
     q("wbSub").textContent = HEAD[mode].sub;
     for (const m of MODES) {
@@ -365,6 +402,7 @@
       frames[mode].src = PAGES[mode];
       loaded.add(mode);
     }
+    if (v) scheduleFrameCheck(mode);
     if (!v) showTip(false);
   }
 
@@ -449,10 +487,21 @@
   tabs.realtime.addEventListener("click", () => setOpen(true, "realtime"));
   tabs.quality.addEventListener("click", () => setOpen(true, "quality"));
   q("wbReload").addEventListener("click", () => {
+    frameReady.delete(mode);
     frames[mode].src = PAGES[mode] + "?_t=" + Date.now();
+    scheduleFrameCheck(mode);
   });
   q("wbNewTab").addEventListener("click", () => {
     if (HAS_EXT) chrome.runtime.sendMessage({ type: "WB_OPEN_TAB", page: mode });
+  });
+  q("wbWarnNewTab").addEventListener("click", () => {
+    if (HAS_EXT) chrome.runtime.sendMessage({ type: "WB_OPEN_TAB", page: mode });
+  });
+  q("wbWarnRetry").addEventListener("click", () => {
+    frameReady.delete(mode);
+    frames[mode].src = PAGES[mode] + "?_t=" + Date.now();
+    hideFrameWarn();
+    scheduleFrameCheck(mode);
   });
 
   window.addEventListener("keydown", (e) => {
@@ -463,11 +512,16 @@
 
   // iframe 内按 Esc / 点「考核看板 ↗」/ 关闭时通过 postMessage 通知父页面
   window.addEventListener("message", (e) => {
-    if (e.source !== frames.assess.contentWindow && e.source !== frames.attendance.contentWindow &&
-        e.source !== frames.workforce.contentWindow && e.source !== frames.schedule.contentWindow &&
-        e.source !== frames.rent.contentWindow && e.source !== frames.quality.contentWindow) return;
+    let from = null;
+    for (const m of MODES) if (e.source === frames[m].contentWindow) { from = m; break; }
+    if (!from) return;
     const d = e.data;
     if (!d || d.__wbAssess !== true) return;
+    if (d.type === "READY") {                 // v3.48.1：页面已真正启动 → 隐藏拦截提示
+      frameReady.add(from);
+      if (from === mode) hideFrameWarn();
+      return;
+    }
     if (d.type === "CLOSE") setOpen(false);
     if (d.type === "TOGGLE") setOpen(!open);
     if (d.type === "SWITCH" && PAGES[d.mode]) setOpen(true, d.mode);

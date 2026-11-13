@@ -1,8 +1,9 @@
-/* 质量运营模块（v3.48.0，独立页面）
+/* 质量运营模块（v3.48.1，独立页面）
  * ---------------------------------------------------------------------------
  * 整商 / 商圈片 / 站点 / 骑手（按钮切换）× 炸班次 / 坏单（视图切换）的本月日期矩阵，
  * 行主体随维度变化（v3.45.0）：整商 = 1 行汇总；商圈片 / 站点 = 各一行；
  * 骑手 = 只显示本月有炸班或坏单的骑手。列 = 本月 1 ~ 今日 + 「本月合计」，表尾有「合计」行。
+ * v3.48.1：修复面板 iframe 被拦截（manifest 漏声明本页 3 个资源）；页加载后向宿主上报 READY。
  * v3.48.0：「全天」班次单独定义达标标准（默认 完单量 ≥ 18 单 且 有效在线时长 ≥ 6 小时），
  *   不采信系统「是否达成」标记；工具条「全天标准」可编辑、本机记忆、改完立即重算矩阵。
  *   历史明细读「完单量 / 有效在线时长」，T0 实时快照读「全天完单量 / 全天有效在线时长」
@@ -1149,5 +1150,15 @@ Object.assign(window.__QL__ = window.__QL__ || {}, {
   SITE_TO_AREA, KPI_FILTERS, KPI_COLS, BAD_COLS, VIOL_SEG_DAYS, VIOL_BATCH,
   setDim, setView, setMonth, loadAll, renderAll, shiftPop, badPop
 });
+
+// v3.48.1：面板 iframe 内脚本已加载 → 回报宿主「READY」；宿主 3 秒没收到就说明
+// 扩展页被浏览器/其它扩展拦截（例如显示「此页面已被屏蔽」），会给出新标签/重试兜底。
+// 独立标签页、离线测试桩下 parent 不可用，静默跳过。
+try {
+  if (typeof window.parent !== "undefined" && window.parent !== window.self &&
+      typeof window.parent.postMessage === "function") {
+    window.parent.postMessage({ __wbAssess: true, type: "READY" }, "*");
+  }
+} catch (e) { /* ignore */ }
 
 boot();
