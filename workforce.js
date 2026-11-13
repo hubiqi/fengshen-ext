@@ -241,7 +241,14 @@ const state = {
   singleSiteRiders: new Set(),  // 账单里只出现一个站点的骑手，允许通配键兜底
   crossSiteRiders: 0,          // 账单里跨站点的骑手人数（仅用于页面提示）
   attReady: false, kpiReady: false,
-  pendingAtt: false, pendingKpi: false, detailLoading: false
+  pendingAtt: false, pendingKpi: false, detailLoading: false,
+  // v3.54.0 子模块「三方人资监控」：独立视图状态，不影响骑手账单的排序 / 列筛选
+  hr: {
+    // target 在 init() 里读 localStorage（常量定义在文件后半段，避免 TDZ）
+    active: false, target: 16,
+    sort: { key: "remainText", dir: 1 },
+    company: "", status: "", pendingOnly: false, rows: []
+  }
 };
 
 // ---------------------------------------------------------------- 请求通道
@@ -744,6 +751,400 @@ function attachDetail(rows) {
     r.negativeText = kt(r.negative); r.earlyText = kt(r.early);
   }
   return rows;
+}
+
+/* ================================================================ v3.54.0
+ * 子模块「三方人资监控」：以招募缺口管理 → 线索结果明细里带
+ * headHunterCompanyName 的骑手为主表，左连人资名单 / 本月出勤 / 考核运单明细。
+ * 全部数据都来自运力模块已经取到的五份数据，切子模块零额外请求。
+ *
+ * 真机口径（2026-11：139 条线索 / 114 名去重骑手 / 3 家人资商）：
+ *   - effectiveRetentionDays（有效留存天数）= 达标天数
+ *   - finishOrderNum（结算完单量）        = 达标单量
+ *   - level（结算档位）只在 effectiveRetentionDays >= 16 时出现 → 结算达标门槛 16 天
+ *   - settlementInfo / attributionStateDesc / finalSettlementAmount = 结算状态与金额
+ *   - resultTeam / resultTeamName = 归属站点，可直接与「骑手id＋站点id」明细对齐
+ * 「结算剩余达标天数」= max(0, 结算标准 − 达标天数)；已出结算档位 / 已结算完成 /
+ * 达标天数已过门槛的显示「已达标 / 已结算」。结算标准默认 16 天、可在工具条修改。
+ */
+const HR_LS = "wb_wf_hr_target_v1";
+const HR_TARGET_DEFAULT = 16;
+const HR_TARGET_MIN = 1, HR_TARGET_MAX = 90;
+const HR_COLS = [
+  { h: "人资商", k: "company", csv: "company", cls: "h-company" },
+  { h: "站点", k: "team", csv: "team", cls: "h-site" },
+  { h: "骑手 / id", k: "riderHtml", csv: "riderCsv", cls: "h-rider", html: true },
+  { h: "是否在职", k: "onJobHtml", csv: "onJob", cls: "", html: true },
+  { h: "结算剩余达标天数", k: "remainText", csv: "remain", cls: "h-remain" },
+  { h: "入职时间", k: "entry", csv: "entry", cls: "h-ts" },
+  { h: "离职时间", k: "leave", csv: "leave", cls: "h-ts" },
+  { h: "首跑时间", k: "firstRun", csv: "firstRun", cls: "h-ts" },
+  { h: "达标天数", k: "effDaysText", csv: "effDays", cls: "h-num" },
+  { h: "达标单量", k: "finishText", csv: "finishOrders", cls: "h-num" },
+  { h: "本月班次异常数", k: "badText", csv: "bad", cls: "h-num" },
+  { h: "物流责", k: "lgtText", csv: "lgt", cls: "h-num" },
+  { h: "投诉", k: "complainText", csv: "complain", cls: "h-num" },
+  { h: "差评", k: "negativeText", csv: "negative", cls: "h-num" },
+  { h: "提前点", k: "earlyText", csv: "early", cls: "h-num" }
+];
+const HR_NUM_CSV = new Set(["remain", "effDays", "finishOrders", "bad",
+  "lgt", "complain", "negative", "early"]);
+
+function loadHrTarget() {
+  try {
+    const n = Number(localStorage.getItem(HR_LS));
+    if (Number.isFinite(n) && n >= HR_TARGET_MIN && n <= HR_TARGET_MAX) return Math.round(n);
+  } catch (e) { /* 偏好损坏则用默认 */ }
+  return HR_TARGET_DEFAULT;
+}
+function saveHrTarget(n) {
+  try { localStorage.setItem(HR_LS, String(n)); } catch (e) { /* 配额不足不影响出表 */ }
+}
+/** settlementInfo 是 JSON 字符串，解析失败按空对象处理，绝不让整张表挂掉。 */
+function hrSettlement(c) {
+  try { return JSON.parse(String((c && c.settlementInfo) || "{}")) || {}; }
+  catch (e) { return {}; }
+}
+/** 同一骑手可能横跨多个结算批次（真机 22 人），取最新一批：结算月 → 线索 id。 */
+function hrClueRank(c) { return num(c && c.effectiveMonth) * 1e9 + num(c && c.id); }
+function hrClueRows() {
+  const by = new Map();
+  for (const c of state.clueList || []) {
+    const hh = String((c && c.headHunterCompanyName) || "").trim();
+    const rid = normId(c && c.knightId);
+    if (!hh || !rid) continue;
+    const prev = by.get(rid);
+    if (!prev || hrClueRank(c) > hrClueRank(prev)) by.set(rid, c);
+  }
+  return [...by.values()];
+}
+/** 人资名单 / 线索里的时间既有 "YYYY-MM-DD HH:mm:ss" 也有毫秒时间戳。 */
+function hrTime(v) {
+  if (v == null || String(v).trim() === "") return "—";
+  const s = String(v).trim();
+  if (/^\d{10,13}$/.test(s)) {
+    const n = Number(s), d = new Date(n < 1e11 ? n * 1000 : n);
+    if (!isNaN(d.getTime())) {
+      const p = (x) => String(x).padStart(2, "0");
+      return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} `
+        + `${p(d.getHours())}:${p(d.getMinutes())}`;
+    }
+  }
+  return shortTime(s);
+}
+/** 按多个候选站点 id 依次查「骑手id＋站点id」明细（归属站点 → 账单站点）。 */
+function hrPick(map, rid, keys, dflt) {
+  for (const k of keys) {
+    const v = pairGet(map, rid, k);
+    if (v !== undefined) return v;
+  }
+  return dflt;
+}
+/** 是否已经结算达标：过了门槛 / 系统已出档位 / 已结算完成且有金额。 */
+function hrReached(c, effDays, target, si) {
+  const amount = num(c.finalSettlementAmount != null
+    ? c.finalSettlementAmount : si.finalSettlementAmount);
+  return effDays >= target || c.level != null
+    || (String(c.attributionStateDesc || "").trim() === "结算完成" && amount > 0);
+}
+function hrBuildRows() {
+  const target = state.hr.target;
+  const billByRider = new Map();
+  for (const r of state.rows || []) if (!billByRider.has(r.riderId)) billByRider.set(r.riderId, r);
+  const staff = state.staff || new Map();
+  const out = [];
+  for (const c of hrClueRows()) {
+    const rid = normId(c.knightId);
+    const si = hrSettlement(c);
+    const st = staff.get(rid);
+    const bill = billByRider.get(rid);
+    const company = String(c.headHunterCompanyName || "").trim();
+    const team = String(c.resultTeamName || c.entryTeamName || c.pushingTeamName || "").trim()
+      || (bill ? bill.team : "");
+    const teamId = normId(c.resultTeam || c.entryTeam || c.pushingTeam || "");
+    const keys = [...new Set([teamId, bill ? bill.teamId : ""].filter(Boolean))];
+    const riderName = String(c.riderName || (bill && bill.riderName) || "").trim();
+    const workStatus = st ? num(st.workStatus) : null;
+    const onJob = workStatus === 1 ? "是" : (workStatus === 2 ? "否" : "—");
+    const effDays = num(c.effectiveRetentionDays);
+    const finishOrders = num(c.finishOrderNum);
+    const settleState = String(c.attributionStateDesc || "").trim();
+    const settleAmount = num(c.finalSettlementAmount != null
+      ? c.finalSettlementAmount : si.finalSettlementAmount);
+    const reached = hrReached(c, effDays, target, si);
+    const remain = reached ? 0 : Math.max(0, target - effDays);
+    const runDays = hrPick(state.attRun, rid, keys, null);
+    const firstRun = runDays && runDays.size ? [...runDays].sort()[0] : "";
+    const bad = num(hrPick(state.attBad, rid, keys, 0));
+    const f = hrPick(state.kpi, rid, keys, {}) || {};
+    const bt = (n) => state.pendingAtt ? "…" : (state.attReady ? int(n) : "—");
+    const kt = (n) => state.pendingKpi ? "…" : (state.kpiReady ? int(n) : "—");
+    out.push({
+      riderId: rid, riderName, riderCsv: `${riderName} (${rid})`,
+      riderHtml: `${esc(riderName)}<small>${esc(rid)}</small>`,
+      company, team, teamId,
+      onJob, onJobHtml: onJob === "是" ? '<i class="mk yes">是</i>'
+        : onJob === "否" ? '<i class="mk no">否</i>' : '<i class="mk na">—</i>',
+      entry: hrTime(st && st.entryTime != null ? st.entryTime : c.entryTime),
+      leave: hrTime(st && st.leaveTime != null ? st.leaveTime : ""),
+      firstRun: firstRun || "—",
+      effDays, effDaysText: int(effDays),
+      finishOrders, finishText: int(finishOrders),
+      bad, badText: bt(bad),
+      lgt: num(f.lgt), lgtText: kt(num(f.lgt)),
+      complain: num(f.complain), complainText: kt(num(f.complain)),
+      negative: num(f.negative), negativeText: kt(num(f.negative)),
+      early: num(f.early), earlyText: kt(num(f.early)),
+      remain, reached, settleState, settleAmount,
+      settleMonth: String(c.effectiveMonth || ""),
+      level: c.level == null ? "" : String(c.level),
+      remainText: reached ? (settleState === "结算完成" ? "已结算" : "已达标") : int(remain),
+      remainCls: reached ? "is-ok" : (onJob === "否" ? "is-risk" : (remain <= 3 ? "is-near" : "")),
+      remainTip: reached
+        ? `已达标：达标天数 ${effDays} 天 ≥ 结算标准 ${target} 天` +
+          `（结算状态 ${settleState || "—"}，档位 ${c.level == null ? "—" : c.level}）`
+        : `结算标准 ${target} 天 − 已达标 ${effDays} 天 = 还需 ${remain} 天` +
+          `（结算状态 ${settleState || "—"}；门槛可在「结算标准」里修改）`
+    });
+  }
+  return out;
+}
+/** 默认排序：未达标的按「还差几天」升序（快达标的在最前），已达标沉底。 */
+function hrSortVal(r, c) {
+  if (c.k === "remainText") return r.reached ? 1e6 : r.remain;
+  if (c.k === "onJobHtml") return r.onJob;
+  if (c.k === "riderHtml") return r.riderName;
+  return r[c.k];
+}
+function hrCompare(a, b, key, dir) {
+  const c = HR_COLS.find((x) => x.k === key) || HR_COLS[0];
+  const va = hrSortVal(a, c), vb = hrSortVal(b, c);
+  const isNum = HR_NUM_CSV.has(c.csv) || c.k === "remainText";
+  const cmp = isNum ? num(va) - num(vb) : COLLATOR.compare(String(va), String(vb));
+  if (cmp) return cmp * dir;
+  // 并列时：未达标优先 → 剩余天数少的优先 → 达标天数多的优先 → 姓名
+  if (a.reached !== b.reached) return a.reached ? 1 : -1;
+  if (a.remain !== b.remain) return a.remain - b.remain;
+  if (a.effDays !== b.effDays) return b.effDays - a.effDays;
+  return COLLATOR.compare(a.riderName, b.riderName);
+}
+function hrVisibleRows() {
+  const q = String(state.query || "").trim().toLowerCase();
+  const site = String(state.site || "");
+  const h = state.hr;
+  const rows = (h.rows || []).filter((r) => {
+    if (h.company && r.company !== h.company) return false;
+    if (h.status && r.settleState !== h.status) return false;
+    if (h.pendingOnly && r.reached) return false;
+    if (site && r.team !== site) return false;
+    if (q && !`${r.riderName} ${r.riderId} ${r.team} ${r.company} ${r.settleState}`
+      .toLowerCase().includes(q)) return false;
+    return true;
+  });
+  if (h.sort.key && h.sort.dir) rows.sort((a, b) => hrCompare(a, b, h.sort.key, h.sort.dir));
+  return rows;
+}
+function renderHrCompanyOptions() {
+  const sel = $("hr-company");
+  if (!sel) return;
+  const keep = sel.value;
+  const list = [...new Set((state.hr.rows || []).map((r) => r.company).filter(Boolean))]
+    .sort((a, b) => COLLATOR.compare(a, b));
+  sel.innerHTML = '<option value="">人资商：全部</option>'
+    + list.map((s) => `<option value="${esc(s)}">${esc(s)}</option>`).join("");
+  sel.value = list.includes(keep) ? keep : "";
+  state.hr.company = sel.value;
+}
+function renderHrSummary(rows) {
+  const all = state.hr.rows || [];
+  const on = rows.filter((r) => r.onJob === "是").length;
+  const reached = rows.filter((r) => r.reached).length;
+  const pending = rows.length - reached;
+  const near = rows.filter((r) => !r.reached && r.remain <= 3).length;
+  const leftPending = rows.filter((r) => !r.reached && r.onJob === "否").length;
+  const sum = (k) => rows.reduce((a, r) => a + num(r[k]), 0);
+  const cards = [
+    ["三方骑手", int(rows.length), ""],
+    ["在职", int(on), "ok"],
+    ["已达标 / 已结算", int(reached), "ok"],
+    ["未达标", int(pending), "warn"],
+    ["差 ≤3 天", int(near), "warn"],
+    ["离职未达标", int(leftPending), "risk"],
+    ["达标单量合计", int(sum("finishOrders")), ""],
+    ["本月异常合计", int(sum("bad")), ""]
+  ];
+  $("hr-summary").innerHTML = cards.map(([k, v, cls]) =>
+    `<div class="wf-card hr-card ${cls}"><span class="k">${esc(k)}</span>`
+    + `<span class="v">${esc(v)}</span></div>`).join("");
+  const companies = new Set(all.map((r) => r.company).filter(Boolean)).size;
+  const bits = [
+    `共 <b>${int(all.length)}</b> 名三方人资骑手（${int(companies)} 家人资商），当前筛选显示 <b>${int(rows.length)}</b> 名`,
+    `结算达标门槛 <b>${int(state.hr.target)}</b> 天`
+  ];
+  if (!state.attReady) bits.push("本月出勤明细未取到，班次异常数 / 首跑时间显示「—」");
+  if (!state.kpiReady) bits.push("考核运单明细未取到，4 类坏单显示「—」");
+  $("hr-note").innerHTML = bits.join("　·　");
+}
+function renderHrTable(rows) {
+  const t = $("hr-table");
+  const h = state.hr;
+  const head = "<thead><tr>" + HR_COLS.map((c) => {
+    const cls = (h.sort.key === c.k && h.sort.dir === 1) ? " sort-asc"
+      : (h.sort.key === c.k && h.sort.dir === -1) ? " sort-desc" : "";
+    return `<th class="${cls.trim()}" data-hsort="${esc(c.k)}"`
+      + ` title="${esc(c.h)}：点击表头按此列排序（升序 → 降序 → 取消）">${esc(c.h)}</th>`;
+  }).join("") + "</tr></thead>";
+  const body = ["<tbody>"];
+  if (!rows.length) {
+    body.push(`<tr class="hr-empty"><td colspan="${HR_COLS.length}">`
+      + `没有符合条件的三方人资骑手${state.hr.rows.length ? "（试试清空搜索或筛选）" : "（可点「立即刷新」重新取数）"}</td></tr>`);
+  }
+  for (const r of rows) {
+    body.push("<tr>" + HR_COLS.map((c) => {
+      if (c.k === "remainText") {
+        return `<td class="${c.cls} ${r.remainCls}" title="${esc(r.remainTip)}">${esc(r.remainText)}</td>`;
+      }
+      const raw = c.html ? r[c.k] : r[c.k];
+      const txt = c.html ? raw : esc(raw);
+      const isEmpty = !c.html && (raw === "—" || raw === "" || raw === "…");
+      const hot = !c.html && /^(badText|lgtText|complainText|negativeText|earlyText)$/.test(c.k)
+        && num(raw) > 0;
+      const cls = [c.cls, isEmpty ? "h-empty" : "", hot ? "h-hot" : ""].filter(Boolean).join(" ");
+      const title = c.k === "company" ? ` title="${esc(r.company)}"` : "";
+      return `<td class="${cls}"${title}>${txt}</td>`;
+    }).join("") + "</tr>");
+  }
+  if (rows.length) {
+    const sum = (k) => int(rows.reduce((a, r) => a + num(r[k]), 0));
+    const total = {
+      company: `合计（${int(rows.length)} 人）`, team: "", riderHtml: "", onJobHtml: "",
+      remainText: `未达标 ${int(rows.filter((r) => !r.reached).length)}`, entry: "", leave: "",
+      firstRun: "", effDaysText: sum("effDays"), finishText: sum("finishOrders"),
+      badText: sum("bad"), lgtText: sum("lgt"), complainText: sum("complain"),
+      negativeText: sum("negative"), earlyText: sum("early")
+    };
+    body.push('<tr class="hr-total">' + HR_COLS.map((c) =>
+      `<td class="${c.cls}">${esc(total[c.k])}</td>`).join("") + "</tr>");
+  }
+  body.push("</tbody>");
+  t.innerHTML = head + body.join("");
+}
+function renderHr() {
+  state.hr.rows = hrBuildRows();
+  renderHrCompanyOptions();
+  const rows = hrVisibleRows();
+  renderHrSummary(rows);
+  renderHrTable(rows);
+  renderSiteOptions();     // 站点下拉按当前视图的数据源重建
+  if (state.hr.active) renderViewState();
+}
+/** 切子模块：只切 DOM 显示与标题 / 控件，不重新取数。 */
+function setHrView(on) {
+  const active = !!on;
+  state.hr.active = active;
+  $("bill-block").hidden = active;
+  $("hr-block").hidden = !active;
+  document.querySelectorAll(".bill-only").forEach((el) => { el.hidden = active; });
+  document.querySelectorAll(".hr-only").forEach((el) => { el.hidden = !active; });
+  document.querySelectorAll(".wf-view-tab").forEach((b) => {
+    const isOn = (b.dataset.view === "hr") === active;
+    b.classList.toggle("active", isOn);
+    b.setAttribute("aria-selected", isOn ? "true" : "false");
+  });
+  $("wf-search").placeholder = active
+    ? "搜姓名 / 骑手id / 站点 / 人资商" : "搜姓名 / 骑手id / 站点 / 账单ID";
+  // 换子模块时清掉上一视图的搜索 / 站点筛选，避免切过去看到一张空表
+  state.query = ""; state.site = "";
+  $("wf-search").value = ""; $("wf-site").value = "";
+  closePop();
+  renderMeta();
+  applyData();
+}
+function hrToggleSort(key) {
+  const s = state.hr.sort;
+  if (s.key !== key) { s.key = key; s.dir = 1; }
+  else if (s.dir === 1) s.dir = -1;
+  else { s.key = ""; s.dir = 0; }
+  renderHr();
+}
+function hrExportCsv() {
+  const rows = hrVisibleRows();
+  const head = HR_COLS.map((c) => c.h).concat(
+    ["结算状态", "结算月份", "结算档位", "结算金额(元)", "归属站点id"]);
+  const line = (r) => HR_COLS.map((c) => csvCell(r[c.csv])).join(",")
+    + "," + [r.settleState, r.settleMonth, r.level, r.settleAmount, r.teamId]
+      .map(csvCell).join(",");
+  const text = [head.map(csvCell).join(","), ...rows.map(line)].join("\r\n");
+  const blob = new Blob(["\ufeff" + text], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = `风神三方人资监控_${state.month.replace("-", "")}.csv`;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  showNotice(`已导出 ${rows.length} 名三方人资骑手为 CSV（Excel 可直接打开）。`, "blue");
+}
+// 结算标准弹层 ---------------------------------------------------------------
+function placeHrTarget(anchor) {
+  const p = $("hr-target");
+  p.hidden = false;
+  const r = anchor.getBoundingClientRect();
+  const w = p.offsetWidth || 396, h = p.offsetHeight || 240;
+  p.style.left = Math.max(8, Math.min(r.left, window.innerWidth - w - 8)) + "px";
+  p.style.top = (r.bottom + h > window.innerHeight - 8
+    ? Math.max(8, r.top - h - 6) : r.bottom + 6) + "px";
+}
+function openHrTarget() {
+  $("hrt-days").value = String(state.hr.target);
+  $("hrt-note").textContent = `当前标准 ${state.hr.target} 天：${int(hrVisibleRows().filter((r) => !r.reached).length)} 人未达标。`;
+  placeHrTarget($("btn-hr-target"));
+}
+function closeHrTarget() { $("hr-target").hidden = true; }
+function applyHrTarget() {
+  const n = Math.round(num($("hrt-days").value));
+  if (!Number.isFinite(n) || n < HR_TARGET_MIN || n > HR_TARGET_MAX) {
+    $("hrt-note").textContent = `请输入 ${HR_TARGET_MIN}~${HR_TARGET_MAX} 之间的整数。`;
+    return;
+  }
+  state.hr.target = n;
+  saveHrTarget(n);
+  $("btn-hr-target").textContent = `结算标准 ${n}天`;
+  closeHrTarget();
+  renderHr();
+  showNotice(`结算达标标准已改为 ${n} 天，剩余达标天数已重算（未重新取数）。`, "blue");
+}
+function resetHrTarget() {
+  $("hrt-days").value = String(HR_TARGET_DEFAULT);
+  $("hrt-note").textContent = "已填入默认值，点「保存并重算」生效。";
+}
+function bindHrEvents() {
+  $("wf-view-tabs").addEventListener("click", (e) => {
+    const b = e.target.closest && e.target.closest("[data-view]");
+    if (b) setHrView(b.dataset.view === "hr");
+  });
+  $("hr-company").addEventListener("change", (e) => { state.hr.company = e.target.value; renderHr(); });
+  $("hr-status").addEventListener("change", (e) => { state.hr.status = e.target.value; renderHr(); });
+  $("hr-pending").addEventListener("change", (e) => {
+    state.hr.pendingOnly = !!e.target.checked; renderHr();
+  });
+  $("hr-table").addEventListener("click", (e) => {
+    const th = e.target.closest && e.target.closest("th[data-hsort]");
+    if (th) hrToggleSort(th.dataset.hsort);
+  });
+  $("btn-hr-target").addEventListener("click", () => {
+    if (!$("hr-target").hidden) { closeHrTarget(); return; }
+    openHrTarget();
+  });
+  $("hrt-close").addEventListener("click", closeHrTarget);
+  $("hrt-apply").addEventListener("click", applyHrTarget);
+  $("hrt-reset").addEventListener("click", resetHrTarget);
+  $("hrt-days").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") applyHrTarget();
+  });
+  document.addEventListener("click", (e) => {
+    const p = $("hr-target");
+    if (p.hidden || p.contains(e.target) || e.target.closest("#btn-hr-target")) return;
+    closeHrTarget();
+  });
 }
 
 // ---------------------------------------------------------------- 筛选 / 排序（v3.18.0）
@@ -2241,6 +2642,19 @@ function setFrozen(keys) {
   renderViewState();
 }
 function renderViewState() {
+  // v3.54.0：三方人资监控视图显示它自己的排序 / 筛选状态，不显示主表的「冻结 N 列」
+  if (state.hr.active) {
+    const c = HR_COLS.find((x) => x.k === state.hr.sort.key);
+    const bits = [c ? `排序：${c.h} ${state.hr.sort.dir > 0 ? "↑" : "↓"}`
+      : "排序：剩余达标天数 ↑"];
+    if (state.hr.company) bits.push(`人资商：${state.hr.company}`);
+    if (state.hr.status) bits.push(`结算：${state.hr.status}`);
+    if (state.hr.pendingOnly) bits.push("只看未达标");
+    $("wf-state").textContent = bits.join("　·　");
+    $("btn-freeze").textContent = `冻结列 (${state.frozen.length})`;
+    $("btn-clear-view").disabled = true;
+    return;
+  }
   const bits = [];
   if (state.sort.key && state.sort.dir) {
     const c = PAGE_COLS.find((x) => x.k === state.sort.key);
@@ -2365,7 +2779,9 @@ function onPopClick(e) {
 function renderSiteOptions() {
   const sel = $("wf-site");
   const keep = sel.value;
-  const sites = [...new Set(state.rows.map((r) => r.team).filter(Boolean))]
+  // v3.54.0：三方人资监控视图的站点来自线索归属站点，可能不在本月账单里
+  const source = state.hr.active ? (state.hr.rows || []) : (state.rows || []);
+  const sites = [...new Set(source.map((r) => r.team).filter(Boolean))]
     .sort((a, b) => a.localeCompare(b, "zh"));
   sel.innerHTML = '<option value="">全部站点</option>' +
     sites.map((s) => `<option value="${esc(s)}">${esc(s)}</option>`).join("");
@@ -2375,8 +2791,20 @@ function renderSiteOptions() {
 function renderMeta() {
   const d = new Date();
   const hhmm = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
-  $("doc-sub").innerHTML = `账单月份 ${esc(state.month)}&nbsp;&nbsp;&nbsp;&nbsp;生成时间 ${esc(d.toLocaleDateString("zh-CN"))} ${hhmm}`;
-  $("sub").textContent = `账单 ${state.bills.length} 条 · 人资 ${state.staff.size} 人 · 线索 ${state.clues.size} 人`;
+  const hr = state.hr.active;
+  $("doc-title").textContent = hr
+    ? "运力模块 · 三方人资监控 · 结算达标 / 在职 / 本月异常"
+    : "运力模块 · 骑手账单 × 人资 × 出勤 × 异常订单";
+  $("doc-sub").innerHTML = hr
+    ? `结算批次 全部月份&nbsp;&nbsp;&nbsp;&nbsp;账单月份 ${esc(state.month)}`
+      + `&nbsp;&nbsp;&nbsp;&nbsp;生成时间 ${esc(d.toLocaleDateString("zh-CN"))} ${hhmm}`
+    : `账单月份 ${esc(state.month)}&nbsp;&nbsp;&nbsp;&nbsp;生成时间 ${esc(d.toLocaleDateString("zh-CN"))} ${hhmm}`;
+  $("sub").textContent = hr
+    ? `三方骑手 ${state.hr.rows.length} 人 · 人资商 ${new Set(state.hr.rows.map((r) => r.company).filter(Boolean)).size} 家 · 结算标准 ${state.hr.target} 天`
+    : `账单 ${state.bills.length} 条 · 人资 ${state.staff.size} 人 · 线索 ${state.clues.size} 人`;
+  $("doc-note").textContent = hr
+    ? "数据源：招募缺口管理 → 线索结果明细（带人资商，按骑手取最新结算批次）＋ 人资综合服务 → 成员管理（全部状态）＋ 出勤统计 → 明细数据（本月）＋ KPI管理 → 考核运单明细（4 类异常订单）；全部复用运力模块已取到的数据，切换子模块不产生额外请求。一行一名三方人资骑手；「本月班次异常数 / 坏单」跟随账单月份，结算字段与账单月份无关。"
+    : "数据源：骑手账单管家 → 账单查询 ＋ 人资综合服务 → 成员管理（全部状态）＋ 招募缺口管理 → 线索结果明细 ＋ 出勤统计 → 明细数据（本月）＋ KPI管理 → 考核运单明细（仅 4 类异常订单）；账单主表按骑手 id 合并，一行一条账单；出勤与问题订单按「骑手 id ＋ 站点 id」归集";
   const parts = [
     `数据源：账单查询 ${state.month}（${state.bills.length} 条）`,
     `成员管理·全部（${state.staff.size} 人）`,
@@ -2411,12 +2839,12 @@ function applyData() {
   state.singleSiteRiders = new Set([...sites].filter(([, s]) => s.size === 1).map(([rid]) => rid));
   state.crossSiteRiders = [...sites].filter(([, s]) => s.size > 1).length;
   state.rows = attachDetail(base);
-  renderSiteOptions();
   const rows = visibleRows();
   renderSummary(rows);
   renderTable(rows);
-  renderMeta();
   renderScale();
+  renderHr();      // v3.54.0：构造三方人资监控行 + 重建站点下拉（按当前视图）
+  renderMeta();    // 放在最后，标题 / 概览数字用的是最新 hr 行
 }
 
 // ---------------------------------------------------------------- 进度 / 提示
@@ -2555,6 +2983,8 @@ function csvCell(v) {
   return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
 }
 function exportCsv() {
+  // v3.54.0：导当前子模块，切到三方人资监控就导监控表
+  if (state.hr.active) { hrExportCsv(); return; }
   const rows = visibleRows();
   // 账单ID 只在 CSV 里出现；金额 / 单量用原始数值，不带 ¥ 和千分位
   const head = COLS.map((c) => c.h);
@@ -2623,14 +3053,16 @@ $("btn-copy-image").addEventListener("click", async (e) => {
   btn.disabled = true; btn.textContent = "正在生成图片…";
   try {
     const ym = state.month.replace("-", "");
+    const hr = state.hr.active;
     const r = await WB_CAPTURE.capture({
       download: e.shiftKey, date: ym, rootId: "sheet",
-      filename: `风神运力模块_${ym}.png`
+      filename: hr ? `风神三方人资监控_${ym}.png` : `风神运力模块_${ym}.png`
     });
     const size = `${r.width}×${r.height}`;
+    const name = hr ? "三方人资监控" : "运力模块";
     showNotice(r.mode === "clipboard"
-      ? `已复制运力模块图片（${size} PNG），可直接 Ctrl/⌘+V 粘贴到钉钉 / 微信。`
-      : `运力模块图片已另存为 PNG 文件（${size}）。`, "blue");
+      ? `已复制${name}图片（${size} PNG），可直接 Ctrl/⌘+V 粘贴到钉钉 / 微信。`
+      : `${name}图片已另存为 PNG 文件（${size}）。`, "blue");
   } catch (err) {
     showNotice(`生成图片失败：${String((err && err.message) || err)}。可先点「纯净看板」，再用系统截图工具替代。`);
   } finally { btn.disabled = false; btn.textContent = label; }
@@ -2649,7 +3081,7 @@ $("btn-clean").addEventListener("click", () => {
   document.body.appendChild(b);
 });
 window.addEventListener("keydown", (e) => {
-  if (e.key === "Escape") { clearNotice(); closePop(); }
+  if (e.key === "Escape") { clearNotice(); closePop(); closeHrTarget(); }
 });
 
 // ---------------------------------------------------------------- 测试钩子
@@ -2740,6 +3172,11 @@ window.__SET_WORKFORCE__ = (obj) => {
   }
   if (obj.attReady === false) { state.attReady = false; state.attBad = new Map(); state.attRun = new Map(); }
   if (obj.kpiReady === false) { state.kpiReady = false; state.kpi = new Map(); }
+  // v3.54.0：离线回归可直接指定结算达标标准
+  if (obj.hrTarget !== undefined) {
+    state.hr.target = Math.max(HR_TARGET_MIN, Math.min(HR_TARGET_MAX, Math.round(num(obj.hrTarget))));
+    $("btn-hr-target").textContent = `结算标准 ${state.hr.target}天`;
+  }
   // 真机回归可显式指定视图状态，避免上一次跑留下的 localStorage 偏好干扰
   if (Array.isArray(obj.frozen)) setFrozen(obj.frozen);
   if (obj.sort) state.sort = { key: obj.sort.key || "", dir: num(obj.sort.dir) };
@@ -2784,7 +3221,14 @@ window.__WF__ = { state, COLS, PAGE_COLS, buildRows, attachDetail, visibleRows, 
   SCALE_LS, SCALE_LS_DAYS, SCALE_DAYS, SCALE_ONJOB_DAYS, SCALE_FIRST_DAYS,
   SCALE_DAYS_MIN, SCALE_DAYS_MAX, SCALE_ONJOB_DAYS_MIN, SCALE_ONJOB_DAYS_MAX,
   SCALE_FIRST_DAYS_MIN, SCALE_FIRST_DAYS_MAX,
-  SCALE_MODE_LABEL, SITE_TO_AREA, SCALE_AREA_ORDER, API_TEAMS };
+  SCALE_MODE_LABEL, SITE_TO_AREA, SCALE_AREA_ORDER, API_TEAMS,
+  // v3.54.0 三方人资监控子模块
+  HR_LS, HR_TARGET_DEFAULT, HR_TARGET_MIN, HR_TARGET_MAX, HR_COLS, HR_NUM_CSV,
+  loadHrTarget, saveHrTarget, hrSettlement, hrClueRank, hrClueRows, hrTime, hrPick,
+  hrReached, hrBuildRows, hrSortVal, hrCompare, hrVisibleRows,
+  renderHr, renderHrSummary, renderHrTable, renderHrCompanyOptions,
+  setHrView, hrToggleSort, hrExportCsv,
+  openHrTarget, closeHrTarget, applyHrTarget, resetHrTarget, bindHrEvents };
 
 // ---------------------------------------------------------------- 初始化
 (async function init() {
@@ -2793,6 +3237,9 @@ window.__WF__ = { state, COLS, PAGE_COLS, buildRows, attachDetail, visibleRows, 
   bindScalePeople();                  // v3.37.0：点今日入职 / 首跑 / 离职的数字看骑手明细
   bindScaleAdj();                     // v3.37.0：在职规模 / 有效出勤规模 右键手动增减
   bindScaleEvents();                 // v3.31.0：先设好汇总默认区间（天数可配），再渲染
+  bindHrEvents();                     // v3.54.0：子模块页签 / 筛选 / 结算标准
+  state.hr.target = loadHrTarget();
+  $("btn-hr-target").textContent = `结算标准 ${state.hr.target}天`;
   $("month-picker").value = state.month;
   $("month-picker").min = shiftMonth(curMonth(), -MONTHS_BACK);
   $("month-picker").max = curMonth();

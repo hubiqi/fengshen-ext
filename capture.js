@@ -52,7 +52,9 @@
     const sels = "table.tbl.fr,.fail-roster,table.tbl.att,.fr-note,.att-note,.att-kpi," +
       "table.tbl.wf,.wf-summary,.wf-note,table.tbl.sch,.sch-summary,.sch-note," +
       "table.tbl.rt-area-table,table.tbl.rt-detail-table," +
-      ".wf-scale,.wf-scale-title,.wf-scale-note,table.tbl.wf-scale-table";
+      ".wf-scale,.wf-scale-title,.wf-scale-note,table.tbl.wf-scale-table," +
+      // v3.54.0：三方人资监控是运力模块里的第二个子模块，导出宽度也要量它
+      "table.tbl.hr,.hr-summary,.hr-note";
     for (const el of Array.from(src.querySelectorAll(sels) || [])) {
       if (el.closest && el.closest("[hidden]")) continue;
       try { if (global.getComputedStyle(el).display === "none") continue; } catch (e) { /* ignore */ }
@@ -87,9 +89,15 @@
     rules.push(`.tbl-scroll { max-height:none !important;height:auto !important; }`);
     rules.push(`table.tbl.wf thead th,table.tbl.wf tbody td` +
       ` { position:static !important;top:auto !important;left:auto !important;box-shadow:none !important; }`);
+    // v3.54.0：运力模块两个子模块共用 #sheet，同一时刻只显示一个 section。
+    // 克隆画面里 [hidden] 的区块必须彻底不渲染，否则两张表会一起进导出图。
+    rules.push(`[hidden] { display:none !important; }`);
     // 排序箭头 / 筛选漏斗只是屏幕上的交互标记，不该出现在发给钉钉的图里
     rules.push(`table.tbl.wf thead th::after { content:none !important;display:none !important; }`);
     rules.push(`table.tbl.wf thead th button.wf-th-filter { display:none !important; }`);
+    rules.push(`table.tbl.hr thead th,table.tbl.hr tbody td` +
+      ` { position:static !important;top:auto !important;left:auto !important;box-shadow:none !important; }`);
+    rules.push(`table.tbl.hr thead th::after { content:none !important;display:none !important; }`);
     // v3.19.1 起不再隐藏滚动列，无需再做 visibility 还原
     rules.push(`.wf-pop { display:none !important; }`);
     // v3.19.0：排班模块的「时段权重配置」弹窗也不能混进导出图
@@ -105,7 +113,8 @@
       rules.push(`.att-kpi,.att-note,.att-switch,.att-block-title,.fr-head,.fr-title,.fr-note,` +
         `.wf-summary,.wf-note,.sch-summary,.sch-note,.doc-title,.doc-sub,.doc-note,.doc-foot` +
         ` { width:${WIDTH}px !important;max-width:none !important; }`);
-      rules.push(`table.tbl.att,table.tbl.wf,table.tbl.sch { margin-left:auto !important;margin-right:auto !important; }`);
+      rules.push(`table.tbl.att,table.tbl.wf,table.tbl.sch,table.tbl.hr`
+        + ` { margin-left:auto !important;margin-right:auto !important; }`);
     }
     return rules.join("\n");
   }

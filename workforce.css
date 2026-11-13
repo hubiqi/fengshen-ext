@@ -253,5 +253,85 @@ table.tbl.wf-scale-table tbody td.wf-people:hover { background: #EFF6FF; }
 .wf-pop.wf-scale-people { top: 12%; width: 660px; }
 
 @media (max-width: 1260px) {
-  .wf-summary, .wf-note, .wf-scale { padding-left: 12px; padding-right: 12px; }
+  .wf-summary, .wf-note, .wf-scale, .hr-summary, .hr-note { padding-left: 12px; padding-right: 12px; }
 }
+
+/* ================================================================ v3.54.0
+   子模块「三方人资监控」：视图页签、独立筛选、15 列监控表与结算达标状态。
+   两个子模块共用 #sheet，同一时刻只有一个 section 可见，复制图片只拍当前视图。 */
+[hidden] { display: none !important; }
+
+.wf-view-tabs { display: inline-flex; gap: 3px; padding: 3px; margin-left: 6px;
+  border-radius: 7px; background: #E5EAF2; border: 1px solid #D7DFEC; }
+/* 工具条是浅灰底（dashboard.css），非激活页签必须用深色字，否则几乎看不见 */
+.wf-view-tab { height: 24px; padding: 0 11px; border: 1px solid transparent; border-radius: 5px;
+  background: transparent; color: #4B5563; font-family: inherit; font-size: 11.5px;
+  cursor: pointer; white-space: nowrap; }
+.wf-view-tab:hover { background: #FFFFFF; color: #2F5597; }
+.wf-view-tab.active { background: #2F5597; color: #FFFFFF; font-weight: 700;
+  border-color: #2F5597; }
+.hr-only.hr-check { display: inline-flex; align-items: center; gap: 4px; height: 28px;
+  font-size: 11.5px; color: #374151; white-space: nowrap; cursor: pointer; }
+.hr-only.hr-check input { margin: 0; cursor: pointer; }
+#hr-company { max-width: 196px; }
+
+/* 顶部概览卡片沿用 .wf-card 的视觉，hr 版多两个高亮色 */
+.hr-summary { width: 1240px; max-width: 100%; margin: 26px auto 0; padding: 0 8px;
+  display: flex; flex-wrap: wrap; gap: 9px; justify-content: center; }
+/* 8 张卡片一行放得下，不再把最后一张挤到第二行 */
+.hr-summary .wf-card { min-width: 116px; flex: 0 1 136px; padding: 9px 8px; }
+.hr-summary .wf-card .v { font-size: 18px; }
+.hr-note { width: 1240px; max-width: 100%; margin: 12px auto 0; padding: 0 16px;
+  text-align: center; font-size: 12px; color: #6B7280; line-height: 1.7; }
+.hr-note b { color: #1F2937; }
+.hr-card.warn .v { color: #B45309; }
+.hr-card.ok .v { color: #15803D; }
+.hr-card.risk .v { color: #B91C1C; }
+
+.tbl-scroll.hr-scroll { overflow: auto; margin-top: 18px; max-height: 72vh; }
+table.tbl.hr { table-layout: auto; width: max-content; min-width: 1240px;
+  margin: 0 auto; font-size: 11.5px; }
+table.tbl.hr thead th { height: 42px; font-size: 11.5px; line-height: 1.35; padding: 3px 7px;
+  white-space: normal; position: sticky; top: 0; z-index: 5; cursor: pointer;
+  user-select: none; background: #2F5597; }
+table.tbl.hr thead th:hover { background: #24457C; }
+table.tbl.hr thead th::after { content: ""; font-size: 10px; color: #B9C9E8; }
+table.tbl.hr thead th:hover::after { content: " ⇅"; }
+table.tbl.hr thead th.sort-asc::after { content: " ↑"; color: #FDE68A; font-weight: 700; }
+table.tbl.hr thead th.sort-desc::after { content: " ↓"; color: #FDE68A; font-weight: 700; }
+table.tbl.hr tbody td { height: 34px; font-size: 11.5px; padding: 3px 7px;
+  white-space: nowrap; text-align: center; }
+table.tbl.hr tbody tr:nth-child(even) td { background: #FAFBFE; }
+table.tbl.hr tbody tr:hover td { background: #EFF6FF; }
+table.tbl.hr td.h-company { min-width: 150px; max-width: 208px; white-space: normal;
+  word-break: break-all; color: #6D28D9; font-size: 11px; }
+table.tbl.hr td.h-site { min-width: 132px; max-width: 176px; white-space: normal;
+  word-break: break-all; font-size: 11px; }
+table.tbl.hr td.h-rider { font-weight: 700; color: #1F2937; }
+table.tbl.hr td.h-rider small { display: inline-block; margin-left: 4px; font-weight: 400;
+  font-size: 10px; color: #9CA3AF; font-variant-numeric: tabular-nums; }
+table.tbl.hr td.h-ts { font-size: 10.5px; color: #4B5563; }
+table.tbl.hr td.h-num { font-variant-numeric: tabular-nums; }
+table.tbl.hr td.h-empty { color: #9CA3AF; }
+table.tbl.hr td.h-hot { color: #B91C1C; background: #FEF2F2; font-weight: 700; }
+table.tbl.hr td.h-remain { font-weight: 700; color: #B45309; }
+table.tbl.hr td.h-remain.is-ok { color: #15803D; background: #ECFDF3; }
+table.tbl.hr td.h-remain.is-risk { color: #B91C1C; background: #FEF2F2; }
+table.tbl.hr td.h-remain.is-near { color: #B45309; background: #FFFBEB; }
+table.tbl.hr i.mk { font-style: normal; font-weight: 700; }
+table.tbl.hr i.mk.yes { color: #15803D; }
+table.tbl.hr i.mk.no { color: #B91C1C; }
+table.tbl.hr i.mk.na { color: #9CA3AF; font-weight: 400; }
+table.tbl.hr tr.hr-empty td { height: 90px; color: #6B7280; font-size: 13px; }
+table.tbl.hr tr.hr-total td { height: 34px; font-weight: 700; color: #1F2937;
+  background: #EAF1FD !important; border-top: 2px solid #2F5597; }
+
+/* 结算标准弹层 */
+.wf-pop.hr-target-pop { width: 396px; }
+.hr-target-pop .hrt-row { display: flex; align-items: center; gap: 8px;
+  flex-wrap: wrap; margin: 12px 0 6px; }
+.hr-target-pop .hrt-row label { font-weight: 700; color: #1F2937; white-space: nowrap; }
+.hr-target-pop .hrt-row input.hrt-n { width: 78px; height: 28px; padding: 0 7px;
+  border: 1px solid #C7D2E5; border-radius: 5px; font-size: 12px; text-align: center; }
+.hr-target-pop .hrt-row .ss-hint { flex: 1 1 100%; font-size: 11px; color: #6B7280;
+  line-height: 1.6; }
