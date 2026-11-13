@@ -1,4 +1,4 @@
-/* 质量运营模块（v3.51.0，独立页面）
+/* 质量运营模块（v3.52.0，独立页面）
  * ---------------------------------------------------------------------------
  * 整商 / 商圈片 / 站点 / 骑手（按钮切换）× 炸班次 / 坏单（视图切换）的本月日期矩阵，
  * 行主体随维度变化（v3.45.0）：整商 = 1 行汇总；商圈片 / 站点 = 各一行；
@@ -8,6 +8,9 @@
  *   不采信系统「是否达成」标记；工具条「全天标准」可编辑、本机记忆、改完立即重算矩阵。
  *   历史明细读「完单量 / 有效在线时长」，T0 实时快照读「全天完单量 / 全天有效在线时长」
  *   并按「排班状态」过滤（全天汇总行不在「排班时段」计划里）。
+ * v3.52.0：骑手维度严格只显示「当前视图」有问题的骑手（旧版取炸班∪坏单并集，坏单视图里
+ *   大量整行空白的骑手让人以为没过滤）；标题显示共/显示/隐藏人数，矩阵对整月合计为 0 的
+ *   骑手行做二次剔除，骑手行副标题显示整月炸班 / 坏单数量，弹层问题记录优先。
  * v3.51.0：骑手维度按整月汇总降序排序（当前视图合计优先、另一视图合计次之）；
  *   筛选口径改用 recOk()（全天自定义标准也算「有问题」），与矩阵合计列完全一致。
  * v3.50.0：炸班次不再显示当天 T0 —— 停拉实时考勤快照、过滤当天出勤行、矩阵列只到昨天
@@ -209,6 +212,7 @@ const state = {
   orders: [], kpiErr: "",
   violMap: new Map(),         // v3.49.0：申诉/违规明细运单 → 仅元信息（不产生坏单标签）
   allDay: loadAllDayCfg(),    // v3.48.0：全天班次达标标准（可编辑）
+  riderStats: null,           // v3.52.0：骑手维度过滤统计（共 N 名 / 显示 M 名 / 隐藏 X 名）
   liveUsed: false
 };
 /** 读取运力模块写下的整月原始明细（localStorage 在扩展各页面间同源共享）。 */
@@ -752,8 +756,11 @@ function entityRows() {
         sub: areaOf(tid, sn) }))
       .sort((x, y) => x.name.localeCompare(y.name, "zh-CN"));
   }
-  // 骑手维度：只显示有异常（炸班或坏单）的骑手；v3.51.0 按整月汇总数量降序排列。
-  // 汇总口径与矩阵行末「本月合计」完全一致：炸班 = recOk()===0 的班次数，
+  // 骑手维度（v3.52.0）：严格只显示「当前视图」本月确实有问题的骑手 ——
+  //   炸班次视图：整月炸班次数 > 0；坏单视图：整月坏单标签数 > 0。
+  // 旧版取「炸班 ∪ 坏单」并集，导致坏单视图里出现大量整行空白、本月合计为「—」的
+  // 骑手（整月累积有过一次炸班的人本就很多），看起来完全像没有过滤。
+  // 汇总口径与矩阵行末「本月合计」完全一致：炸班 = recOk()===0 的班次数（全天走自定义标准），
   // 坏单 = 4 个标签数之和（一个订单命中多个标签各计一次）。
   const infos = riderInfoMap();
   const shiftTotal = new Map(), badTotal = new Map();
@@ -764,8 +771,13 @@ function entityRows() {
     if (n) inc(badTotal, o.rid, n);
   }
   const viewShift = state.view === "shift";
-  const list = [...infos.values()]
-    .filter((r) => (shiftTotal.get(r.rid) || 0) || (badTotal.get(r.rid) || 0));
+  const all = [...infos.values()];
+  const list = all.filter((r) =>
+    (viewShift ? (shiftTotal.get(r.rid) || 0) : (badTotal.get(r.rid) || 0)) > 0);
+  // 过滤效果可见化：标题显示「共 N 名 / 显示 M 名 / 隐藏 X 名」
+  state.riderStats = {
+    total: all.length, shown: list.length, hidden: all.length - list.length, view: state.view
+  };
   // 主排序 = 当前视图的整月合计（多 → 少）；相同则按另一视图的整月合计（多 → 少）；最后按姓名
   list.sort((a, b) => {
     const as = shiftTotal.get(a.rid) || 0, bs = shiftTotal.get(b.rid) || 0;
@@ -776,7 +788,14 @@ function entityRows() {
     if (secondary) return secondary;
     return String(a.name || a.rid).localeCompare(String(b.name || b.rid), "zh-CN");
   });
-  return list.map((r) => ({ key: "R|" + r.rid, name: r.name || r.rid, sub: r.siteName || r.area }));
+  return list.map((r) => {
+    const site = r.siteName || r.area || "";
+    const sf = shiftTotal.get(r.rid) || 0, bd = badTotal.get(r.rid) || 0;
+    return {
+      key: "R|" + r.rid, name: r.name || r.rid,
+      sub: (site ? site + " · " : "") + `整月炸班 ${sf} / 坏单 ${bd}`
+    };
+  });
 }
 /** 骑手信息（主站点 = 本月班次最多的站点），供骑手维度行与弹层使用。 */
 function riderInfoMap() {
@@ -876,24 +895,33 @@ function badCellHtml(c) {
   }
   return html;
 }
+/** v3.52.0：标题里显示骑手维度的过滤统计，让「只显示问题骑手」可见可核对。 */
+function titleHtml(month, b) {
+  const viewName = state.view === "shift" ? "炸班次" : "坏单";
+  const dimName = { agency: "整商", area: "商圈片", site: "站点", rider: "骑手" }[state.dim];
+  const rs = state.dim === "rider" ? state.riderStats : null;
+  const lastDay = state.view === "shift" ? shiftDayMax(month, b) : b.maxDay;
+  return `${esc(viewName)}矩阵 · <b>${esc(dimName)}</b>` +
+    ` <span class="ql-sub">${esc(month)}（1 ~ ${lastDay} 日）· ${esc(dimName)}维度` +
+    ` · 出勤明细 ${state.recs.length} 行 · 坏单 ${state.orders.length} 单` +
+    (state.view === "shift" ? ` · 全天标准 ${esc(allDayLabel())}` : "") +
+    (rs ? ` · <b class="ql-stat">骑手共 ${rs.total} 名 / 只显示 ${rs.shown} 名问题骑手 / 隐藏 ${rs.hidden} 名</b>` : "") +
+    ` · ${state.fromShared ? "运力模块缓存" : "独立取数"}</span>`;
+}
 function renderAll() {
   const month = state.month;
   const b = monthBounds(month);
-  const viewName = state.view === "shift" ? "炸班次" : "坏单";
-  const dimName = { agency: "整商", area: "商圈片", site: "站点", rider: "骑手" }[state.dim];
-  $("ql-title").innerHTML =
-    `${esc(viewName)}矩阵 · <b>${esc(dimName)}</b>` +
-    ` <span class="ql-sub">${esc(month)}（1 ~ ${b.maxDay} 日）· ${esc(dimName)}维度` +
-    ` · 出勤明细 ${state.recs.length} 行 · 坏单 ${state.orders.length} 单` +
-    (state.view === "shift" ? ` · 全天标准 ${esc(allDayLabel())}` : "") +
-    ` · ${state.fromShared ? "运力模块缓存" : "独立取数"}</span>`;
+  // 提前算骑手行，让标题能显示过滤统计（renderMatrixTable 复用同一份，不重复聚合）
+  const preRows = state.dim === "rider" ? entityRows() : null;
+  $("ql-title").innerHTML = titleHtml(month, b);
   const wrap = $("matrix-wrap");
   if (!state.recs.length && !state.orders.length) {
     wrap.innerHTML = `<div class="ql-pop-empty">${esc(state.attErr || state.kpiErr || state.teamErr || "本月暂无数据")}</div>`;
     renderFoot();
     return;
   }
-  renderMatrixTable(wrap, month, b);
+  renderMatrixTable(wrap, month, b, preRows);
+  if (state.dim === "rider") $("ql-title").innerHTML = titleHtml(month, b);  // 二次过滤后刷新统计
   renderFoot();
 }
 /** 单元格的汇总数量：炸班次 = 炸掉的班次数；坏单 = 各类型标签数之和。 */
@@ -905,17 +933,15 @@ function cellCount(c, isShift) {
 /** 行主体随维度变化的日期矩阵：行 = 行实体（首列冻结），列 = 本月日期 + 本月合计；
  *  表尾再加一行「合计」（每个日期的全维度汇总）。 */
 let lastRows = [];          // 供点击弹层按行键查行名
-function renderMatrixTable(wrap, month, b) {
-  const rows = entityRows();
+function renderMatrixTable(wrap, month, b, preRows) {
+  const rows = preRows || entityRows();
   lastRows = rows;
   const mat = state.view === "shift" ? shiftMatrix() : badMatrix();
-  if (!rows.length) {
-    wrap.innerHTML = state.dim === "rider"
-      ? '<div class="ql-pop-empty">本月没有炸班或坏单的骑手</div>'
-      : '<div class="ql-pop-empty">本月暂无数据</div>';
-    return;
-  }
   const isShift = state.view === "shift";
+  const emptyHtml = state.dim === "rider"
+    ? `<div class="ql-pop-empty">本月没有${isShift ? "炸班" : "坏单"}的骑手</div>`
+    : '<div class="ql-pop-empty">本月暂无数据</div>';
+  if (!rows.length) { wrap.innerHTML = emptyHtml; return; }
   const maxDay = isShift ? shiftDayMax(month, b) : b.maxDay;
   if (!maxDay) {
     wrap.innerHTML = '<div class="ql-pop-empty">本月还没有 T+1 结算的日期，明天再来看炸班次</div>';
@@ -928,26 +954,34 @@ function renderMatrixTable(wrap, month, b) {
   for (let d = 1; d <= maxDay; d++) html += `<th title="${esc(month)}-${padDay(d)}">${mn}月${d}日</th>`;
   html += `<th class="ql-sum-col" title="该行本月汇总数量">${esc(sumName)}</th></tr></thead><tbody>`;
   const dayTotals = new Array(maxDay + 1).fill(0);
-  let grand = 0;
+  let grand = 0, renderedRows = 0;
   for (const rd of rows) {
     const m = mat.get(rd.key);
-    html += `<th class="lft ql-rider"><span class="qr-name">${esc(rd.name)}</span>` +
-      `<span class="qr-sub">${esc(rd.sub || "")}</span></th>`;
-    let rowSum = 0;
+    let cells = "", rowSum = 0;
+    const perDay = new Array(maxDay + 1).fill(0);
     for (let d = 1; d <= maxDay; d++) {
       const ymd = `${month}-${padDay(d)}`;
       const c = m && m.get(ymd);
       const body = isShift ? shiftCellHtml(c) : badCellHtml(c);
       const n = cellCount(c, isShift);
-      rowSum += n; dayTotals[d] += n;
+      rowSum += n; perDay[d] = n;
       const has = isShift ? (c && (c.fails.size || c.unk)) : (c && c.list.length);
-      html += `<td class="ql-cell${has ? " clickable" : ""}"${has ? ` data-key="${esc(rd.key)}" data-day="${ymd}" title="点击看 ${esc(rd.name)} ${ymd} 的${isShift ? "班次" : "坏单"}明细"` : ""}>${body}</td>`;
+      cells += `<td class="ql-cell${has ? " clickable" : ""}"${has ? ` data-key="${esc(rd.key)}" data-day="${ymd}" title="点击看 ${esc(rd.name)} ${ymd} 的${isShift ? "班次" : "坏单"}明细"` : ""}>${body}</td>`;
     }
+    // v3.52.0 渲染层双保险：骑手维度整月合计为 0 的行一律不渲染，
+    // 保证矩阵里出现的每一行在当前视图都确实有问题（无空白占位行）。
+    if (state.dim === "rider" && rowSum === 0) continue;
+    renderedRows++;
+    for (let d = 1; d <= maxDay; d++) dayTotals[d] += perDay[d];
     grand += rowSum;
+    html += `<th class="lft ql-rider"><span class="qr-name">${esc(rd.name)}</span>` +
+      `<span class="qr-sub">${esc(rd.sub || "")}</span></th>`;
+    html += cells;
     html += `<td class="ql-cell ql-sum${rowSum ? " clickable" : ""}"${rowSum ? ` data-key="${esc(rd.key)}" data-day="" title="点击查看 ${esc(rd.name)} 整月明细"` : ""}>` +
       `<span class="qs">${rowSum || "—"}</span></td>`;
     html += "</tr>";
   }
+  if (!renderedRows) { wrap.innerHTML = emptyHtml; return; }
   // 表尾合计行：每日期的全维度汇总 + 总计
   html += `<tr class="ql-total-row"><th class="lft ql-rider"><span class="qr-name">合计</span>` +
     `<span class="qr-sub">${esc(isShift ? "炸班次数" : "坏单标签数")}</span></th>`;
@@ -955,13 +989,21 @@ function renderMatrixTable(wrap, month, b) {
   html += `<td class="ql-cell ql-sum ql-grand"><span class="qs">${grand || "—"}</span></td></tr>`;
   html += "</tbody></table>";
   wrap.innerHTML = html;
+  // 二次过滤后回写真实显示/隐藏数量，供标题展示
+  if (state.dim === "rider" && state.riderStats) {
+    state.riderStats.shown = renderedRows;
+    state.riderStats.hidden = Math.max(0, state.riderStats.total - renderedRows);
+  }
 }
 function renderFoot() {
   const isCur = state.month === curMonth();
   $("ql-foot").innerHTML =
     "行随维度切换：整商 = 全部数据汇总成一行；商圈片 / 站点 = 每个商圈片 / 站点一行（副标题为站点数 / 所属商圈片）；" +
-    "骑手 = 只显示本月有炸班或坏单的骑手（名下站点 = 该骑手本月班次最多的站点）；" +
-    "<b>骑手行按整月汇总排序</b>：当前视图的「本月合计」从多到少，相同则按另一视图的合计从多到少（炸班次↔坏单）。列 = 本月日期。<br>" +
+    "骑手 = <b>只显示当前视图本月确实有问题的骑手</b>：炸班次视图 = 整月有炸班，坏单视图 = 整月有坏单；" +
+    "全达成 / 无坏单的骑手一律不显示（标题给出「共 N 名 / 只显示 M 名 / 隐藏 X 名」可直接核对），" +
+    "名下站点 = 该骑手本月班次最多的站点；" +
+    "<b>骑手行按整月汇总排序</b>：当前视图的「本月合计」从多到少，相同则按另一视图的合计从多到少（炸班次↔坏单），" +
+    "副标题同时显示该骑手整月炸班次数 / 坏单标签数。列 = 本月日期。<br>" +
     "炸班次 = 出勤统计「导出明细数据」的骑手 × 时段明细（本月按 7 天分段）；" +
     "<b>只取 T+1 结算的历史日期，当月今天 T0 实时快照不显示、不计数</b>（未结算的全天数据会误判成大片炸班），次日自动补上。" +
     "只统计「是否排班 = 排班」的班次；红字 = 当天炸掉的班次（同一班次炸多人显示「班次*n」，人数降序）。" +
@@ -1027,8 +1069,11 @@ function shiftPop(month, key, day) {
   if (showRider) html += "<th>骑手</th>";
   if (showSite) html += "<th>站点</th>";
   html += '<th>班次</th><th>是否达成</th><th>完单</th><th class="lft">有效在线</th></tr></thead><tbody>';
+  // v3.52.0：问题优先 —— 未达成排最前，其次统计中，最后达成；同类再按班次 / 姓名
+  const okRank = (r) => { const v = recOk(r); return v === 0 ? 0 : (v === -1 ? 1 : 2); };
   const ordered = list.slice().sort((a, b) =>
-    a.per.localeCompare(b.per, "zh-CN") || (a.name || "").localeCompare(b.name || "", "zh-CN"));
+    okRank(a) - okRank(b) || a.per.localeCompare(b.per, "zh-CN") ||
+    (a.name || "").localeCompare(b.name || "", "zh-CN"));
   for (const r of ordered) {
     const ok = recOk(r);
     const mk = ok === 1 ? '<span class="mk yes">达成</span>'
@@ -1168,7 +1213,7 @@ Object.assign(window.__QL__ = window.__QL__ || {}, {
   state, parseAttSheets, parseBadRows, loadViolationTrackingIds,
   monthBounds, monthSegments, entityRows, shiftMatrix, badMatrix, entityKeyOf,
   areaOf, shiftCellHtml, badCellHtml, requestRL, riderInfoMap,
-  readShared, writeShared, cellCount, popInNewTab, renderMatrixTable,
+  readShared, writeShared, cellCount, popInNewTab, renderMatrixTable, titleHtml,
   violationMeta, applyViolationMeta, hasKpiTag, keepKpiTagged, settledRecs, shiftDayMax,
   parseHours, allDayVerdict, recOk, loadAllDayCfg, saveAllDayCfg, openAllDayCfg, closeAllDayCfg,
   allDayLabel, ALLDAY_DEFAULT, ALLDAY_LS,
