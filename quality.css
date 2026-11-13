@@ -38,6 +38,14 @@ table.ql-tbl tr.ql-today td, table.ql-tbl tr.ql-today th { background: #FFF7E6; 
 table.ql-tbl td.ql-cell { cursor: default; }
 table.ql-tbl td.ql-cell.clickable { cursor: pointer; }
 
+/* v3.46.0 汇总数量：行末「本月合计」列 + 表尾「合计」行 */
+table.ql-tbl th.ql-sum-col { background: #E8F0FE; color: #1D4ED8; min-width: 74px; }
+table.ql-tbl td.ql-sum { background: #F7FAFF; border-left: 2px solid #DDE7F7; }
+table.ql-tbl .qs { font-size: 13px; font-weight: 700; color: #1D4ED8; }
+table.ql-tbl tr.ql-total-row th, table.ql-tbl tr.ql-total-row td { background: #EEF3FB; font-weight: 700; color: #1F2937; border-top: 2px solid #C9D8EE; }
+table.ql-tbl tr.ql-total-row td.ql-grand { background: #DCE8FB; }
+table.ql-tbl tr.ql-total-row .qs { color: #B45309; }
+
 /* 单元格内容：红字 = 炸掉的班次名 / 坏单「类型*N」，一行一个 */
 .qf { display: block; color: #C22F2F; font-weight: 600; font-size: 12px; line-height: 18px; white-space: nowrap; }
 .qu { display: inline-block; color: #B45309; font-weight: 600; font-size: 12px; }
@@ -57,7 +65,7 @@ table.ql-tbl th.ql-rider .qr-sub { display: block; font-weight: 400; color: #9CA
   position: fixed; inset: 0; z-index: 60; background: rgba(15, 23, 42, .45);
   display: flex; align-items: center; justify-content: center;
 }
-.ql-pop-mask[hidden] { display: none; }
+.ql-pop-mask[hidden] { display: none !important; }
 .ql-pop {
   width: min(880px, 94vw); max-height: 84vh; background: #fff; border-radius: 12px;
   display: flex; flex-direction: column; box-shadow: 0 24px 70px rgba(0, 0, 0, .32);
@@ -69,6 +77,8 @@ table.ql-tbl th.ql-rider .qr-sub { display: block; font-weight: 400; color: #9CA
 }
 .ql-pop-head strong { font-size: 14px; color: #1F2937; }
 .ql-pop-head button { padding: 2px 10px; font-size: 16px; line-height: 1.2; }
+.ql-pop-acts { display: inline-flex; align-items: center; gap: 8px; }
+.ql-pop-head #ql-pop-newtab { font-size: 12px; font-weight: 600; color: #2F5597; }
 .ql-pop-body { overflow: auto; padding: 10px 14px 14px; }
 .ql-pop-body table { border-collapse: collapse; width: 100%; font-size: 12px; }
 .ql-pop-body th, .ql-pop-body td { border: 1px solid #EEF0F3; padding: 5px 8px; text-align: center; }

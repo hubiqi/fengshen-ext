@@ -1,8 +1,12 @@
-/* 质量运营模块（v3.45.0，独立页面）
+/* 质量运营模块（v3.46.0，独立页面）
  * ---------------------------------------------------------------------------
  * 整商 / 商圈片 / 站点 / 骑手（按钮切换）× 炸班次 / 坏单（视图切换）的本月日期矩阵，
  * 行主体随维度变化（v3.45.0）：整商 = 1 行汇总；商圈片 / 站点 = 各一行；
- * 骑手 = 只显示本月有炸班或坏单的骑手。列 = 本月 1 ~ 今日。
+ * 骑手 = 只显示本月有炸班或坏单的骑手。列 = 本月 1 ~ 今日 + 「本月合计」，表尾有「合计」行。
+ * v3.46.0：① 数据优先复用运力模块写下的整月原始明细（同源 localStorage 缓存，零重复请求，
+ *   「立即刷新」强制重拉）；② 坏单「日期」列实际是 20261111 紧凑格式，统一归一 YYYY-MM-DD
+ *   （此前校验失败导致坏单全被过滤、矩阵空白）；③ 面板 iframe 内默认走静默桥接 + 弹层
+ *   「↗ 新标签」兜底，行键改用安全分隔符；④ 两个矩阵都加汇总数量。
  *   炸班次单元格：只显示炸掉的班次（红，含「全天」按系统标记），同一班次炸多人显示
  *     「班次*n」（人数降序）；空白 = 全部达成或无排班；实时快照缺达成标记 → 琥珀「统计中」。
  *   坏单单元格：只显示非零类型（红「类型*N」，一个订单命中多个标签各计一次）。
@@ -123,14 +127,39 @@ function monthSegments(month) {
 }
 
 // ---------------------------------------------------------------- 网络层（与运力模块同款）
+const SHARE_LS = "wb_wf_raw_v1_";     // 与运力模块同源共享的整月原始明细缓存
 const state = {
-  via: "direct", gen: 0, loading: false,
+  // v3.46.0：面板 iframe 内默认走「静默桥接」（后台标签取数，登录态稳定）；
+  // 独立标签页默认直连。任一通道失败自动切另一条再试一次。
+  via: (typeof window !== "undefined" && window.top !== window.self) ? "bridge" : "direct",
+  gen: 0, loading: false, force: false, fromShared: false,
   month: curMonth(), dim: "agency", scopeKey: "", view: "shift",
   teams: [], teamErr: "",
   recs: [], attErr: "",
   orders: [], kpiErr: "",
   liveUsed: false
 };
+/** 读取运力模块写下的整月原始明细（localStorage 在扩展各页面间同源共享）。 */
+function readShared(month) {
+  try {
+    const raw = JSON.parse(localStorage.getItem(SHARE_LS + month) || "null");
+    if (!raw || raw.v !== 1 || raw.month !== month) return null;
+    if (raw.complete === false) return null;      // 半份数据不复用
+    if (!Array.isArray(raw.recs) || !Array.isArray(raw.orders)) return null;
+    if (!raw.recs.length && !raw.orders.length) return null;
+    if (!raw.ts || Date.now() - raw.ts > 12 * 3600 * 1000) return null;   // 12 小时内有效
+    return raw;
+  } catch (e) { return null; }
+}
+function writeShared(month, teams, recs, orders) {
+  try {
+    localStorage.setItem(SHARE_LS + month, JSON.stringify({
+      v: 1, month, ts: Date.now(),
+      teams: (teams || []).map((t) => ({ id: String(t.id), name: String(t.name || "") })),
+      recs: recs || [], orders: orders || []
+    }));
+  } catch (e) { /* 配额不足不影响出表 */ }
+}
 function extMsg(msg) {
   return new Promise((resolve) => {
     try {
@@ -172,16 +201,20 @@ async function bridge(url, method, payload) {
   return checkJson(resp.json, "静默桥接");
 }
 async function request(url, method, payload) {
-  if (state.via === "direct") {
-    try { return await direct(url, method, payload); }
-    catch (e) {
-      // 限频不切通道：切到桥接同样会撞同一个后端限流，退避重试更有效
-      if (/频繁|FREQUEN/i.test(String((e && e.message) || e))) throw e;
-      state.via = "bridge";
-      showNotice("直连未成功（" + (e.message || "未知原因") + "），已自动切到「静默桥接」后台标签取数。", "blue");
-    }
+  const first = state.via;
+  const call = (via) => via === "direct" ? direct(url, method, payload) : bridge(url, method, payload);
+  try { return await call(first); }
+  catch (e) {
+    // 限频不切通道：切通道同样撞同一个后端限流，交给 requestRL 退避重试
+    if (/频繁|FREQUEN/i.test(String((e && e.message) || e))) throw e;
+    const second = first === "direct" ? "bridge" : "direct";
+    state.via = second;
+    showNotice((first === "direct" ? "直连" : "静默桥接") + "未成功（" +
+      (e.message || "未知原因") + "），已自动切到「" +
+      (second === "direct" ? "直连" : "静默桥接") + "」重试。", "blue");
+    try { return await call(second); }
+    catch (e2) { state.via = first; throw e2; }
   }
-  return await bridge(url, method, payload);
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 /** 带「请求太频繁」退避重试的请求：违规处罚 / 考核运单明细接口对连发敏感。 */
@@ -304,7 +337,9 @@ function parseAttSheets(sheets, defaultDay) {
       if (!rid) continue;
       const per = str(r[iP]);
       if (!per) continue;
-      const day = iD !== undefined ? str(r[iD]).slice(0, 10) : str(defaultDay);
+      const rawDay = iD !== undefined ? str(r[iD]) : str(defaultDay);
+      const d8 = rawDay.replace(/\D/g, "").slice(0, 8);
+      const day = /^\d{8}$/.test(d8) ? `${d8.slice(0, 4)}-${d8.slice(4, 6)}-${d8.slice(6, 8)}` : rawDay.slice(0, 10);
       if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) continue;
       // 「是否排班」实际取值为 排班 / 未排班 / 休息 —— 只保留「排班」；
       // 未排班 / 休息行的「是否达成」必为空，不滤掉会把整片格子染成「统计中」。
@@ -348,17 +383,22 @@ function parseBadRows(j, seen) {
   const ix = (n) => heads.indexOf(n);
   const iT = ix("运单ID"), iR = ix("骑手ID"), iD = ix("日期");
   const iName = ix("骑手姓名"), iS = ix("站点ID"), iN = ix("站点名称");
+  const iCreate = ix("运单创建时间");
   const iF = KPI_COLS.map(ix);
-  if (iT < 0 || iR < 0 || iD < 0 || iF.some((i) => i < 0)) return { rows: 0 };
+  if (iT < 0 || iR < 0 || iF.some((i) => i < 0)) return { rows: 0 };
   for (const row of rows) {
     const cells = Array.isArray(row) ? row : [];
     const val = (i) => (i >= 0 && cells[i] && cells[i].content != null)
       ? String(cells[i].content).trim() : "";
     const tid = val(iT);
     if (!tid) continue;
-    const day = val(iD).slice(0, 10);
+    // 真机核实：「日期」列是 20261111 这类 8 位紧凑格式（也可能是 2026-11-11 / 带时间），
+    // 统一归一成 YYYY-MM-DD；日期列缺失时退到「运单创建时间」。
+    const d8 = (iD >= 0 ? val(iD) : "").replace(/\D/g, "").slice(0, 8)
+      || (iCreate >= 0 ? val(iCreate) : "").replace(/\D/g, "").slice(0, 8);
+    const day = /^\d{8}$/.test(d8) ? `${d8.slice(0, 4)}-${d8.slice(4, 6)}-${d8.slice(6, 8)}` : "";
     const rec = {
-      tid, day: /^\d{4}-\d{2}-\d{2}$/.test(day) ? day : "",
+      tid, day,
       rid: val(iR), rname: iName >= 0 ? val(iName) : "",
       teamId: iS >= 0 ? normId(val(iS)) : "",
       siteName: iN >= 0 ? val(iN) : "",
@@ -454,14 +494,36 @@ async function loadBadOrders(month, onStep) {
 }
 
 // ---------------------------------------------------------------- 取数总流程
-async function loadAll() {
+async function loadAll(force) {
   if (state.loading) return;
   state.loading = true;
   const gen = ++state.gen;
   $("btn-refresh").disabled = true;
   showNotice("");
+  state.force = !!force;
+  state.fromShared = false;
   state.teamErr = state.attErr = state.kpiErr = "";
   state.recs = []; state.orders = []; state.liveUsed = false;
+
+  // v3.46.0：运力模块已把整月原始明细写进同源缓存 —— 质量运营直接复用，零重复请求。
+  // 「立即刷新」= force，跳过缓存重新拉一遍。
+  const shared = state.force ? null : readShared(state.month);
+  if (shared) {
+    state.teams = shared.teams || [];
+    state.recs = shared.recs || [];
+    state.orders = shared.orders || [];
+    state.fromShared = true;
+    if (!state.teams.length) { try { state.teams = await loadTeams(); } catch (e) { /* 站点名映射降级 */ } }
+    setProgress(null);
+    renderAll();
+    const at = new Date(shared.ts).toTimeString().slice(0, 5);
+    showNotice(`已复用运力模块 ${state.month} 的整月明细（${at} 取数）：出勤 ${state.recs.length} 行 / 坏单 ${state.orders.length} 单。需要最新数据点「立即刷新」强制重拉。`, "blue");
+    setStatus(`复用运力模块 · ${at}`);
+    $("btn-refresh").disabled = false;
+    state.loading = false;
+    state.force = false;
+    return;
+  }
   setProgress(2, "读取站点列表…");
   try {
     state.teams = await loadTeams();
@@ -513,7 +575,7 @@ async function loadAll() {
   if (gen !== state.gen) { state.loading = false; return; }
   setProgress(100, "");
   setProgress(null);
-  // 范围下拉按新数据重建（骑手清单来自出勤 + 坏单明细）
+  writeShared(state.month, state.teams, state.recs, state.orders);
   renderAll();
   const errs = [state.teamErr && "站点列表", state.attErr && "出勤明细", state.kpiErr && "坏单明细"].filter(Boolean);
   if (errs.length) showNotice("部分数据源未取到：" + errs.join("、") + "，对应行列显示「—」，可点「立即刷新」重试。");
@@ -542,7 +604,7 @@ function entityRows() {
       m.get(a).add(normId(o.teamId) || a);
     }
     return [...m.entries()].map(([a, sites]) =>
-      ({ key: "A\u0001" + a, name: a, sub: `${sites.size} 个站点` }))
+      ({ key: "A|" + a, name: a, sub: `${sites.size} 个站点` }))
       .sort((x, y) => x.name.localeCompare(y.name, "zh-CN"));
   }
   if (d === "site") {
@@ -554,7 +616,7 @@ function entityRows() {
       m.set(normId(o.teamId) || normId(o.siteName), str(o.siteName));
     }
     return [...m.entries()].map(([tid, sn]) =>
-      ({ key: "S\u0001" + tid, name: sn || names[tid] || ("站点 " + tid),
+      ({ key: "S|" + tid, name: sn || names[tid] || ("站点 " + tid),
         sub: areaOf(tid, sn) }))
       .sort((x, y) => x.name.localeCompare(y.name, "zh-CN"));
   }
@@ -568,7 +630,7 @@ function entityRows() {
   for (const r of state.recs) if (r.ok === 0) failRiders.add(normId(r.rid));
   return [...infos.values()]
     .filter((r) => failRiders.has(r.rid) || badRiders.has(r.rid))
-    .map((r) => ({ key: "R\u0001" + r.rid, name: r.name || r.rid, sub: r.siteName || r.area }))
+    .map((r) => ({ key: "R|" + r.rid, name: r.name || r.rid, sub: r.siteName || r.area }))
     .sort((x, y) => x.name.localeCompare(y.name, "zh-CN"));
 }
 /** 骑手信息（主站点 = 本月班次最多的站点），供骑手维度行与弹层使用。 */
@@ -609,9 +671,9 @@ function riderInfoMap() {
 function entityKeyOf(rec) {
   const d = state.dim;
   if (d === "agency") return "__AGENCY__";
-  if (d === "area") return "A\u0001" + areaOf(rec.teamId, rec.siteName);
-  if (d === "site") return "S\u0001" + (normId(rec.teamId) || normId(rec.siteName));
-  return "R\u0001" + normId(rec.rid);          // rider
+  if (d === "area") return "A|" + areaOf(rec.teamId, rec.siteName);
+  if (d === "site") return "S|" + (normId(rec.teamId) || normId(rec.siteName));
+  return "R|" + normId(rec.rid);          // rider
 }
 /** 按行实体分组的炸班次矩阵：Map(key -> Map(day -> {fails:Map(班次->人数), sched, unk, list}))。 */
 function shiftMatrix() {
@@ -676,7 +738,8 @@ function renderAll() {
   $("ql-title").innerHTML =
     `${esc(viewName)}矩阵 · <b>${esc(dimName)}</b>` +
     ` <span class="ql-sub">${esc(month)}（1 ~ ${b.maxDay} 日）· ${esc(dimName)}维度` +
-    ` · 出勤明细 ${state.recs.length} 行 · 坏单 ${state.orders.length} 单</span>`;
+    ` · 出勤明细 ${state.recs.length} 行 · 坏单 ${state.orders.length} 单` +
+    ` · ${state.fromShared ? "运力模块缓存" : "独立取数"}</span>`;
   const wrap = $("matrix-wrap");
   if (!state.recs.length && !state.orders.length) {
     wrap.innerHTML = `<div class="ql-pop-empty">${esc(state.attErr || state.kpiErr || state.teamErr || "本月暂无数据")}</div>`;
@@ -686,7 +749,14 @@ function renderAll() {
   renderMatrixTable(wrap, month, b);
   renderFoot();
 }
-/** 行主体随维度变化的日期矩阵：行 = 行实体（首列冻结），列 = 本月 1 ~ maxDay 日。 */
+/** 单元格的汇总数量：炸班次 = 炸掉的班次数；坏单 = 各类型标签数之和。 */
+function cellCount(c, isShift) {
+  if (!c) return 0;
+  if (isShift) { let n = 0; for (const v of c.fails.values()) n += v; return n; }
+  return BAD_COLS.reduce((n, [k]) => n + (c[k] || 0), 0);
+}
+/** 行主体随维度变化的日期矩阵：行 = 行实体（首列冻结），列 = 本月日期 + 本月合计；
+ *  表尾再加一行「合计」（每个日期的全维度汇总）。 */
 let lastRows = [];          // 供点击弹层按行键查行名
 function renderMatrixTable(wrap, month, b) {
   const rows = entityRows();
@@ -701,22 +771,36 @@ function renderMatrixTable(wrap, month, b) {
   const isShift = state.view === "shift";
   const mn = Number(month.slice(5, 7));
   const headLabel = { agency: "整商", area: "商圈片", site: "站点", rider: "骑手姓名" }[state.dim];
+  const sumName = isShift ? "炸班合计" : "坏单合计";
   let html = `<table class="ql-tbl"><thead><tr><th class="lft ql-rider">${esc(headLabel)}</th>`;
   for (let d = 1; d <= b.maxDay; d++) html += `<th title="${esc(month)}-${padDay(d)}">${mn}月${d}日</th>`;
-  html += "</tr></thead><tbody>";
+  html += `<th class="ql-sum-col" title="该行本月汇总数量">${esc(sumName)}</th></tr></thead><tbody>`;
+  const dayTotals = new Array(b.maxDay + 1).fill(0);
+  let grand = 0;
   for (const rd of rows) {
     const m = mat.get(rd.key);
     html += `<th class="lft ql-rider"><span class="qr-name">${esc(rd.name)}</span>` +
       `<span class="qr-sub">${esc(rd.sub || "")}</span></th>`;
+    let rowSum = 0;
     for (let d = 1; d <= b.maxDay; d++) {
       const ymd = `${month}-${padDay(d)}`;
       const c = m && m.get(ymd);
       const body = isShift ? shiftCellHtml(c) : badCellHtml(c);
+      const n = cellCount(c, isShift);
+      rowSum += n; dayTotals[d] += n;
       const has = isShift ? (c && (c.fails.size || c.unk)) : (c && c.list.length);
       html += `<td class="ql-cell${has ? " clickable" : ""}"${has ? ` data-key="${esc(rd.key)}" data-day="${ymd}" title="点击看 ${esc(rd.name)} ${ymd} 的${isShift ? "班次" : "坏单"}明细"` : ""}>${body}</td>`;
     }
+    grand += rowSum;
+    html += `<td class="ql-cell ql-sum${rowSum ? " clickable" : ""}"${rowSum ? ` data-key="${esc(rd.key)}" data-day="" title="点击查看 ${esc(rd.name)} 整月明细"` : ""}>` +
+      `<span class="qs">${rowSum || "—"}</span></td>`;
     html += "</tr>";
   }
+  // 表尾合计行：每日期的全维度汇总 + 总计
+  html += `<tr class="ql-total-row"><th class="lft ql-rider"><span class="qr-name">合计</span>` +
+    `<span class="qr-sub">${esc(isShift ? "炸班次数" : "坏单标签数")}</span></th>`;
+  for (let d = 1; d <= b.maxDay; d++) html += `<td class="ql-cell"><span class="qs">${dayTotals[d] || "—"}</span></td>`;
+  html += `<td class="ql-cell ql-sum ql-grand"><span class="qs">${grand || "—"}</span></td></tr>`;
   html += "</tbody></table>";
   wrap.innerHTML = html;
 }
@@ -732,19 +816,50 @@ function renderFoot() {
     "坏单 = KPI 考核运单明细 4 类问题订单筛选 + 违规处罚列表（违规状态=成立、违规分类=差评+投诉）" +
     "运单号去重后逗号拼接批量回查，两路按运单取并集、不重复计数（与运力模块投诉 / 差评同口径）；" +
     "红字「类型*N」 = 当天各类型坏单数，一个订单命中多个标签时每个标签单独计算；点击单元格看运单明细。" +
+    "右侧「本月合计」= 该行整月汇总数量（点击看整月明细），表尾「合计」= 每个日期的全维度汇总；" +
+    "数据优先复用运力模块已取到的整月明细（同源缓存，零重复请求），点「立即刷新」强制重拉。" +
     (isCur ? "今天为 T+1 结算数据，当日的班次 / 坏单次日才完整。" : "");
 }
 
 // ---------------------------------------------------------------- 详情弹层
+let lastPopTitle = "", lastPopHtml = "";
 function openPop(title, tableHtml) {
+  lastPopTitle = title; lastPopHtml = tableHtml;
   $("ql-pop-title").textContent = title;
   $("ql-pop-body").innerHTML = tableHtml;
-  $("ql-pop-mask").hidden = false;
+  const mask = $("ql-pop-mask");
+  mask.hidden = false;
+  // v3.46.0：面板 iframe 里浮层可能被宿主裁剪 —— 尺寸为 0 时自动在独立标签打开明细
+  try {
+    const r = $("ql-pop").getBoundingClientRect();
+    if (window.top !== window.self && (!r.width || !r.height)) {
+      mask.hidden = true; popInNewTab(); return;   // 仅面板 iframe 内自动兜底
+    }
+  } catch (e) { /* 测试环境无布局 */ }
 }
 function closePop() { $("ql-pop-mask").hidden = true; }
+/** 弹层兜底：把明细表写到独立标签页（iframe 内弹窗失败时也能看）。 */
+function popInNewTab() {
+  if (typeof window.open !== "function") return;      // 离线测试桩无窗口 API
+  const w = window.open("", "_blank");
+  if (!w) {
+    showNotice("浏览器拦截了新标签，请允许弹窗，或点面板右上角「↗ 新标签打开」后再点单元格。");
+    return;
+  }
+  const css = "body{font:13px/1.5 -apple-system,BlinkMacSystemFont,'PingFang SC',sans-serif;padding:22px;color:#1F2937}" +
+    "h2{font-size:16px;margin:0 0 14px}table{border-collapse:collapse;width:100%;font-size:12px}" +
+    "th,td{border:1px solid #EEF0F3;padding:5px 8px;text-align:center}th{background:#FAFBFD;font-weight:600}" +
+    "td.lft,th.lft{text-align:left}.mk{display:inline-block;padding:0 8px;border-radius:8px;font-size:12px;font-weight:600}" +
+    ".mk.yes{background:#E7F6EC;color:#15803D}.mk.no{background:#FDECEC;color:#C22F2F}.mk.tp{background:#EEF2FF;color:#4338CA}" +
+    ".ql-pop-note{margin-top:8px;font-size:12px;color:#6B7280}";
+  w.document.write(`<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">` +
+    `<title>${esc(lastPopTitle)}</title><style>${css}</style></head><body>` +
+    `<h2>${esc(lastPopTitle)}</h2><div class="ql-pop-body">${lastPopHtml}</div></body></html>`);
+  w.document.close();
+}
 /** 某行某天的班次明细：该实体当天全部排班班次 + 达成标记 + 完单 + 有效在线。 */
 function shiftPop(month, key, day) {
-  const list = state.recs.filter((r) => entityKeyOf(r) === key && r.day === day);
+  const list = state.recs.filter((r) => entityKeyOf(r) === key && (!day || r.day === day));
   if (!list.length) { openPop(`${day} 班次明细`, '<div class="ql-pop-empty">该日无排班记录</div>'); return; }
   const row = lastRows.find((r) => r.key === key);
   const name = row ? row.name : dimNameCn();
@@ -766,11 +881,11 @@ function shiftPop(month, key, day) {
   }
   html += "</tbody></table>";
   const bad = list.filter((r) => r.ok === 0).length;
-  openPop(`${name} · ${day} 班次明细 · 排班 ${list.length} 班${bad ? ` · 炸 ${bad} 班` : " · 全部达成"}`, html);
+  openPop(`${name} · ${day || "整月"} 班次明细 · 排班 ${list.length} 班${bad ? ` · 炸 ${bad} 班` : " · 全部达成"}`, html);
 }
 /** 某行某天的坏单明细：运单ID + 类型标签（多标签全列）。 */
 function badPop(month, key, day) {
-  const list = state.orders.filter((o) => entityKeyOf(o) === key && o.day === day && (o.lgt || o.complain || o.negative || o.early));
+  const list = state.orders.filter((o) => entityKeyOf(o) === key && (!day || o.day === day) && (o.lgt || o.complain || o.negative || o.early));
   if (!list.length) { openPop(`${day} 坏单明细`, '<div class="ql-pop-empty">该日无坏单记录</div>'); return; }
   const row = lastRows.find((r) => r.key === key);
   const name = row ? row.name : dimNameCn();
@@ -786,7 +901,7 @@ function badPop(month, key, day) {
   }
   html += "</tbody></table>";
   const tags = list.reduce((n, o) => n + BAD_COLS.filter(([k]) => o[k]).length, 0);
-  openPop(`${name} · ${day} 坏单明细 · ${list.length} 单 / ${tags} 个标签`, html +
+  openPop(`${name} · ${day || "整月"} 坏单明细 · ${list.length} 单 / ${tags} 个标签`, html +
     '<div class="ql-pop-note">注：一个订单命中多个标签时，每个标签各单独计算一次。</div>');
 }
 function badName(k) { const f = BAD_COLS.find(([key]) => key === k); return f ? f[1] : k; }
@@ -828,14 +943,20 @@ function boot() {
   $("btn-prev-month").addEventListener("click", () => setMonth(shiftMonth(state.month, -1)));
   $("btn-next-month").addEventListener("click", () => setMonth(shiftMonth(state.month, 1)));
   $("btn-this-month").addEventListener("click", () => setMonth(curMonth()));
-  $("btn-refresh").addEventListener("click", () => loadAll());
+  $("btn-refresh").addEventListener("click", () => loadAll(true));   // 强制重拉，跳过运力模块缓存
+  $("ql-pop-newtab").addEventListener("click", popInNewTab);
   for (const b of document.querySelectorAll(".ql-dim")) b.addEventListener("click", () => setDim(b.dataset.dim));
   for (const b of document.querySelectorAll(".ql-view")) b.addEventListener("click", () => setView(b.dataset.view));
   $("matrix-wrap").addEventListener("click", (ev) => {
     const td = ev.target.closest("td.ql-cell.clickable");
-    if (!td || !td.dataset.key || !td.dataset.day) return;
-    if (state.view === "shift") shiftPop(state.month, td.dataset.key, td.dataset.day);
-    else badPop(state.month, td.dataset.key, td.dataset.day);
+    if (!td || !td.dataset.key || td.dataset.day === undefined) return;
+    try {
+      if (state.view === "shift") shiftPop(state.month, td.dataset.key, td.dataset.day);
+      else badPop(state.month, td.dataset.key, td.dataset.day);
+    } catch (e) {
+      showNotice("弹窗打开失败（" + (e.message || "未知原因") + "），已尝试在独立标签打开明细；也可点面板右上角「↗ 新标签打开」。");
+      popInNewTab();
+    }
   });
   $("ql-pop-close").addEventListener("click", closePop);
   $("ql-pop-mask").addEventListener("click", (ev) => { if (ev.target === $("ql-pop-mask")) closePop(); });
@@ -848,6 +969,7 @@ Object.assign(window.__QL__ = window.__QL__ || {}, {
   state, parseAttSheets, parseBadRows, loadViolationTrackingIds,
   monthBounds, monthSegments, entityRows, shiftMatrix, badMatrix, entityKeyOf,
   areaOf, shiftCellHtml, badCellHtml, requestRL, riderInfoMap,
+  readShared, writeShared, cellCount, popInNewTab, renderMatrixTable,
   API_ATT_DETAIL, API_ATT_LIVE, API_TEAMS, API_KPI_DETAIL, API_VIOLATION,
   SITE_TO_AREA, KPI_FILTERS, KPI_COLS, BAD_COLS, VIOL_SEG_DAYS, VIOL_BATCH,
   setDim, setView, setMonth, loadAll, renderAll, shiftPop, badPop

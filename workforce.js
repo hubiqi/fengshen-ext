@@ -55,6 +55,7 @@ const VIOL_SEG_DAYS = 2;          // 违规处罚接口硬限制：单次查询 
 const VIOL_BATCH = 50;            // 差评/投诉运单号逗号拼接批量回查考核运单明细的批次大小
 const VIOL_MAX_PAGES = 3;         // 每个 2 天段最多翻 3 页（pageSize=500，异常情况防全量翻页）
 const API_TEAMS = XT + "xtop.lpd.intelligentConfig.getTeamsAll/1.0";
+const SHARE_LS = "wb_wf_raw_v1_";      // v3.46.0：质量运营复用运力模块整月原始明细（同源 localStorage）
 const SCALE_LS = "wb_wf_scale_v1";        // v3.31.0：手填的规模目标 / 招募目标 / 招聘缺口 / 渠道名称
 const SCALE_LS_DAYS = "wb_wf_scale_days_v1"; // v3.34.0 两个可调统计天数；v3.35.0 增加首跑对比天数
 const SCALE_DAYS = 5;                      // 有效出勤规模默认近 5 天
@@ -386,7 +387,7 @@ async function loadAttendance(month, teamIds) {
   return attStatsFromSheets(sheets);
 }
 function attStatsFromSheets(sheets) {
-  const bad = new Map(), run = new Map();
+  const bad = new Map(), run = new Map(), rawRows = [];   // v3.46.0：rawRows 供质量运营复用
   for (const sh of sheets || []) {
     const rows = sh && sh.rows;
     if (!rows || !rows.length) continue;
@@ -401,6 +402,11 @@ function attStatsFromSheets(sheets) {
     const iD = col["考勤日期"] != null ? col["考勤日期"] : col["日期"];
     const iP = col["时段"], iOk = col["是否达成"];
     const iO = col["完单量"] != null ? col["完单量"] : col["时段完单量"];
+    const iName = col["骑手姓名"] != null ? col["骑手姓名"] : col["姓名"];
+    const iN = col["站点名称"] != null ? col["站点名称"] : col["团队名称"];
+    const iSched = col["是否排班"];
+    const iPlan = col["排班时段"];
+    const iV = col["时段有效在线时长"] != null ? col["时段有效在线时长"] : col["有效在线时长"];
     if ([iR, iD, iP, iOk, iO].some((i) => i === undefined)) continue;
     for (const r of rows.slice(1)) {
       const rid = normId(r[iR]);
@@ -408,6 +414,24 @@ function attStatsFromSheets(sheets) {
       const key = pairKey(rid, iS === undefined ? "" : r[iS]);
       const per = String(r[iP] == null ? "" : r[iP]).trim();
       const day = String(r[iD] == null ? "" : r[iD]).slice(0, 10);
+      const d8 = String(r[iD] == null ? "" : r[iD]).replace(/\D/g, "").slice(0, 8);
+      const dayN = /^\d{8}$/.test(d8) ? `${d8.slice(0, 4)}-${d8.slice(4, 6)}-${d8.slice(6, 8)}` : day;
+      // v3.46.0：与质量运营同口径保留原始排班行（只留「排班」，快照按「排班时段」过滤）
+      const schedRaw = iSched === undefined ? "" : String(r[iSched] == null ? "" : r[iSched]).trim();
+      const isSched = iSched === undefined
+        ? (iPlan === undefined || String(r[iPlan] == null ? "" : r[iPlan]).split(/[、,，]/).map(x => x.trim()).includes(per))
+        : schedRaw === "排班";
+      const okRaw = String(r[iOk] == null ? "" : r[iOk]).trim();
+      if (isSched && per && /^\d{4}-\d{2}-\d{2}$/.test(dayN)) {
+        rawRows.push({
+          rid, name: iName === undefined ? "" : String(r[iName] == null ? "" : r[iName]).trim(),
+          teamId: iS === undefined ? "" : normId(r[iS]),
+          siteName: iN === undefined ? "" : String(r[iN] == null ? "" : r[iN]).trim(),
+          day: dayN, per, ok: okRaw === "达成" ? 1 : (okRaw === "未达成" ? 0 : -1),
+          orders: num(r[iO]),
+          online: iV === undefined ? "" : String(r[iV] == null ? "" : r[iV]).trim()
+        });
+      }
       // 口径按用户确认：直接采信系统「是否达成」标记，排除「全天」
       if (per && per !== "全天" && String(r[iOk] == null ? "" : r[iOk]).trim() === "未达成")
         bad.set(key, (bad.get(key) || 0) + 1);
@@ -418,7 +442,7 @@ function attStatsFromSheets(sheets) {
       }
     }
   }
-  return { bad, run };
+  return { bad, run, rows: rawRows };
 }
 
 // ---------------------------------------------------------------- 考核运单明细
@@ -439,6 +463,7 @@ function parseKpiRows(j, seen) {
   const rows = Array.isArray(d.data) ? d.data : [];
   const ix = (n) => heads.indexOf(n);
   const iT = ix("运单ID"), iR = ix("骑手ID"), iS = ix("站点ID");
+  const iD = ix("日期"), iName = ix("骑手姓名"), iN = ix("站点名称"), iCreate = ix("运单创建时间");
   const iF = KPI_COLS.map(ix);
   if (iR < 0 || iF.some((i) => i < 0)) return { rows: 0 };
   for (const row of rows) {
@@ -446,8 +471,13 @@ function parseKpiRows(j, seen) {
     const val = (i) => (i >= 0 && cells[i] && cells[i].content != null)
       ? String(cells[i].content).trim() : "";
     const tid = val(iT);
+    // 「日期」列实际是 20261111 这样的 8 位紧凑格式（真机核实），统一归一为 YYYY-MM-DD
+    const d8 = (iD >= 0 ? val(iD) : "").replace(/\D/g, "").slice(0, 8)
+      || (iCreate >= 0 ? val(iCreate) : "").replace(/\D/g, "").slice(0, 8);
+    const day = /^\d{8}$/.test(d8) ? `${d8.slice(0, 4)}-${d8.slice(4, 6)}-${d8.slice(6, 8)}` : "";
     const flags = {
       rid: val(iR), teamId: iS >= 0 ? val(iS) : "",
+      tid, day, rname: iName >= 0 ? val(iName) : "", siteName: iN >= 0 ? val(iN) : "",
       lgt: val(iF[0]) === "是" ? 1 : 0,
       complain: val(iF[1]) === "是" ? 1 : 0,
       negative: val(iF[2]) === "是" ? 1 : 0,
@@ -459,6 +489,9 @@ function parseKpiRows(j, seen) {
       prev.complain = Math.max(prev.complain, flags.complain);
       prev.negative = Math.max(prev.negative, flags.negative);
       prev.early = Math.max(prev.early, flags.early);
+      if (!prev.day && flags.day) prev.day = flags.day;
+      if (!prev.rname && flags.rname) prev.rname = flags.rname;
+      if (!prev.siteName && flags.siteName) prev.siteName = flags.siteName;
     } else {
       seen.set(tid || ("__" + seen.size), flags);
     }
@@ -530,6 +563,12 @@ async function loadKpiFlags(month) {
   } catch (e) {
     console.warn("[viol] 差评/投诉补全失败（不影响 Radio 筛选结果）:", e && e.message);
   }
+  // v3.46.0：把带日期 / 运单号 / 骑手 / 站点的原始坏单留给质量运营复用
+  state.rawOrders = [...seen.values()]
+    .filter((v) => v.tid && v.day && (v.lgt || v.complain || v.negative || v.early))
+    .map((v) => ({ tid: v.tid, day: v.day, rid: v.rid, rname: v.rname || "",
+      teamId: normId(v.teamId || ""), siteName: v.siteName || "",
+      lgt: v.lgt, complain: v.complain, negative: v.negative, early: v.early }));
   const out = new Map();
   for (const v of seen.values()) {
     if (!v.rid) continue;
@@ -2385,6 +2424,7 @@ async function loadDetailData(gen, teamIds) {
   state.pendingAtt = true; state.pendingKpi = true;
   state.attReady = false; state.kpiReady = false;
   state.errors.att = ""; state.errors.kpi = "";
+  state.rawOrders = [];                 // v3.46.0：按月重置共享坏单明细
   applyData();                       // 先把「…」摆出来，别让格子像忘了做
   const [a, k] = await Promise.allSettled([
     loadAttendance(state.month, teamIds),
@@ -2407,6 +2447,20 @@ async function loadDetailData(gen, teamIds) {
   state.detailLoading = false;
   applyData();
   refreshScaleFirstRun();            // v3.31.0：本月首跑明细补完后刷新汇总「今日首跑」
+  // v3.46.0：整月原始明细写入同源缓存，质量运营「炸班次 / 坏单」直接复用，零重复请求
+  try {
+    const complete = a.status === "fulfilled" && k.status === "fulfilled";
+    const teams = (state.scale.teams && state.scale.teams.length) ? state.scale.teams : scaleTeamsFromBills();
+    const raw = {
+      v: 1, month: state.month, ts: Date.now(), complete,
+      teams: (teams || []).map((t) => ({ id: String(t.id), name: String(t.name || "") })),
+      recs: (a.status === "fulfilled" && Array.isArray(a.value.rows)) ? a.value.rows : [],
+      orders: state.rawOrders || []
+    };
+    // 半份数据不写缓存，避免质量运营复用后「坏单矩阵出不来」
+    if (complete && (raw.recs.length || raw.orders.length))
+      localStorage.setItem(SHARE_LS + state.month, JSON.stringify(raw));
+  } catch (e) { /* 配额不足不影响主表 */ }
 }
 
 function setMonth(m) {
