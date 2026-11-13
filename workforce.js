@@ -55,7 +55,7 @@ const VIOL_SEG_DAYS = 2;          // 违规处罚接口硬限制：单次查询 
 const VIOL_BATCH = 50;            // 差评/投诉运单号逗号拼接批量回查考核运单明细的批次大小
 const VIOL_MAX_PAGES = 3;         // 每个 2 天段最多翻 3 页（pageSize=500，异常情况防全量翻页）
 const API_TEAMS = XT + "xtop.lpd.intelligentConfig.getTeamsAll/1.0";
-const SHARE_LS = "wb_wf_raw_v1_";      // v3.46.0：质量运营复用运力模块整月原始明细（同源 localStorage）
+const SHARE_LS = "wb_wf_raw_v2_";      // v3.46.0：质量运营复用运力模块整月原始明细（同源 localStorage）
 const SCALE_LS = "wb_wf_scale_v1";        // v3.31.0：手填的规模目标 / 招募目标 / 招聘缺口 / 渠道名称
 const SCALE_LS_DAYS = "wb_wf_scale_days_v1"; // v3.34.0 两个可调统计天数；v3.35.0 增加首跑对比天数
 const SCALE_DAYS = 5;                      // 有效出勤规模默认近 5 天
@@ -234,6 +234,7 @@ const state = {
   attBad: new Map(),        // 复合键 -> 本月除「全天」外「未达成」班次数
   attRun: new Map(),        // 复合键 -> Set(全天行完单量 > 0 的日期)
   kpi: new Map(),           // 复合键 -> { lgt, complain, negative, early }
+  violMap: new Map(),       // v3.47.0：违规处罚运单 → 投诉/差评独立标签 + 兜底元信息
   singleSiteRiders: new Set(),  // 账单里只出现一个站点的骑手，允许通配键兜底
   crossSiteRiders: 0,          // 账单里跨站点的骑手人数（仅用于页面提示）
   attReady: false, kpiReady: false,
@@ -457,6 +458,49 @@ function attStatsFromSheets(sheets) {
 // 考核运单明细，把「是否投诉单 / 是否差评单」等标记与 Radio 筛选的结果取并集。
 // 解析一页考核运单明细：读 4 个「是否XX单」列，按运单ID去重合并进 seen。
 // 已存在的运单取各标记的并集（max），补全路不会把 Radio 路已拿到的标记冲掉。
+/** 违规处罚 item → 差评 / 投诉独立标签（v3.47.0，与质量运营同口径）。
+ *  真机核实：提前点送达类投诉违规（violationReason「未在收货地址附近点击送达」）
+ *  在考核运单明细里「是否投诉单 / 是否差评单」列全是「否」，只靠回查 KPI 明细会漏计；
+ *  因此违规分类本身就是一个独立的投诉 / 差评标签，与 KPI 4 列取并集。 */
+function violationFlags(x) {
+  const tid = String((x && x.trackingId) || "").trim();
+  if (!tid) return null;
+  const cat = String((x && x.violationCategory) || "").toUpperCase();
+  const d8 = String((x && x.violationTime) || "").replace(/\D/g, "").slice(0, 8);
+  const day = /^\d{8}$/.test(d8) ? `${d8.slice(0, 4)}-${d8.slice(4, 6)}-${d8.slice(6, 8)}` : "";
+  const ki = String((x && x.knightInfo) || "").split("-");
+  const ti = String((x && x.teamInfo) || "").split("-");
+  return {
+    tid, day,
+    rid: normId(ki[0] || ""), rname: ki.slice(1).join("-"),
+    teamId: normId(ti[0] || ""), siteName: ti.slice(1).join("-"),
+    complain: cat === "COMPLAIN" ? 1 : 0,
+    negative: cat === "BAD_REVIEW" ? 1 : 0
+  };
+}
+/** 把违规处罚投诉 / 差评标记并入 seen（同单不重复计数）；KPI 回查缺行时用违规 item 兜底建行。 */
+function applyViolationFlags(seen) {
+  let added = 0, boosted = 0;
+  for (const [tid, v] of state.violMap) {
+    const cur = seen.get(tid);
+    if (cur) {
+      if (v.complain && !cur.complain) { cur.complain = 1; boosted++; }
+      if (v.negative && !cur.negative) { cur.negative = 1; boosted++; }
+      if (!cur.day && v.day) cur.day = v.day;
+      if (!cur.rid && v.rid) cur.rid = v.rid;
+      if (!cur.rname && v.rname) cur.rname = v.rname;
+      if (!cur.teamId && v.teamId) cur.teamId = v.teamId;
+      if (!cur.siteName && v.siteName) cur.siteName = v.siteName;
+    } else if (v.day && (v.complain || v.negative)) {
+      seen.set(tid, {
+        tid, day: v.day, rid: v.rid, rname: v.rname, teamId: v.teamId, siteName: v.siteName,
+        lgt: 0, complain: v.complain, negative: v.negative, early: 0
+      });
+      added++;
+    }
+  }
+  return { added, boosted };
+}
 function parseKpiRows(j, seen) {
   const d = (j && j.result && j.result.data) || {};
   const heads = (d.multiHeaders || [])[0] || [];
@@ -502,6 +546,7 @@ function parseKpiRows(j, seen) {
 // 违规处罚列表（差评 / 投诉 · 成立）：按 2 天分段拉整月，返回去重后的运单号数组
 async function loadViolationTrackingIds(b) {
   const tids = new Set();
+  state.violMap = new Map();
   for (let d = 1; d <= b.maxDay; d += VIOL_SEG_DAYS) {
     const segEnd = Math.min(d + VIOL_SEG_DAYS - 1, b.maxDay);
     const start = new Date(b.y, b.m - 1, d, 0, 0, 0).getTime();
@@ -518,8 +563,19 @@ async function loadViolationTrackingIds(b) {
       const d0 = (j && j.result && j.result.data) || {};
       const list = Array.isArray(d0.violationEventList) ? d0.violationEventList : [];
       for (const x of list) {
-        const tid = String((x && x.trackingId) || "").trim();
-        if (tid) tids.add(tid);
+        const v = violationFlags(x);
+        if (!v) continue;
+        tids.add(v.tid);
+        const prev = state.violMap.get(v.tid);
+        if (prev) {
+          prev.complain = Math.max(prev.complain, v.complain);
+          prev.negative = Math.max(prev.negative, v.negative);
+          if (!prev.day && v.day) prev.day = v.day;
+          if (!prev.rname && v.rname) prev.rname = v.rname;
+          if (!prev.siteName && v.siteName) prev.siteName = v.siteName;
+        } else {
+          state.violMap.set(v.tid, v);
+        }
       }
       if (!list.length || list.length < 500 || (d0.count && p * 500 >= d0.count)) break;
     }
@@ -530,6 +586,7 @@ async function loadViolationTrackingIds(b) {
 async function loadKpiFlags(month) {
   const b = monthBounds(month);
   const seen = new Map();
+  state.violMap = new Map();
   for (const filter of KPI_FILTERS) {
     for (let p = 1; p <= KPI_MAX_PAGES; p++) {
       const j = await request(API_KPI_DETAIL, "POST", {
@@ -563,6 +620,9 @@ async function loadKpiFlags(month) {
   } catch (e) {
     console.warn("[viol] 差评/投诉补全失败（不影响 Radio 筛选结果）:", e && e.message);
   }
+  // v3.47.0：违规分类（成立投诉 / 差评）作为独立标签并入，与考核运单明细 4 列取并集。
+  // 一个订单同时命中「提前点」与「差评 / 投诉」时，两个标签都要单独计数。
+  applyViolationFlags(seen);
   // v3.46.0：把带日期 / 运单号 / 骑手 / 站点的原始坏单留给质量运营复用
   state.rawOrders = [...seen.values()]
     .filter((v) => v.tid && v.day && (v.lgt || v.complain || v.negative || v.early))
@@ -2452,7 +2512,7 @@ async function loadDetailData(gen, teamIds) {
     const complete = a.status === "fulfilled" && k.status === "fulfilled";
     const teams = (state.scale.teams && state.scale.teams.length) ? state.scale.teams : scaleTeamsFromBills();
     const raw = {
-      v: 1, month: state.month, ts: Date.now(), complete,
+      v: 2, month: state.month, ts: Date.now(), complete,
       teams: (teams || []).map((t) => ({ id: String(t.id), name: String(t.name || "") })),
       recs: (a.status === "fulfilled" && Array.isArray(a.value.rows)) ? a.value.rows : [],
       orders: state.rawOrders || []
@@ -2678,7 +2738,7 @@ window.__SET_WORKFORCE__ = (obj) => {
 };
 window.__WF__ = { state, COLS, PAGE_COLS, buildRows, attachDetail, visibleRows, splitSep,
   staffMap, clueMap, money, attStatsFromSheets, monthSegments, monthBounds, exportCsv,
-  applyData, loadKpiFlags, loadAttendance, KPI_FILTERS,
+  applyData, loadKpiFlags, loadAttendance, KPI_FILTERS, violationFlags, applyViolationFlags,
   // v3.41.0 差评 / 投诉补全（违规处罚 → 批量回查考核运单明细）
   parseKpiRows, loadViolationTrackingIds, API_VIOLATION, VIOL_SEG_DAYS, VIOL_BATCH,
   normId, pairKey, pairGet, hookPairMap,
