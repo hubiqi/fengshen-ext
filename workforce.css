@@ -25,6 +25,25 @@
   background: #FFFFFF; border: 1px solid #D1D5DB; border-radius: 5px; padding: 0 6px;
 }
 
+/* ---------------------------------------------------------------- 日期切换（v3.56.0）
+   账单月份做成一体化步进控件：左右箭头 ＋ 中间月份框，边界自动置灰；
+   「本月」按钮在当前月高亮，避免用户反复点箭头却不确定有没有切回来。 */
+.date-pick.month-pick { gap: 2px; padding: 2px; background: #FFFFFF;
+  border: 1px solid #D1D5DB; border-radius: 8px;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, .05); }
+.month-pick .dp-label { padding: 0 6px 0 7px; font-size: 11.5px; font-weight: 700;
+  color: #6B7280; letter-spacing: .2px; }
+.month-pick input[type="month"] { height: 30px; border: 0; border-radius: 6px;
+  background: transparent; font-weight: 700; color: #1F2937; padding: 0 4px;
+  transition: background .15s, box-shadow .15s; }
+.month-pick input[type="month"]:hover { background: #F3F6FC; }
+.month-pick input[type="month"]:focus { outline: none; background: #EFF6FF;
+  box-shadow: 0 0 0 2px #BFDBFE; }
+.month-pick .date-step { border: 0; background: transparent; width: 30px; height: 30px;
+  border-radius: 6px; }
+.month-pick .date-step:hover:not(:disabled) { background: #E8F1FD; }
+.month-pick .date-step:disabled { background: transparent; }
+
 /* ---------------------------------------------------------------- 顶部概览 */
 .wf-summary { width: 1240px; max-width: 100%; margin: 26px auto 0; padding: 0 8px;
   display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; }
@@ -297,10 +316,53 @@ table.tbl.hr tr:nth-child(even) td.h-num.h-day { background: #EFF5FF; }
 .hr-card.ok .v { color: #15803D; }
 .hr-card.risk .v { color: #B91C1C; }
 
+/* v3.57.0：结算流失预警卡片（与概览卡片同款，单独一行、风险色更克制） */
+.hr-risk { width: 1240px; max-width: 100%; margin: 10px auto 0; padding: 0 8px;
+  display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }
+.hr-risk .wf-card { min-width: 118px; flex: 0 1 158px; padding: 8px 8px; }
+.hr-risk .wf-card .v { font-size: 17px; }
+.hr-risk button.wf-card { font-family: inherit; cursor: pointer; }
+.hr-risk button.wf-card:hover { background: #EAF1FD; border-color: #9DB8E8; }
+.hr-risk button.wf-card.active { background: #EAF1FD; border-color: #2F5597;
+  box-shadow: inset 0 -3px 0 #2F5597; }
+.hr-risk button.wf-card:focus-visible { outline: 2px solid #3B82F6; outline-offset: 2px; }
+
+/* v3.57.0：人资商结算分析表 */
+.hr-analysis { width: 1240px; max-width: 100%; margin: 22px auto 0; padding: 0 8px; }
+.hr-analysis-head { display: flex; align-items: center; justify-content: space-between;
+  gap: 10px; padding: 0 8px 8px; }
+.hr-analysis-head h3 { margin: 0; font-size: 14px; color: #1F2937; letter-spacing: .2px; }
+.hr-analysis-head h3::before { content: "▍"; color: #2F5597; margin-right: 2px; }
+.hr-analysis-tools .ghost { height: 26px; font-size: 11.5px; padding: 0 10px; }
+.tbl-scroll.hr-analysis-scroll { overflow: auto; max-height: 46vh;
+  border: 1px solid #DCE6F5; border-radius: 6px; background: #FFF; }
+table.tbl.hr-analysis { table-layout: auto; width: max-content; min-width: 100%;
+  margin: 0 auto; font-size: 11.5px; }
+table.tbl.hr-analysis thead th { height: 40px; font-size: 11px; line-height: 1.35;
+  padding: 3px 8px; white-space: normal; position: sticky; top: 0; z-index: 3;
+  background: #2F5597; color: #FFF; cursor: default; }
+table.tbl.hr-analysis tbody td { height: 34px; padding: 3px 8px; text-align: center;
+  white-space: nowrap; border-bottom: 1px solid #EEF2F9; }
+table.tbl.hr-analysis tbody tr:nth-child(even) td { background: #FAFBFE; }
+table.tbl.hr-analysis tbody tr:hover td { background: #EFF6FF; }
+table.tbl.hr-analysis td.h-company { text-align: left; min-width: 170px;
+  color: #6D28D9; font-weight: 700; white-space: normal; word-break: break-all; }
+table.tbl.hr-analysis td.h-num { font-variant-numeric: tabular-nums; }
+table.tbl.hr-analysis td.h-money { font-variant-numeric: tabular-nums; color: #1D4ED8; font-weight: 700; }
+table.tbl.hr-analysis td.h-risk-num { color: #B91C1C; font-weight: 700; }
+table.tbl.hr-analysis tr.hr-total td { font-weight: 700; color: #1F2937;
+  background: #EAF1FD !important; border-top: 2px solid #2F5597; }
+.hr-analysis-note { padding: 8px 10px 0; font-size: 11.5px; color: #6B7280; line-height: 1.65; }
+.hr-analysis-note b { color: #1F2937; }
+/* 结算预警列 */
+table.tbl.hr td.h-risk { min-width: 108px; font-size: 11px; }
+table.tbl.hr i.mk.warn { color: #B45309; }
+table.tbl.hr i.mk.risk { color: #B91C1C; }
+
 .tbl-scroll.hr-scroll { overflow: auto; margin-top: 18px; max-height: 72vh; }
 table.tbl.hr { table-layout: auto; width: max-content; min-width: 1240px;
   margin: 0 auto; font-size: 11.5px; }
-table.tbl.hr thead th { height: 42px; font-size: 11.5px; line-height: 1.35; padding: 3px 7px;
+table.tbl.hr thead th { height: 44px; font-size: 11.5px; line-height: 1.35; padding: 3px 7px;
   white-space: normal; position: sticky; top: 0; z-index: 5; cursor: pointer;
   user-select: none; background: #2F5597; }
 table.tbl.hr thead th:hover { background: #24457C; }
@@ -308,7 +370,20 @@ table.tbl.hr thead th::after { content: ""; font-size: 10px; color: #B9C9E8; }
 table.tbl.hr thead th:hover::after { content: " ⇅"; }
 table.tbl.hr thead th.sort-asc::after { content: " ↑"; color: #FDE68A; font-weight: 700; }
 table.tbl.hr thead th.sort-desc::after { content: " ↓"; color: #FDE68A; font-weight: 700; }
-table.tbl.hr tbody td { height: 34px; font-size: 11.5px; padding: 3px 7px;
+/* v3.56.0：三方人资监控表头也能按列筛选，交互与骑手账单一致（▾ 空按钮 + 琥珀下划线） */
+table.tbl.hr thead th.filtered { box-shadow: inset 0 -3px 0 #F59E0B; }
+table.tbl.hr thead th button.wf-th-filter { border: 0; background: transparent;
+  color: #CFDDF5; padding: 0 0 0 3px; margin: 0; font-size: 10px; line-height: 1;
+  cursor: pointer; vertical-align: 1px; }
+table.tbl.hr thead th button.wf-th-filter::before { content: "▾"; }
+table.tbl.hr thead th button.wf-th-filter:hover { color: #FFFFFF; background: transparent; }
+table.tbl.hr thead th.filtered button.wf-th-filter { color: #FBBF24; }
+table.tbl.hr thead th button.wf-th-filter:focus-visible { outline: 2px solid #FDE68A;
+  outline-offset: 1px; border-radius: 2px; }
+/* T-3 / T-2 / T-1 三列左侧加一条淡色分隔线，扫读时更容易和达标单量分开 */
+table.tbl.hr thead th:nth-child(14), table.tbl.hr tbody td:nth-child(14) {
+  border-left: 2px solid #C7D8F5; }
+table.tbl.hr tbody td { height: 36px; font-size: 11.5px; padding: 3px 7px;
   white-space: nowrap; text-align: center; }
 table.tbl.hr tbody tr:nth-child(even) td { background: #FAFBFE; }
 table.tbl.hr tbody tr:hover td { background: #EFF6FF; }
@@ -327,6 +402,8 @@ table.tbl.hr td.h-remain { font-weight: 700; color: #B45309; }
 table.tbl.hr td.h-remain.is-ok { color: #15803D; background: #ECFDF3; }
 table.tbl.hr td.h-remain.is-risk { color: #B91C1C; background: #FEF2F2; }
 table.tbl.hr td.h-remain.is-near { color: #B45309; background: #FFFBEB; }
+table.tbl.hr td.h-money { font-variant-numeric: tabular-nums; color: #1D4ED8; font-weight: 700; }
+table.tbl.hr td.h-money.h-empty { color: #9CA3AF; font-weight: 400; }
 table.tbl.hr i.mk { font-style: normal; font-weight: 700; }
 table.tbl.hr i.mk.yes { color: #15803D; }
 table.tbl.hr i.mk.no { color: #B91C1C; }
@@ -334,6 +411,23 @@ table.tbl.hr i.mk.na { color: #9CA3AF; font-weight: 400; }
 table.tbl.hr tr.hr-empty td { height: 90px; color: #6B7280; font-size: 13px; }
 table.tbl.hr tr.hr-total td { height: 34px; font-weight: 700; color: #1F2937;
   background: #EAF1FD !important; border-top: 2px solid #2F5597; }
+/* v3.56.0：三方人资监控横向滚动时冻结左侧三列（人资商 / 站点 / 骑手），
+   看右侧 T-3~T-1 与坏单列时不丢人名。left 由 JS 按真实列宽写入。 */
+table.tbl.hr th.fz, table.tbl.hr td.fz { position: sticky; z-index: 3;
+  background: #FFFFFF; box-shadow: inset -1px 0 0 #000000; }
+table.tbl.hr thead th.fz { z-index: 7; background: #2F5597; }
+table.tbl.hr tbody tr:nth-child(even) td.fz { background: #FAFBFE; }
+table.tbl.hr tbody tr:hover td.fz { background: #EFF6FF; }
+table.tbl.hr tr.hr-total td.fz { background: #EAF1FD; }
+table.tbl.hr th.fz-edge, table.tbl.hr td.fz-edge {
+  box-shadow: inset -1px 0 0 #000000, 2px 0 0 rgba(0, 0, 0, .22); }
+table.tbl.hr thead th.fz-edge {
+  box-shadow: inset -1px 0 0 #000000, 2px 0 0 rgba(0, 0, 0, .35); }
+/* 冻结列表头的筛选态：底色阴影会和冻结边框叠加，这里显式保留琥珀下划线 */
+table.tbl.hr thead th.fz.filtered {
+  box-shadow: inset -1px 0 0 #000000, inset 0 -3px 0 #F59E0B; }
+table.tbl.hr thead th.fz-edge.filtered {
+  box-shadow: inset -1px 0 0 #000000, 2px 0 0 rgba(0, 0, 0, .35), inset 0 -3px 0 #F59E0B; }
 
 /* 结算标准弹层 */
 .wf-pop.hr-target-pop { width: 396px; }

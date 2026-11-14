@@ -84,6 +84,8 @@ table.ql-tbl th.ql-rider .qr-sub { display: block; font-weight: 400; color: #9CA
 .ql-pop-body th, .ql-pop-body td { border: 1px solid #EEF0F3; padding: 5px 8px; text-align: center; }
 .ql-pop-body th { background: #FAFBFD; font-weight: 600; color: #374151; position: sticky; top: 0; }
 .ql-pop-body td.lft, .ql-pop-body th.lft { text-align: left; }
+.ql-pop-body td.ql-reason { min-width: 240px; max-width: 460px; white-space: normal;
+  line-height: 1.5; color: #374151; }
 .ql-pop-body .mk { display: inline-block; padding: 0 8px; border-radius: 8px; font-size: 12px; font-weight: 600; }
 .ql-pop-body .mk.yes { background: #E7F6EC; color: #15803D; }
 .ql-pop-body .mk.no { background: #FDECEC; color: #C22F2F; }

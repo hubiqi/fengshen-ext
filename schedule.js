@@ -446,6 +446,14 @@ function syncControls() {
   $("date-picker").max = shiftDate(todayStr(), FUTURE_DAYS);
   $("btn-prev").disabled = state.date <= shiftDate(todayStr(), -PAST_DAYS);
   $("btn-next").disabled = state.date >= shiftDate(todayStr(), FUTURE_DAYS);
+  // v3.56.0：快捷按钮高亮 + 动态 title，和出勤达成页的「今天 / T-1」保持一致
+  const today = todayStr(), t1 = shiftDate(today, 1);
+  $("btn-today").classList.toggle("date-active", state.date === today);
+  $("btn-t1").classList.toggle("date-active", state.date === t1);
+  $("btn-prev").title = $("btn-prev").disabled ? "已到最早可排日期" : `前一天（${shiftDate(state.date, -1)}）`;
+  $("btn-next").title = $("btn-next").disabled ? "已到最晚可排日期" : `后一天（${shiftDate(state.date, 1)}）`;
+  $("btn-today").title = state.date === today ? "当前已是今天" : `切到今天（${today}）`;
+  $("btn-t1").title = state.date === t1 ? "当前已是明天（T+1）" : `切到明天（${t1}）`;
   const delta = Math.round((new Date(state.date + "T00:00:00") - new Date(todayStr() + "T00:00:00")) / 86400000);
   $("date-tag").textContent = delta === 0 ? "（今天）" : delta === 1 ? "（明天 · T+1）" : delta > 1 ? `（T+${delta}）` : `（T${delta}）`;
   for (const b of $("view-seg").querySelectorAll("button")) b.classList.toggle("on", b.dataset.view === state.view);

@@ -40,9 +40,10 @@
  *   2) 出勤达成同款实时快照 exportAttendance/1.0 —— 仅当月用于补今天（历史 T+1 结算），
  *      快照按「排班时段」计划列过滤（时段不在计划里的行跳过）。
  *   3) KPI管理 → 考核运单明细 perfDetail.queryDetailList/1.0（tabCode=TRACK_UB）：
- *      4 个 Radio 筛选各查一次 + 违规处罚列表（violationOrderAeolusCenterApi.queryList/1.0，
- *      违规状态=成立、分类=差评+投诉、单次窗口 ≤2 天按 2 天分段）的运单号去重后
- *      逗号拼接 50 单/批回查 —— 与运力模块 v3.41.0 同一套并集口径，不漏不重。
+ *      4 个 Radio 筛选各查一次 + 违规处罚 / 申诉明细（violationOrderAeolusCenterApi.queryList/1.0，
+ *      投诉 / 差评 / 索赔 / 物流责分类、单次窗口 ≤2 天按 2 天分段）的运单号去重后逗号拼接 50 单/批回查
+ *      —— 与运力模块同一套并集口径，不漏不重；索赔单来自申诉明细 CLAIM 分类，
+ *      排除提前点索赔；每条坏单的「违规原因」也取申诉明细的 violationReason。
  *
  * 与另两个页面一样：直连优先、失败自动切「静默桥接」；限频错误退避重试不切通道。
  * 站点列表走 getTeamsAll/1.0；商圈片沿用运力模块同一套站点→商圈片映射，未映射站点自成一组。
@@ -62,21 +63,22 @@ const KPI_PAGE_SIZE = 100;     // 实测 pageSize > 100 接口返回空数据
 const KPI_MAX_PAGES = 10;      // 每类问题订单最多 10 页 = 1000 单
 const VIOL_SEG_DAYS = 2;       // 违规处罚接口硬限制：单次查询 ≤ 2 天
 const VIOL_BATCH = 50;         // 违规运单号逗号拼接批量回查的批次大小
-const VIOL_MAX_PAGES = 3;      // 每个 2 天段最多翻 3 页
+const VIOL_MAX_PAGES = 4;      // 每个 2 天段最多翻 4 页
 const MONTHS_BACK = 11;        // 当前月 + 往前 11 个月
 const LS_MONTH = "wb_ql_month";
 
-// 坏单四列（与运力模块 KPI_COLS 同一套）
+// 坏单五列（与运力模块 KPI_COLS 同一套；索赔单排除提前点索赔）
 const KPI_FILTERS = [
   { is_lgt_duty_incompleted_order: "1" },
   { is_early_delivery_complain_order: "1" },
   { is_early_delivery_negative_rating_order: "1" },
   { is_early_delivery_claim_order: "1" }
 ];
-const KPI_COLS = ["是否物流责取消单", "是否投诉单", "是否差评单", "是否提前点送达不满意单"];
+const KPI_COLS = ["是否物流责取消单", "是否投诉单", "是否差评单", "是否提前点送达不满意单", "是否索赔单"];
 const BAD_COLS = [
-  ["lgt", "物流责"], ["complain", "投诉"], ["negative", "差评"], ["early", "提前点"]
+  ["lgt", "物流责"], ["complain", "投诉"], ["negative", "差评"], ["early", "提前点"], ["claim", "索赔"]
 ];
+const VIOL_CAT_BY_TAG = { lgt: "CANCEL", complain: "COMPLAIN", negative: "BAD_REVIEW", claim: "CLAIM", early: "COMPLAIN" };
 
 // 站点 → 商圈片（与考核看板 / 运力模块 / 排班 / 实时出勤同一套映射；未映射站点自成一组）
 const SITE_TO_AREA = {
@@ -220,7 +222,7 @@ function monthSegments(month) {
 }
 
 // ---------------------------------------------------------------- 网络层（与运力模块同款）
-const SHARE_LS = "wb_wf_raw_v3_";     // 与运力模块同源共享的整月原始明细缓存
+const SHARE_LS = "wb_wf_raw_v4_";     // 与运力模块同源共享的整月原始明细缓存（v4 起含索赔与违规原因）
 const ALLDAY_LS = "wb_ql_allday_v1";            // v3.48.0：全天班次达标标准（本机记忆、可编辑）
 const ALLDAY_DEFAULT = { orders: 18, hours: 6 };// 默认：完单量 ≥ 18 单 且 有效在线时长 ≥ 6 小时
 function loadAllDayCfg() {
@@ -284,7 +286,7 @@ const state = {
 function readShared(month) {
   try {
     const raw = JSON.parse(localStorage.getItem(SHARE_LS + month) || "null");
-    if (!raw || raw.v !== 3 || raw.month !== month) return null;
+    if (!raw || raw.v !== 4 || raw.month !== month) return null;
     if (raw.complete === false) return null;      // 半份数据不复用
     if (!Array.isArray(raw.recs) || !Array.isArray(raw.orders)) return null;
     if (!raw.recs.length && !raw.orders.length) return null;
@@ -295,7 +297,7 @@ function readShared(month) {
 function writeShared(month, teams, recs, orders) {
   try {
     localStorage.setItem(SHARE_LS + month, JSON.stringify({
-      v: 3, month, ts: Date.now(),
+      v: 4, month, ts: Date.now(),
       teams: (teams || []).map((t) => ({ id: String(t.id), name: String(t.name || "") })),
       recs: recs || [], orders: orders || []
     }));
@@ -530,7 +532,7 @@ async function loadLiveToday(teamIds, today) {
 /** 解析一页考核运单明细（带日期），按运单ID 去重合并进 seen（同单标记取并集）。 */
 /** 违规处罚 / 申诉明细 item → 仅解析元信息（v3.49.0）。
  *  用户口径：申诉明细只提供运单号用于回查「匹配」考核运单明细，坏单标签一律以考核明细
- *  的 4 个「是否XX单」列为准；违规分类（COMPLAIN / BAD_REVIEW）不再产生任何坏单标签。
+ *  的 5 个「是否XX单」列为准；违规分类（COMPLAIN / BAD_REVIEW）不再产生任何坏单标签。
  *  violationTime「2026-11-12T22:46:16」/ knightInfo「ID-姓名」/ teamInfo「ID-站点名」
  *  仅用于补全考核明细行缺失的日期 / 骑手 / 站点。 */
 function violationMeta(x) {
@@ -543,11 +545,37 @@ function violationMeta(x) {
   return {
     tid, day,
     rid: normId(ki[0] || ""), rname: ki.slice(1).join("-"),
-    teamId: normId(ti[0] || ""), siteName: ti.slice(1).join("-")
+    teamId: normId(ti[0] || ""), siteName: ti.slice(1).join("-"),
+    category: String((x && x.violationCategory) || "").toUpperCase(),
+    vtype: num(x && x.violationType),
+    status: num(x && x.violationStatus),
+    reason: String((x && x.violationReason) || "").trim()
   };
 }
+/** v3.57.8：同一运单可能有多条违规，按分类收集违规原因。 */
+function mergeViolMeta(prev, v) {
+  if (!prev) return;
+  if (!prev.reasons) prev.reasons = {};
+  if (v.reason) {
+    const arr = prev.reasons[v.category] || (prev.reasons[v.category] = []);
+    if (!arr.includes(v.reason)) arr.push(v.reason);
+  }
+}
+/** 按坏单标签挑对应分类的违规原因（物流责→取消、投诉/提前点→投诉、差评→差评、索赔→索赔）。 */
+function violReasonOf(o, v) {
+  if (!o || !v || !v.reasons) return "";
+  const cats = [];
+  for (const k of ["lgt", "complain", "negative", "claim", "early"]) {
+    if (o[k] && VIOL_CAT_BY_TAG[k] && !cats.includes(VIOL_CAT_BY_TAG[k])) cats.push(VIOL_CAT_BY_TAG[k]);
+  }
+  const parts = [];
+  for (const cat of cats) {
+    for (const r of (v.reasons[cat] || [])) if (!parts.includes(r)) parts.push(r);
+  }
+  return parts.join("；");
+}
 /** v3.49.0：申诉明细只补元信息 —— 绝不产生坏单标签、绝不新建坏单行。
- *  仅当该运单已被考核明细命中且已有标签、但缺日期 / 骑手 / 站点时才补空字段。 */
+ *  v3.57.8：同时把违规原因挂到已命中的坏单上（所有坏单都能看具体原因）。 */
 function applyViolationMeta(seen) {
   let filled = 0;
   for (const [tid, v] of state.violMap) {
@@ -559,12 +587,16 @@ function applyViolationMeta(seen) {
     if (!cur.rname && v.rname) { cur.rname = v.rname; hit = true; }
     if (!cur.teamId && v.teamId) { cur.teamId = v.teamId; hit = true; }
     if (!cur.siteName && v.siteName) { cur.siteName = v.siteName; hit = true; }
+    if (!cur.reason) {
+      const reason = violReasonOf(cur, v);
+      if (reason) { cur.reason = reason; hit = true; }
+    }
     if (hit) filled++;
   }
   return { filled };
 }
-/** 坏单标签唯一来源 = 考核运单明细 4 列；全「否」的回查命中行不算坏单。 */
-function hasKpiTag(o) { return !!(o && (o.lgt || o.complain || o.negative || o.early)); }
+/** 坏单标签唯一来源 = 考核运单明细 5 列；全「否」的回查命中行不算坏单。 */
+function hasKpiTag(o) { return !!(o && (o.lgt || o.complain || o.negative || o.early || o.claim)); }
 function keepKpiTagged(seen) {
   let dropped = 0;
   for (const [tid, o] of seen) {
@@ -593,6 +625,7 @@ function parseBadRows(j, seen) {
     const d8 = (iD >= 0 ? val(iD) : "").replace(/\D/g, "").slice(0, 8)
       || (iCreate >= 0 ? val(iCreate) : "").replace(/\D/g, "").slice(0, 8);
     const day = /^\d{8}$/.test(d8) ? `${d8.slice(0, 4)}-${d8.slice(4, 6)}-${d8.slice(6, 8)}` : "";
+    const early = val(iF[3]) === "是" ? 1 : 0;
     const rec = {
       tid, day,
       rid: val(iR), rname: iName >= 0 ? val(iName) : "",
@@ -601,11 +634,13 @@ function parseBadRows(j, seen) {
       lgt: val(iF[0]) === "是" ? 1 : 0,
       complain: val(iF[1]) === "是" ? 1 : 0,
       negative: val(iF[2]) === "是" ? 1 : 0,
-      early: val(iF[3]) === "是" ? 1 : 0
+      early,
+      // 索赔单全量，排除提前点索赔（已计提前点，不重复）
+      claim: val(iF[4]) === "是" && !early ? 1 : 0
     };
     const prev = seen.get(tid);
     if (prev) {
-      for (const k of ["lgt", "complain", "negative", "early"]) prev[k] = Math.max(prev[k], rec[k]);
+      for (const k of ["lgt", "complain", "negative", "early", "claim"]) prev[k] = Math.max(prev[k], rec[k]);
       if (!prev.day && rec.day) prev.day = rec.day;
       if (!prev.rname && rec.rname) prev.rname = rec.rname;
       if (!prev.siteName && rec.siteName) prev.siteName = rec.siteName;
@@ -616,8 +651,11 @@ function parseBadRows(j, seen) {
   }
   return { rows: rows.length };
 }
-/** 违规处罚列表（差评 / 投诉 · 成立）：按 2 天分段拉整月，返回去重后的运单号数组。
+/** 违规处罚列表（申诉明细）：按 2 天分段拉整月，返回需要回查考核明细的运单号数组。
+ *  v3.57.8：不再限制「成立」状态 —— 拉投诉 / 差评 / 索赔 / 物流责分类用于补「违规原因」；只有差评 / 投诉 / 索赔
+ *  三类运单号参与回查（物流责已有专用筛选，OVERTIME 不参与坏单）。
  *  接口对连发敏感（实测连发 6 段即触发「请求太频繁」），段间加 400ms 间隔 + 限频退避重试。 */
+const VIOL_SUPPLEMENT_CATS = new Set(["BAD_REVIEW", "COMPLAIN", "CLAIM"]);
 async function loadViolationTrackingIds(b) {
   const tids = new Set();
   state.violMap = new Map();
@@ -629,17 +667,17 @@ async function loadViolationTrackingIds(b) {
       const j = await requestRL(API_VIOLATION, "POST", {
         params: { request: {
           violationStartTime: start, violationEndTime: end,
-          violationStatus: [10],                       // 10 = 成立
-          violationCategories: ["BAD_REVIEW", "COMPLAIN"],
+          // 只要与坏单相关的分类；OVERTIME 占九成且不参与坏单
+          violationCategories: ["BAD_REVIEW", "COMPLAIN", "CLAIM", "CANCEL"],
           pageNo: p, pageSize: 500
         } }
       });
       const d0 = (j && j.result && j.result.data) || {};
       const list = Array.isArray(d0.violationEventList) ? d0.violationEventList : [];
       for (const x of list) {
-        const v = violationMeta(x);       // v3.49.0：只取运单号 + 元信息，不取违规分类标签
+        const v = violationMeta(x);
         if (!v) continue;
-        tids.add(v.tid);
+        if (VIOL_SUPPLEMENT_CATS.has(v.category)) tids.add(v.tid);
         const prev = state.violMap.get(v.tid);
         if (prev) {
           if (!prev.day && v.day) prev.day = v.day;
@@ -647,8 +685,10 @@ async function loadViolationTrackingIds(b) {
           if (!prev.rname && v.rname) prev.rname = v.rname;
           if (!prev.teamId && v.teamId) prev.teamId = v.teamId;
           if (!prev.siteName && v.siteName) prev.siteName = v.siteName;
+          mergeViolMeta(prev, v);
         } else {
           state.violMap.set(v.tid, v);
+          mergeViolMeta(v, v);
         }
       }
       if (!list.length || list.length < 500 || (d0.count && p * 500 >= d0.count)) break;
@@ -679,8 +719,8 @@ async function loadBadOrders(month, onStep) {
     onStep && onStep();
     await sleep(250);                  // 每类筛选之间稍作间隔，降低限频概率
   }
-  setProgress(55, "坏单：违规处罚列表拉取中（差评 / 投诉 · 成立）…");
-  // 与运力模块 v3.41.0 同款补全：4 个 Radio 筛选漏普通差评 / 投诉，用违规处罚运单号并集补齐
+  setProgress(55, "坏单：申诉明细拉取中（投诉 / 差评 / 索赔 / 物流责）…");
+  // 与运力模块同款补全：4 个 Radio 筛选漏普通差评 / 投诉 / 索赔，用申诉明细运单号并集补齐
   try {
     const tids = await loadViolationTrackingIds(b);
     for (let i = 0; i < tids.length; i += VIOL_BATCH) {
@@ -699,7 +739,7 @@ async function loadBadOrders(month, onStep) {
   } catch (e) {
     console.warn("[viol] 坏单补全失败（不影响 Radio 筛选结果）:", e && e.message);
   }
-  // v3.49.0：坏单数量一律以考核运单明细 4 个标签列为准。
+  // v3.49.0：坏单数量一律以考核运单明细 5 个标签列为准。
   // 申诉 / 违规明细只提供运单号用于回查匹配；命中但 4 列全「否」的单不计坏单
   // （v3.47.0 曾把违规分类当独立标签，导致 149 个成立单被计入、坏单虚高）。
   const vm = applyViolationMeta(seen);
@@ -849,7 +889,7 @@ function entityRows() {
       m.get(a).add(normId(r.teamId) || a);
     }
     for (const o of state.orders) {
-      if (!(o.lgt || o.complain || o.negative || o.early)) continue;
+      if (!hasKpiTag(o)) continue;
       const a = areaOf(o.teamId, o.siteName);
       if (!m.has(a)) m.set(a, new Set());
       m.get(a).add(normId(o.teamId) || a);
@@ -863,7 +903,7 @@ function entityRows() {
     const m = new Map();   // teamId -> name
     for (const r of state.recs) m.set(normId(r.teamId) || normId(r.siteName), str(r.siteName));
     for (const o of state.orders) {
-      if (!(o.lgt || o.complain || o.negative || o.early)) continue;
+      if (!hasKpiTag(o)) continue;
       m.set(normId(o.teamId) || normId(o.siteName), str(o.siteName));
     }
     return [...m.entries()].map(([tid, sn]) =>
@@ -876,7 +916,7 @@ function entityRows() {
   // 旧版取「炸班 ∪ 坏单」并集，导致坏单视图里出现大量整行空白、本月合计为「—」的
   // 骑手（整月累积有过一次炸班的人本就很多），看起来完全像没有过滤。
   // 汇总口径与矩阵行末「本月合计」完全一致：炸班 = recOk()===0 的班次数（全天走自定义标准），
-  // 坏单 = 4 个标签数之和（一个订单命中多个标签各计一次）。
+  // 坏单 = 5 个标签数之和（一个订单命中多个标签各计一次）。
   const infos = riderInfoMap();
   const shiftTotal = new Map(), badTotal = new Map();
   const inc = (m, rid, n) => { const k = normId(rid); if (k) m.set(k, (m.get(k) || 0) + n); };
@@ -977,12 +1017,12 @@ function shiftMatrix() {
 function badMatrix() {
   const cells = new Map();
   for (const o of state.orders) {
-    if (!(o.lgt || o.complain || o.negative || o.early)) continue;
+    if (!hasKpiTag(o)) continue;
     const ek = entityKeyOf(o);
     let m = cells.get(ek);
     if (!m) cells.set(ek, m = new Map());
     let c = m.get(o.day);
-    if (!c) m.set(o.day, c = { lgt: 0, complain: 0, negative: 0, early: 0, list: [] });
+    if (!c) m.set(o.day, c = { lgt: 0, complain: 0, negative: 0, early: 0, claim: 0, list: [] });
     for (const [k] of BAD_COLS) if (o[k]) c[k]++;
     c.list.push(o);
   }
@@ -1133,10 +1173,11 @@ function renderFoot() {
     `<b>「全天」单独定义、不采信系统「是否达成」标记</b>：完单量 ≥ ${state.allDay.orders} 单 <b>且</b> 有效在线时长 ≥ ${state.allDay.hours} 小时才算达标，否则计为炸班 —— 工具条「全天标准 <b>${esc(allDayLabel())}</b>」可编辑、本机记忆，改完立即重算；其余班次仍按系统标记。` +
     "空白 = 全部达成或无排班；历史明细缺达成标记、T0 未结束 / 数据未出时显示琥珀「统计中」（不算炸班）；" +
     "点击单元格看该行当天的排班班次明细（骑手 / 班次 / 完单量 / 有效在线）。<br>" +
-    "坏单 = KPI 考核运单明细 4 类问题订单筛选，另用申诉 / 违规明细（违规状态=成立、分类=差评+投诉）" +
+    "坏单 = KPI 考核运单明细 5 类问题订单（物流责 / 投诉 / 差评 / 提前点 / 非提前点索赔），另用申诉 / 违规明细（投诉 / 差评 / 索赔 / 物流责分类）" +
     "的运单号去重后逗号拼接<b>回查匹配</b>考核运单明细，两路按运单去重；" +
-    "<b>坏单标签与数量一律以考核运单明细的 4 个「是否XX单」列为准</b> —— 申诉明细的违规分类本身不算标签，" +
-    "回查命中但 4 列全「否」的单不计入坏单（避免虚高）；一个订单命中多个标签时每个标签单独计算。与运力模块同口径；" +
+    "<b>坏单标签与数量一律以考核运单明细的 5 个「是否XX单」列为准</b> —— 申诉明细的违规分类本身不算标签，" +
+    "回查命中但 5 列全「否」的单不计入坏单（避免虚高）；一个订单命中多个标签时每个标签单独计算。与运力模块同口径；" +
+    "点开明细的「违规原因」取申诉明细的 <code>violationReason</code>；索赔只算非提前点索赔。" +
     "红字「类型*N」 = 当天各类型坏单数，点击单元格看运单明细。" +
     "右侧「本月合计」= 该行整月汇总数量（点击看整月明细），表尾「合计」= 每个日期的全维度汇总；" +
     "数据优先复用运力模块已取到的整月明细（同源缓存，零重复请求），点「立即刷新」强制重拉；" +
@@ -1224,24 +1265,25 @@ function shiftPop(month, key, day) {
 }
 /** 某行某天的坏单明细：运单ID + 类型标签（多标签全列）。 */
 function badPop(month, key, day) {
-  const list = state.orders.filter((o) => entityKeyOf(o) === key && (!day || o.day === day) && (o.lgt || o.complain || o.negative || o.early));
+  const list = state.orders.filter((o) => entityKeyOf(o) === key && (!day || o.day === day) && hasKpiTag(o));
   if (!list.length) { openPop(`${day} 坏单明细`, '<div class="ql-pop-empty">该日无坏单记录</div>'); return; }
   const row = lastRows.find((r) => r.key === key);
   const name = row ? row.name : dimNameCn();
   const showRider = state.dim !== "rider";
   let html = "<table><thead><tr><th>日期</th><th class=\"lft\">运单ID</th>";
   if (showRider) html += "<th>骑手</th><th>站点</th>";
-  html += '<th class="lft">类型</th></tr></thead><tbody>';
+  html += '<th class="lft">类型</th><th class="lft">违规原因</th></tr></thead><tbody>';
   for (const o of list) {
     const chips = BAD_COLS.filter(([k]) => o[k]).map(([, n]) => `<span class="mk tp">${esc(n)}</span>`).join(" ");
     html += `<tr><td>${esc(o.day)}</td><td class="lft">${esc(o.tid)}</td>`;
     if (showRider) html += `<td>${esc(o.rname || o.rid || "—")}</td><td>${esc(o.siteName || areaOf(o.teamId, o.siteName))}</td>`;
-    html += `<td class="lft">${chips || "—"}</td></tr>`;
+    html += `<td class="lft">${chips || "—"}</td>`;
+    html += `<td class="lft ql-reason">${esc(o.reason || "—")}</td></tr>`;
   }
   html += "</tbody></table>";
   const tags = list.reduce((n, o) => n + BAD_COLS.filter(([k]) => o[k]).length, 0);
   openPop(`${name} · ${day || "整月"} 坏单明细 · ${list.length} 单 / ${tags} 个标签`, html +
-    '<div class="ql-pop-note">注：一个订单命中多个标签时，每个标签各单独计算一次。</div>');
+    '<div class="ql-pop-note">注：一个订单命中多个标签时，每个标签各单独计算一次；索赔只算非提前点索赔，违规原因取申诉明细。</div>');
 }
 function badName(k) { const f = BAD_COLS.find(([key]) => key === k); return f ? f[1] : k; }
 
@@ -1256,15 +1298,31 @@ function setView(v) {
   for (const b of document.querySelectorAll(".ql-view")) b.classList.toggle("active", b.dataset.view === v);
   renderAll();
 }
+/** v3.56.0：月份步进控件状态统一刷新（与运力模块同款交互：边界置灰 + 当前月高亮）。 */
+function syncMonthUI() {
+  const min = shiftMonth(curMonth(), -MONTHS_BACK), max = curMonth();
+  const picker = $("month-picker");
+  const prev = $("btn-prev-month"), next = $("btn-next-month"), now = $("btn-this-month");
+  picker.value = state.month;
+  picker.min = min;
+  picker.max = max;
+  prev.disabled = state.month <= min;
+  next.disabled = state.month >= max;
+  prev.title = prev.disabled ? `已到最早可查月份 ${min}` : `上一个月（${shiftMonth(state.month, -1)}）`;
+  next.title = next.disabled ? `已到当前月份 ${max}` : `下一个月（${shiftMonth(state.month, 1)}）`;
+  const isNow = state.month === curMonth();
+  if (now) {
+    now.classList.toggle("is-current", isNow);
+    now.title = isNow ? "当前已是本月" : `切回本月（${curMonth()}）`;
+  }
+}
 function setMonth(m) {
   if (!validMonth(m)) return;
   const min = shiftMonth(curMonth(), -MONTHS_BACK), max = curMonth();
   if (m < min || m > max) return;
   state.month = m;
   localStorage.setItem(LS_MONTH, m);
-  $("month-picker").value = m;
-  $("btn-prev-month").disabled = m <= min;
-  $("btn-next-month").disabled = m >= max;
+  syncMonthUI();
   loadAll();
 }
 
@@ -1301,13 +1359,18 @@ function boot() {
     if (m && m.version) $("tb-ver").textContent = "v" + m.version;
   } catch (e) { /* 测试环境 */ }
   const saved = localStorage.getItem(LS_MONTH);
-  $("month-picker").value = validMonth(saved) ? saved : curMonth();
-  $("btn-prev-month").textContent = "‹";
-  $("btn-next-month").textContent = "›";
+  state.month = validMonth(saved) ? saved : curMonth();
+  syncMonthUI();
   $("month-picker").addEventListener("change", () => setMonth($("month-picker").value));
+  $("month-picker").addEventListener("click", (e) => {
+    try { if (e.target.showPicker) e.target.showPicker(); } catch (err) { /* ignore */ }
+  });
   $("btn-prev-month").addEventListener("click", () => setMonth(shiftMonth(state.month, -1)));
   $("btn-next-month").addEventListener("click", () => setMonth(shiftMonth(state.month, 1)));
-  $("btn-this-month").addEventListener("click", () => setMonth(curMonth()));
+  $("btn-this-month").addEventListener("click", () => {
+    if (state.month === curMonth()) return;   // 已在当前月，避免重复取数
+    setMonth(curMonth());
+  });
   $("btn-refresh").addEventListener("click", () => loadAll(true));   // 强制重拉，跳过运力模块缓存
   $("allday-cfg").textContent = allDayLabel();
   $("btn-allday").addEventListener("click", openAllDayCfg);
@@ -1344,7 +1407,7 @@ function boot() {
 
 // 测试桩（离线单元回归可用 window.__QL__ 取纯函数）
 Object.assign(window.__QL__ = window.__QL__ || {}, {
-  state, parseAttSheets, parseBadRows, loadViolationTrackingIds,
+  state, parseAttSheets, parseBadRows, loadViolationTrackingIds, loadBadOrders,
   monthBounds, monthSegments, entityRows, shiftMatrix, badMatrix, entityKeyOf,
   areaOf, shiftCellHtml, badCellHtml, requestRL, riderInfoMap,
   readShared, writeShared, cellCount, popInNewTab, renderMatrixTable, titleHtml,

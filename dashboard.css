@@ -32,21 +32,32 @@ button:disabled { opacity: .55; cursor: default; }
   padding: 4px 7px; border: 1px solid #D1D5DB; border-radius: 5px;
   background: #FFFFFF; color: #1F2937; }
 /* 箭头用 CSS chevron 画，避免不同系统字体下的 ‹ › 字形差异 */
-.date-pick .date-step { width: 26px; height: 28px; flex: 0 0 26px; padding: 0;
+.date-pick .date-step { width: 30px; height: 30px; flex: 0 0 30px; padding: 0;
   display: inline-flex; align-items: center; justify-content: center;
-  border: 1px solid #D1D5DB; border-radius: 5px; background: #FFFFFF; color: #374151; }
+  border: 1px solid #D1D5DB; border-radius: 6px; background: #FFFFFF; color: #4B5563;
+  transition: background .15s, border-color .15s, color .15s, box-shadow .15s; }
 .date-pick .date-step::before { content: ""; display: block; width: 7px; height: 7px;
-  border-left: 2px solid currentColor; border-bottom: 2px solid currentColor; }
-#btn-prev-day::before { transform: rotate(45deg); }
-#btn-next-day::before { transform: rotate(-135deg); }
+  border-left: 2px solid currentColor; border-bottom: 2px solid currentColor;
+  transition: transform .15s; }
+#btn-prev-day::before, #btn-prev-month::before, #btn-prev::before { transform: rotate(45deg); }
+#btn-next-day::before, #btn-next-month::before, #btn-next::before { transform: rotate(-135deg); }
 .date-pick .date-step:hover:not(:disabled) { background: #E8F1FD;
   border-color: #93C5FD; color: #1D4ED8; }
-.date-pick .date-step:disabled { opacity: .4; }
+.date-pick .date-step:active:not(:disabled) { background: #DBEAFE; box-shadow: inset 0 1px 2px rgba(15,23,42,.12); }
+.date-pick .date-step:focus-visible { outline: 2px solid #3B82F6; outline-offset: 1px; }
+.date-pick .date-step:disabled { opacity: .38; background: #F9FAFB; cursor: not-allowed; }
 .mode-tag { font-size: 11.5px; line-height: 1; padding: 5px 9px; border-radius: 10px;
   background: #E8F1FD; color: #1D4ED8; white-space: nowrap; }
 .mode-tag.history { background: #ECFDF5; color: #047857; }
 button.date-active { background: #2F5597; color: #FFFFFF; border-color: #2F5597; }
 button.date-active:hover { background: #24457c; }
+/* 「本月 / 今天」快捷按钮：当前已在该范围时高亮，给用户一个明确落点 */
+button.date-quick { display: inline-flex; align-items: center; gap: 5px; }
+button.date-quick .dq-dot { width: 6px; height: 6px; border-radius: 50%;
+  background: #C7D2E5; transition: background .15s; }
+button.date-quick.is-current { background: #2F5597; border-color: #2F5597; color: #FFFFFF; }
+button.date-quick.is-current:hover { background: #24457C; }
+button.date-quick.is-current .dq-dot { background: #7DD3FC; }
 
 .notice { margin: 10px 18px 0; padding: 9px 12px; border-radius: 5px; font-size: 12.5px;
   line-height: 1.65; background: #FEF3E2; border: 1px solid #FCD9A8; color: #92400E; }

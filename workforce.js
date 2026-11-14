@@ -20,8 +20,8 @@
  *   5) KPI管理 → 考核数据明细 · UB考核运单明细（targetId=56740 / kpi/detail）
  *      POST xtop.performance.fs.opp.perfDetail.queryDetailList/1.0，tabCode=TRACK_UB
  *      4 个 Radio 筛选各查一次（物流责未完成单 / 不满意单_投诉单 / 不满意单_差评单 /
- *      不满意单_索赔单），按运单ID去重后读 4 个「是否XX单」列，按复合键计数
- *      → 物流责 / 投诉 / 差评 / 提前点
+ *      不满意单_索赔单），按运单ID去重后读 5 个「是否XX单」列，按复合键计数
+ *      → 物流责 / 投诉 / 差评 / 提前点 / 索赔（索赔排除提前点索赔）
  *   v3.51.0：坏单链路与质量运营完全对齐 —— 违规 / 申诉明细只做回查匹配、
  *      坏单只认考核明细 4 列（hasKpiTag / keepKpiTagged 单一真源）、
  *      写共享缓存的原始出勤行用 settledRows 过滤当天 T0。
@@ -29,13 +29,13 @@
  *      POST xtop.lpd.quality.control.violation.violationOrderAeolusCenterApi.queryList/1.0
  *      违规状态=成立、违规分类=差评+投诉，接口单次窗口 ≤2 天 → 按 2 天分段拉整月；
  *      运单号去重后逗号拼接（50 单/批）回查「匹配」考核运单明细；
- *      v3.49.0 起坏单标签一律以考核运单明细 4 个「是否XX单」列为准，
+ *      v3.49.0 起坏单标签一律以考核运单明细 5 个「是否XX单」列为准，
  *      违规分类本身不算标签、回查命中但 4 列全「否」的单不计入。
  *
  * 与另两个页面一样：直连优先、失败自动切「静默桥接」；跟随当前登录态，不依赖本地服务。
  * 前三源并行取数先出主表，后两源异步补齐（失败只让对应列显示「—」，不阻断出表）。
  * v3.16.0：账单ID 默认不在页面/导出图里显示，只在「导出 CSV」时带上。
- * v3.16.1：出勤异常 / 首跑 / 4 类坏单改按「骑手 id ＋ 站点 id」聚合，
+ * v3.16.1：出勤异常 / 首跑 / 坏单改按「骑手 id ＋ 站点 id」聚合，
  *          两个源都读「站点ID」列（与账单 teamId 同体系）；缺站点ID 时归通配键，
  *          仅当该骑手在账单里只有一个站点时才兜底采用，避免跨站串数。
  * v3.18.0：表头点击排序（升序 → 降序 → 取消）＋ 每列漏斗筛选（唯一值多选）；
@@ -56,9 +56,9 @@ const API_KPI_DETAIL = XT + "xtop.performance.fs.opp.perfDetail.queryDetailList/
 const API_VIOLATION = XT + "xtop.lpd.quality.control.violation.violationOrderAeolusCenterApi.queryList/1.0";
 const VIOL_SEG_DAYS = 2;          // 违规处罚接口硬限制：单次查询 ≤ 2 天
 const VIOL_BATCH = 50;            // 差评/投诉运单号逗号拼接批量回查考核运单明细的批次大小
-const VIOL_MAX_PAGES = 3;         // 每个 2 天段最多翻 3 页（pageSize=500，异常情况防全量翻页）
+const VIOL_MAX_PAGES = 4;         // 每个 2 天段最多翻 4 页（pageSize=500，异常情况防全量翻页）
 const API_TEAMS = XT + "xtop.lpd.intelligentConfig.getTeamsAll/1.0";
-const SHARE_LS = "wb_wf_raw_v3_";      // v3.46.0：质量运营复用运力模块整月原始明细（同源 localStorage）
+const SHARE_LS = "wb_wf_raw_v4_";      // v3.57.8：质量运营复用运力模块整月原始明细（同源 localStorage，v4 起含索赔与违规原因）
 const SCALE_LS = "wb_wf_scale_v1";        // v3.31.0：手填的规模目标 / 招募目标 / 招聘缺口 / 渠道名称
 const SCALE_LS_DAYS = "wb_wf_scale_days_v1"; // v3.34.0 两个可调统计天数；v3.35.0 增加首跑对比天数
 const SCALE_DAYS = 5;                      // 有效出勤规模默认近 5 天
@@ -109,15 +109,19 @@ const MAX_PAGES = 20;
 const SRC_LABEL = { bill: "薪资账单", staff: "人资名单", clue: "线索结果明细",
   att: "本月出勤明细", kpi: "考核运单明细", viol: "违规处罚明细" };
 
-// 考核运单明细的 4 个筛选：分别把命中的少量订单拉回来，按运单ID去重后读列值聚合。
+// 考核运单明细的筛选：分别把命中的少量订单拉回来，按运单ID去重后读列值聚合。
 // 三个 is_early_delivery_* 是「提前点送达不满意单」的下属分类，合并后正好覆盖提前点列。
+// v3.57.8：索赔单没有可用的 queryParam 筛选，改从违规处罚列表的 CLAIM 分类取运单号
+// 回查考核明细，读「是否索赔单」列；同时命中提前点的索赔单不计入索赔（避免与提前点重复）。
 const KPI_FILTERS = [
   { is_lgt_duty_incompleted_order: "1" },
   { is_early_delivery_complain_order: "1" },
   { is_early_delivery_negative_rating_order: "1" },
   { is_early_delivery_claim_order: "1" }
 ];
-const KPI_COLS = ["是否物流责取消单", "是否投诉单", "是否差评单", "是否提前点送达不满意单"];
+const KPI_COLS = ["是否物流责取消单", "是否投诉单", "是否差评单", "是否提前点送达不满意单", "是否索赔单"];
+// 违规分类 → 坏单标签：只取与坏单类型对应的分类，OVERTIME 不参与坏单原因
+const VIOL_CAT_BY_TAG = { lgt: "CANCEL", complain: "COMPLAIN", negative: "BAD_REVIEW", claim: "CLAIM", early: "COMPLAIN" };
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g,
@@ -138,7 +142,7 @@ const shiftMonth = (m, delta) => {
 };
 const validMonth = (s) => /^\d{4}-\d{2}$/.test(String(s || ""));
 
-// v3.16.1：一个骑手可能在不同站点各有一条账单。出勤异常 / 首跑 / 4 类坏单
+// v3.16.1：一个骑手可能在不同站点各有一条账单。出勤异常 / 首跑 / 坏单
 // 必须按「骑手 id + 站点 id」归集，否则 A 站的问题订单会被重复记到 B 站账单行上。
 // 两个数据源都有「站点ID」列，且与账单 teamId 是同一套 id（实测 7/7 站点全命中）。
 const normId = (v) => {
@@ -184,13 +188,14 @@ const COLS = [
   { h: "物流责", k: "lgtText", cls: "num c-flag", csv: "lgt" },
   { h: "投诉", k: "complainText", cls: "num c-flag", csv: "complain" },
   { h: "差评", k: "negativeText", cls: "num c-flag", csv: "negative" },
-  { h: "提前点", k: "earlyText", cls: "num c-flag", csv: "early" }
+  { h: "提前点", k: "earlyText", cls: "num c-flag", csv: "early" },
+  { h: "索赔", k: "claimText", cls: "num c-flag", csv: "claim" }
 ];
 const PAGE_COLS = COLS.filter((c) => c.page !== false);
 
 // v3.18.0：排序用「原始数值」而不是带 ¥ / 千分位的显示串；这些 csv 字段都是数值型。
 const NUM_CSV = new Set(["inOrders", "outOrders", "takeSep", "giveSep", "total",
-  "prepay", "bind", "bad", "lgt", "complain", "negative", "early"]);
+  "prepay", "bind", "bad", "lgt", "complain", "negative", "early", "claim"]);
 const COLLATOR = new Intl.Collator("zh-CN", { numeric: true, sensitivity: "base" });
 const LS_FROZEN = "wb_wf_frozen";
 const DEFAULT_FROZEN = ["teamId", "team"];   // 默认冻结最左两列，可在面板里任意改
@@ -236,7 +241,7 @@ const state = {
   // 三组明细统一以「骑手id \u0001 站点id」为键（站点id 缺失时用 "*" 通配）
   attBad: new Map(),        // 复合键 -> 本月除「全天」外「未达成」班次数
   attRun: new Map(),        // 复合键 -> Set(全天行完单量 > 0 的日期)
-  kpi: new Map(),           // 复合键 -> { lgt, complain, negative, early }
+  kpi: new Map(),           // 复合键 -> { lgt, complain, negative, early, claim }
   violMap: new Map(),       // v3.49.0：申诉/违规明细运单 → 仅元信息（不产生坏单标签）
   singleSiteRiders: new Set(),  // 账单里只出现一个站点的骑手，允许通配键兜底
   crossSiteRiders: 0,          // 账单里跨站点的骑手人数（仅用于页面提示）
@@ -247,7 +252,10 @@ const state = {
     // target 在 init() 里读 localStorage（常量定义在文件后半段，避免 TDZ）
     active: false, target: 16,
     sort: { key: "remainText", dir: 1 },
-    company: "", status: "", pendingOnly: false, cardFilter: "", rows: []
+    // v3.56.0：表头列筛选（k -> Set(显示值)），与骑手账单各自独立
+    colFilters: Object.create(null),
+    company: "", status: "", pendingOnly: false, cardFilter: "", riskFilter: "",
+    price: 2500, rows: []
   },
   // v3.55.0：本月出勤明细原始「全天」行（含 day / orders），供 T-3 / T-2 / T-1 单量列使用
   attRows: []
@@ -460,7 +468,7 @@ function attStatsFromSheets(sheets) {
 
 // ---------------------------------------------------------------- 考核运单明细
 // 只按 4 个 Radio 筛选拉「有问题」的订单，绝不发起不带筛选的全量运单查询
-// （本月约 6 万单、整月可达 20 万单）。multiHeaders + data 逐行读 4 个「是否XX单」列，
+// （本月约 6 万单、整月可达 20 万单）。multiHeaders + data 逐行读 5 个「是否XX单」列，
 // 按运单ID 去重后按「骑手 id + 站点 id」汇总。
 // 「提前点送达不满意单」没有独立筛选项，实测 3 个 is_early_delivery_* 子筛选的并集
 // 完整覆盖该列。
@@ -468,11 +476,11 @@ function attStatsFromSheets(sheets) {
 // 普通差评 / 投诉单会漏。改从违规处罚列表（违规状态=成立、违规分类=差评+投诉）
 // 拉整月运单号（接口单次 ≤2 天 → 按 2 天分段），去重后逗号拼接 50 单/批回查
 // 考核运单明细，把「是否投诉单 / 是否差评单」等标记与 Radio 筛选的结果取并集。
-// 解析一页考核运单明细：读 4 个「是否XX单」列，按运单ID去重合并进 seen。
+// 解析一页考核运单明细：读 5 个「是否XX单」列，按运单ID去重合并进 seen。
 // 已存在的运单取各标记的并集（max），补全路不会把 Radio 路已拿到的标记冲掉。
 /** 违规处罚 / 申诉明细 item → 仅解析元信息（v3.49.0，与质量运营同口径）。
  *  用户口径：申诉明细只提供运单号用于回查匹配考核运单明细，坏单标签一律以考核明细
- *  4 个「是否XX单」列为准；违规分类（COMPLAIN / BAD_REVIEW）不再产生任何标签。 */
+ *  5 个「是否XX单」列为准；违规分类（COMPLAIN / BAD_REVIEW）不再产生任何标签。 */
 function violationMeta(x) {
   const tid = String((x && x.trackingId) || "").trim();
   if (!tid) return null;
@@ -483,10 +491,37 @@ function violationMeta(x) {
   return {
     tid, day,
     rid: normId(ki[0] || ""), rname: ki.slice(1).join("-"),
-    teamId: normId(ti[0] || ""), siteName: ti.slice(1).join("-")
+    teamId: normId(ti[0] || ""), siteName: ti.slice(1).join("-"),
+    category: String((x && x.violationCategory) || "").toUpperCase(),
+    vtype: num(x && x.violationType),
+    status: num(x && x.violationStatus),
+    reason: String((x && x.violationReason) || "").trim()
   };
 }
-/** v3.49.0：申诉明细只补元信息，绝不产生坏单标签、绝不新建坏单行。 */
+/** v3.57.8：同一运单可能有多条违规（投诉 / 差评 / 索赔等），按分类收集违规原因。 */
+function mergeViolMeta(prev, v) {
+  if (!prev) return;
+  if (!prev.reasons) prev.reasons = {};
+  if (v.reason) {
+    const arr = prev.reasons[v.category] || (prev.reasons[v.category] = []);
+    if (!arr.includes(v.reason)) arr.push(v.reason);
+  }
+}
+/** 按坏单标签挑对应分类的违规原因（物流责→取消、投诉/提前点→投诉、差评→差评、索赔→索赔）。 */
+function violReasonOf(o, v) {
+  if (!o || !v || !v.reasons) return "";
+  const cats = [];
+  for (const k of ["lgt", "complain", "negative", "claim", "early"]) {
+    if (o[k] && VIOL_CAT_BY_TAG[k] && !cats.includes(VIOL_CAT_BY_TAG[k])) cats.push(VIOL_CAT_BY_TAG[k]);
+  }
+  const parts = [];
+  for (const cat of cats) {
+    for (const r of (v.reasons[cat] || [])) if (!parts.includes(r)) parts.push(r);
+  }
+  return parts.join("；");
+}
+/** v3.49.0：申诉明细只补元信息，绝不产生坏单标签、绝不新建坏单行。
+ *  v3.57.8：同时把违规原因挂到已命中的坏单上（所有坏单都能看具体原因）。 */
 function applyViolationMeta(seen) {
   let filled = 0;
   for (const [tid, v] of state.violMap) {
@@ -498,12 +533,16 @@ function applyViolationMeta(seen) {
     if (!cur.rname && v.rname) { cur.rname = v.rname; hit = true; }
     if (!cur.teamId && v.teamId) { cur.teamId = v.teamId; hit = true; }
     if (!cur.siteName && v.siteName) { cur.siteName = v.siteName; hit = true; }
+    if (!cur.reason) {
+      const reason = violReasonOf(cur, v);
+      if (reason) { cur.reason = reason; hit = true; }
+    }
     if (hit) filled++;
   }
   return { filled };
 }
-/** 坏单标签唯一来源 = 考核运单明细 4 列；全「否」的回查命中行不算坏单。 */
-function hasKpiTag(o) { return !!(o && (o.lgt || o.complain || o.negative || o.early)); }
+/** 坏单标签唯一来源 = 考核运单明细 5 列；全「否」的回查命中行不算坏单。 */
+function hasKpiTag(o) { return !!(o && (o.lgt || o.complain || o.negative || o.early || o.claim)); }
 function keepKpiTagged(seen) {
   let dropped = 0;
   for (const [tid, o] of seen) {
@@ -538,13 +577,16 @@ function parseKpiRows(j, seen) {
     const d8 = (iD >= 0 ? val(iD) : "").replace(/\D/g, "").slice(0, 8)
       || (iCreate >= 0 ? val(iCreate) : "").replace(/\D/g, "").slice(0, 8);
     const day = /^\d{8}$/.test(d8) ? `${d8.slice(0, 4)}-${d8.slice(4, 6)}-${d8.slice(6, 8)}` : "";
+    const early = val(iF[3]) === "是" ? 1 : 0;
     const flags = {
       rid: val(iR), teamId: iS >= 0 ? val(iS) : "",
       tid, day, rname: iName >= 0 ? val(iName) : "", siteName: iN >= 0 ? val(iN) : "",
       lgt: val(iF[0]) === "是" ? 1 : 0,
       complain: val(iF[1]) === "是" ? 1 : 0,
       negative: val(iF[2]) === "是" ? 1 : 0,
-      early: val(iF[3]) === "是" ? 1 : 0
+      early,
+      // 索赔单全量，但排除提前点索赔（已计入提前点，不重复计）
+      claim: val(iF[4]) === "是" && !early ? 1 : 0
     };
     const prev = tid && seen.get(tid);
     if (prev) {
@@ -552,6 +594,7 @@ function parseKpiRows(j, seen) {
       prev.complain = Math.max(prev.complain, flags.complain);
       prev.negative = Math.max(prev.negative, flags.negative);
       prev.early = Math.max(prev.early, flags.early);
+      prev.claim = Math.max(prev.claim, flags.claim);
       if (!prev.day && flags.day) prev.day = flags.day;
       if (!prev.rname && flags.rname) prev.rname = flags.rname;
       if (!prev.siteName && flags.siteName) prev.siteName = flags.siteName;
@@ -562,7 +605,10 @@ function parseKpiRows(j, seen) {
   return { rows: rows.length };
 }
 
-// 违规处罚列表（差评 / 投诉 · 成立）：按 2 天分段拉整月，返回去重后的运单号数组
+// 违规处罚列表（申诉明细）：按 2 天分段拉整月，返回需要回查考核明细的运单号数组。
+// v3.57.8：不再限制「成立」状态 —— 拉投诉 / 差评 / 索赔 / 物流责分类用于补「违规原因」；只有差评 / 投诉 / 索赔
+// 三类运单号会参与回查（物流责已有专用筛选，OVERTIME 不参与坏单）。
+const VIOL_SUPPLEMENT_CATS = new Set(["BAD_REVIEW", "COMPLAIN", "CLAIM"]);
 async function loadViolationTrackingIds(b) {
   const tids = new Set();
   state.violMap = new Map();
@@ -574,17 +620,17 @@ async function loadViolationTrackingIds(b) {
       const j = await request(API_VIOLATION, "POST", {
         params: { request: {
           violationStartTime: start, violationEndTime: end,
-          violationStatus: [10],                       // 10 = 成立
-          violationCategories: ["BAD_REVIEW", "COMPLAIN"],
+          // 只要与坏单相关的分类；OVERTIME 占九成且不参与坏单
+          violationCategories: ["BAD_REVIEW", "COMPLAIN", "CLAIM", "CANCEL"],
           pageNo: p, pageSize: 500
         } }
       });
       const d0 = (j && j.result && j.result.data) || {};
       const list = Array.isArray(d0.violationEventList) ? d0.violationEventList : [];
       for (const x of list) {
-        const v = violationMeta(x);       // v3.49.0：只取运单号 + 元信息，不取违规分类标签
+        const v = violationMeta(x);
         if (!v) continue;
-        tids.add(v.tid);
+        if (VIOL_SUPPLEMENT_CATS.has(v.category)) tids.add(v.tid);
         const prev = state.violMap.get(v.tid);
         if (prev) {
           if (!prev.day && v.day) prev.day = v.day;
@@ -592,8 +638,10 @@ async function loadViolationTrackingIds(b) {
           if (!prev.rname && v.rname) prev.rname = v.rname;
           if (!prev.teamId && v.teamId) prev.teamId = v.teamId;
           if (!prev.siteName && v.siteName) prev.siteName = v.siteName;
+          mergeViolMeta(prev, v);
         } else {
           state.violMap.set(v.tid, v);
+          mergeViolMeta(v, v);
         }
       }
       if (!list.length || list.length < 500 || (d0.count && p * 500 >= d0.count)) break;
@@ -648,14 +696,16 @@ async function loadKpiFlags(month) {
     .filter((v) => v.tid && v.day && hasKpiTag(v))
     .map((v) => ({ tid: v.tid, day: v.day, rid: v.rid, rname: v.rname || "",
       teamId: normId(v.teamId || ""), siteName: v.siteName || "",
-      lgt: v.lgt, complain: v.complain, negative: v.negative, early: v.early }));
+      lgt: v.lgt, complain: v.complain, negative: v.negative, early: v.early,
+      claim: v.claim || 0, reason: v.reason || "" }));
   const out = new Map();
   for (const v of seen.values()) {
     if (!v.rid) continue;
     const key = pairKey(v.rid, v.teamId);
-    const cur = out.get(key) || { lgt: 0, complain: 0, negative: 0, early: 0 };
+    const cur = out.get(key) || { lgt: 0, complain: 0, negative: 0, early: 0, claim: 0 };
     cur.lgt += v.lgt; cur.complain += v.complain;
     cur.negative += v.negative; cur.early += v.early;
+    cur.claim += v.claim || 0;
     out.set(key, cur);
   }
   return out;
@@ -725,7 +775,7 @@ function buildRows(bills, staff, clues) {
         : '<i class="mk na">否</i>',
       bindTip, staffFound: !!st,
       thirdYesRaw: hh ? "是" : "否",
-      bad: 0, firstRun: "", lgt: 0, complain: 0, negative: 0, early: 0
+      bad: 0, firstRun: "", lgt: 0, complain: 0, negative: 0, early: 0, claim: 0
     };
   });
 }
@@ -748,9 +798,11 @@ function attachDetail(rows) {
     const f = pairGet(state.kpi, rid, tid) || {};
     r.lgt = f.lgt || 0; r.complain = f.complain || 0;
     r.negative = f.negative || 0; r.early = f.early || 0;
+    r.claim = f.claim || 0;
     const kt = (n) => state.pendingKpi ? "…" : (state.kpiReady ? int(n) : "—");
     r.lgtText = kt(r.lgt); r.complainText = kt(r.complain);
     r.negativeText = kt(r.negative); r.earlyText = kt(r.early);
+    r.claimText = kt(r.claim);
   }
   return rows;
 }
@@ -761,6 +813,8 @@ function attachDetail(rows) {
  * 全部数据都来自运力模块已经取到的五份数据，切子模块零额外请求。
  *
  * 真机口径（2026-11：139 条线索 / 114 名去重骑手 / 3 家人资商）：
+ *   - v3.57.4：主表一行 = 一个结算批次（骑手 × effectiveMonth），同一骑手多个
+ *     结算月显示多行，结算金额取该批次自己的金额；人数类汇总仍按骑手去重。
  *   - effectiveRetentionDays（有效留存天数）= 达标天数
  *   - finishOrderNum（结算完单量）        = 达标单量
  *   - level（结算档位）只在 effectiveRetentionDays >= 16 时出现 → 结算达标门槛 16 天
@@ -783,12 +837,49 @@ const HR_CARDS = [
   { k: "hasOrders", h: "达标单量合计", cls: "" },
   { k: "hasBad", h: "本月异常合计", cls: "" }
 ];
+/* v3.57.0：结算预警 —— 重点是「达到结算标准前后不要走」。
+ * 风险优先级从高到低，一行只打一个主预警：
+ *   结算后 ≤7 天离职 > 结算后离职 > 离职未结算
+ *   > 待确认且有效留存 ≥7 天 > 已达标未结算 > 在职且差额 ≤5 天。
+ * 已结算 = 归因状态「成功」或「结算完成」，且结算金额 > 0；
+ * 待结算 = 归因状态「待确认」。状态「成功」但金额为 0 的按未结算处理。
+ * 只有真正已结算的离职才算「结算后离职」；其余已离职未结算的统一归到
+ * 「离职未结算」，绝不混算。 */
+const HR_SETTLED_STATES = ["成功", "结算完成"];
+const HR_PENDING_STATE = "待确认";
+const HR_SETTLED_RE = /^(成功|结算完成)$/;
+const HR_PENDING_RE = /待确认|待结算/;
+const HR_PENDING_MIN_DAYS = 7;      // 待确认且有效留存 ≥7 天开始按单价预估成本
+const HR_PRICE_LS = "wb_wf_hr_price_v1";
+const HR_PRICE_DEFAULT = 2500;      // 待结算每人单价（元），可在「待结算单价」里改
+const HR_PRICE_MIN = 1, HR_PRICE_MAX = 100000;
+const HR_RISK_ORDER = ["postLeave7", "postLeave", "leftUnsettled", "pending7", "reachedOn", "near5"];
+const HR_RISK_META = {
+  postLeave7: { h: "结算后≤7天离职", cls: "risk" },
+  postLeave: { h: "结算后离职", cls: "risk" },
+  leftUnsettled: { h: "离职未结算", cls: "risk" },
+  pending7: { h: "待结算达标", cls: "warn" },
+  reachedOn: { h: "已达标未结算", cls: "warn" },
+  near5: { h: "即将达标", cls: "warn" }
+};
+const HR_RISK_CARDS = [
+  { k: "__any", h: "预警总数", cls: "risk" },
+  { k: "pending7", h: "待结算达标", cls: "warn" },
+  { k: "leftUnsettled", h: "离职未结算", cls: "risk" },
+  { k: "reachedOn", h: "已达标未结算", cls: "warn" },
+  { k: "near5", h: "在职差≤5天", cls: "warn" },
+  { k: "postLeave7", h: "结算后≤7天离职", cls: "risk" },
+  { k: "postLeave", h: "结算后离职（累计）", cls: "risk" }
+];
 const HR_COLS = [
   { h: "人资商", k: "company", csv: "company", cls: "h-company" },
   { h: "站点", k: "team", csv: "team", cls: "h-site" },
   { h: "骑手 / id", k: "riderHtml", csv: "riderCsv", cls: "h-rider", html: true },
   { h: "是否在职", k: "onJobHtml", csv: "onJob", cls: "", html: true },
   { h: "结算剩余达标天数", k: "remainText", csv: "remain", cls: "h-remain" },
+  { h: "结算预警", k: "riskHtml", csv: "riskText", cls: "h-risk", html: true },
+  { h: "结算金额", k: "settleAmountText", csv: "settleAmount", cls: "h-money" },
+  { h: "结算月", k: "settleMonthText", csv: "settleMonth", cls: "h-ts" },
   { h: "入职时间", k: "entry", csv: "entry", cls: "h-ts" },
   { h: "离职时间", k: "leave", csv: "leave", cls: "h-ts" },
   { h: "首跑时间", k: "firstRun", csv: "firstRun", cls: "h-ts" },
@@ -804,7 +895,7 @@ const HR_COLS = [
   { h: "提前点", k: "earlyText", csv: "early", cls: "h-num" }
 ];
 const HR_NUM_CSV = new Set(["remain", "effDays", "finishOrders", "t3", "t2", "t1",
-  "bad", "lgt", "complain", "negative", "early"]);
+  "bad", "lgt", "complain", "negative", "early", "settleAmount"]);
 
 function loadHrTarget() {
   try {
@@ -816,23 +907,74 @@ function loadHrTarget() {
 function saveHrTarget(n) {
   try { localStorage.setItem(HR_LS, String(n)); } catch (e) { /* 配额不足不影响出表 */ }
 }
+function loadHrPrice() {
+  try {
+    const n = Number(localStorage.getItem(HR_PRICE_LS));
+    if (Number.isFinite(n) && n >= HR_PRICE_MIN && n <= HR_PRICE_MAX) return Math.round(n);
+  } catch (e) { /* 偏好损坏则用默认 */ }
+  return HR_PRICE_DEFAULT;
+}
+function saveHrPrice(n) {
+  try { localStorage.setItem(HR_PRICE_LS, String(n)); } catch (e) { /* ignore */ }
+}
+function hrPrice() {
+  const n = num(state.hr.price);
+  return Number.isFinite(n) && n > 0 ? n : HR_PRICE_DEFAULT;
+}
+/** 把任意时间值（"YYYY-MM-DD HH:mm:ss" / 毫秒或秒时间戳）收敛成 YYYY-MM-DD。 */
+function hrYmd(v) {
+  const t = hrTime(v);
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(t);
+  return m ? `${m[1]}-${m[2]}-${m[3]}` : "";
+}
+/** 结算日期：优先 settlementInfo 里带 date/time/day 的字段，
+ *  取不到就退回「结算月份的最后一天」，避免结算后离职天数整列空着。 */
+function hrSettleYmd(si, c) {
+  for (const k of Object.keys(si || {})) {
+    if (!/date|time|day/i.test(k)) continue;
+    const y = hrYmd(si[k]);
+    if (y) return y;
+  }
+  const m = /^(\d{4})(\d{2})$/.exec(String((c && c.effectiveMonth) || ""));
+  if (!m) return "";
+  const y = Number(m[1]), mo = Number(m[2]);
+  const last = new Date(y, mo, 0);
+  return ymdOf(last);
+}
+/** 两个 YYYY-MM-DD 相差的自然日（b - a），任一非法返回 null。 */
+function hrDayDiff(a, b) {
+  const da = parseYmd(a), db = parseYmd(b);
+  if (!da || !db) return null;
+  return Math.round((db - da) / 86400000);
+}
 /** settlementInfo 是 JSON 字符串，解析失败按空对象处理，绝不让整张表挂掉。 */
 function hrSettlement(c) {
   try { return JSON.parse(String((c && c.settlementInfo) || "{}")) || {}; }
   catch (e) { return {}; }
 }
-/** 同一骑手可能横跨多个结算批次（真机 22 人），取最新一批：结算月 → 线索 id。 */
+/** 同一骑手可能横跨多个结算批次（真机 22 人）。
+ *  v3.57.4：一个批次一行 —— 按「骑手 id + 结算月」去重，保留同月最新一条线索，
+ *  不同结算月各占一行，结算金额取该批次自己的 finalSettlementAmount。 */
 function hrClueRank(c) { return num(c && c.effectiveMonth) * 1e9 + num(c && c.id); }
+function hrClueBatchKey(c) {
+  return normId(c && c.knightId) + "|" + String((c && c.effectiveMonth) || "");
+}
 function hrClueRows() {
   const by = new Map();
   for (const c of state.clueList || []) {
     const hh = String((c && c.headHunterCompanyName) || "").trim();
     const rid = normId(c && c.knightId);
     if (!hh || !rid) continue;
-    const prev = by.get(rid);
-    if (!prev || hrClueRank(c) > hrClueRank(prev)) by.set(rid, c);
+    const key = hrClueBatchKey(c);
+    const prev = by.get(key);
+    if (!prev || hrClueRank(c) > hrClueRank(prev)) by.set(key, c);
   }
   return [...by.values()];
+}
+/** 结算月 202610 → 2026-10；取不到原样返回。 */
+function hrMonthText(v) {
+  const m = /^(\d{4})(\d{2})$/.exec(String(v || "").trim());
+  return m ? `${m[1]}-${m[2]}` : (v == null || v === "" ? "—" : String(v));
 }
 /** 人资名单 / 线索里的时间既有 "YYYY-MM-DD HH:mm:ss" 也有毫秒时间戳。 */
 function hrTime(v) {
@@ -900,10 +1042,21 @@ function hrPick(map, rid, keys, dflt) {
   }
   return dflt;
 }
-/** 是否已经结算达标：过了门槛 / 系统已出档位 / 已结算完成且有金额。 */
+/** 结算状态串：线索自己的优先，其次 settlementInfo 里的同义字段。 */
+function hrSettleStateOf(c, si) {
+  return String((c && c.attributionStateDesc)
+    || (si && si.attributionStateDesc) || (si && si.attributionState) || "").trim();
+}
+/** 是否已经结算达标：过了门槛 / 系统已出档位 / 已结算完成且有金额。
+ *  v3.57.6：归因状态「成功 / 结算完成」= 账单已确认，若金额为 0 则确认不达标，
+ *  不再拿达标天数或档位反推「已达标」。 */
 function hrReached(c, effDays, target, si) {
   const amount = num(c.finalSettlementAmount != null
     ? c.finalSettlementAmount : si.finalSettlementAmount);
+  const state = hrSettleStateOf(c, si);
+  const pending = HR_PENDING_RE.test(state);
+  const finalized = !pending && HR_SETTLED_RE.test(state);
+  if (finalized) return amount > 0;
   return effDays >= target || c.level != null
     || (String(c.attributionStateDesc || "").trim() === "结算完成" && amount > 0);
 }
@@ -930,11 +1083,65 @@ function hrBuildRows() {
     const onJob = workStatus === 1 ? "是" : (workStatus === 2 ? "否" : "—");
     const effDays = num(c.effectiveRetentionDays);
     const finishOrders = num(c.finishOrderNum);
-    const settleState = String(c.attributionStateDesc || "").trim();
-    const settleAmount = num(c.finalSettlementAmount != null
-      ? c.finalSettlementAmount : si.finalSettlementAmount);
+    const settleState = hrSettleStateOf(c, si);
+    const settleAmountRaw = c.finalSettlementAmount != null
+      ? c.finalSettlementAmount : si.finalSettlementAmount;
+    const settleAmount = num(settleAmountRaw);
+    // 待确认优先；「成功 / 结算完成」且金额 >0 才算真正已结算。
+    // 真机上大量归因状态「成功」但金额 ¥0 的骑手其实还没结算，不能算结算后离职。
+    const pending = HR_PENDING_RE.test(settleState);
+    const settledState = !pending && HR_SETTLED_RE.test(settleState);
+    const settled = settledState && settleAmount > 0;
+    // v3.57.6：账单已确认（成功 / 结算完成）但金额 0 → 确认不达标
+    const notQualified = settledState && !settled;
+    const isLeft = onJob === "否" || (onJob !== "是" && !!leaveYmd);
     const reached = hrReached(c, effDays, target, si);
     const remain = reached ? 0 : Math.max(0, target - effDays);
+    const entryYmd = hrYmd(st && st.entryTime != null ? st.entryTime : c.entryTime);
+    const leaveYmd = hrYmd(st && st.leaveTime != null ? st.leaveTime : c.leaveTime);
+    const settleYmd = hrSettleYmd(si, c);
+    const postSettleDays = (settled && leaveYmd && settleYmd)
+      ? hrDayDiff(settleYmd, leaveYmd) : null;
+    // 严格口径：只有「真正已结算（状态成功/结算完成且金额>0）且已离职」才算结算后离职
+    const postLeave = settled && isLeft;
+    const postLeave7 = postLeave && postSettleDays != null && postSettleDays <= 7;
+    const leftUnsettled = isLeft && !settled;
+    // 结算预警：一行只给一个最需要跟的主状态，优先级见 HR_RISK_ORDER
+    let riskKey = "";
+    if (postLeave) {
+      riskKey = postLeave7 ? "postLeave7" : "postLeave";
+    } else if (leftUnsettled) {
+      riskKey = "leftUnsettled";
+    } else if (pending && effDays >= HR_PENDING_MIN_DAYS) {
+      riskKey = "pending7";
+    } else if (onJob === "是" && !settled && reached) {
+      riskKey = "reachedOn";
+    } else if (onJob === "是" && !notQualified && !reached && remain <= HR_NEAR_DAYS) {
+      riskKey = "near5";
+    }
+    const riskMeta = HR_RISK_META[riskKey];
+    const riskRank = riskKey ? HR_RISK_ORDER.indexOf(riskKey) + 1 : 99;
+    const riskText = riskKey === "near5" ? `即将达标（差 ${remain} 天）`
+      : (riskMeta ? riskMeta.h : "—");
+    const riskHtml = riskKey
+      ? `<i class="mk ${riskMeta.cls}">${esc(riskText)}</i>`
+      : '<i class="mk na">—</i>';
+    const riskTip = riskKey
+      ? (riskKey === "postLeave7" || riskKey === "postLeave"
+        ? `已结算后离职：结算 ${settleYmd || "—"}，离职 ${leaveYmd || "—"}`
+          + (postSettleDays != null ? `（结算后 ${postSettleDays} 天）` : "")
+          + `；归因状态 ${settleState || "—"}，金额 ¥${settleAmount}`
+        : riskKey === "leftUnsettled"
+          ? `归因状态 ${settleState || "—"}${notQualified ? "（账单已确认、不达标）" : ""}`
+            + `，结算金额 ¥0，未真正结算但已离职，不能算结算后离职；有效留存 ${effDays} 天`
+        : riskKey === "pending7"
+          ? `归因状态待确认且有效留存 ${effDays} 天 ≥ ${HR_PENDING_MIN_DAYS} 天，`
+            + `按待结算单价预估成本，别在结算前流失`
+          : riskKey === "reachedOn"
+            ? `有效留存 ${effDays} 天已达标但账单还没确认，离职就白招了`
+            : `在职，离结算标准还差 ${remain} 天（≤${HR_NEAR_DAYS} 天）`)
+      : "无结算流失风险";
+
     const runDays = hrPick(state.attRun, rid, keys, null);
     const firstRun = runDays && runDays.size ? [...runDays].sort()[0] : "";
     const bad = num(hrPick(state.attBad, rid, keys, 0));
@@ -966,16 +1173,33 @@ function hrBuildRows() {
       negative: num(f.negative), negativeText: kt(num(f.negative)),
       early: num(f.early), earlyText: kt(num(f.early)),
       remain, reached, settleState, settleAmount,
+      settleAmountText: settled ? money(settleAmount) : "—",
       settleMonth: String(c.effectiveMonth || ""),
+      settleMonthText: hrMonthText(c.effectiveMonth),
       level: c.level == null ? "" : String(c.level),
-      remainText: reached ? (settleState === "结算完成" ? "已结算" : "已达标") : int(remain),
-      remainCls: reached ? "is-ok" : (onJob === "否" ? "is-risk"
-        : (remain <= HR_NEAR_DAYS ? "is-near" : "")),
-      remainTip: reached
-        ? `已达标：达标天数 ${effDays} 天 ≥ 结算标准 ${target} 天` +
-          `（结算状态 ${settleState || "—"}，档位 ${c.level == null ? "—" : c.level}）`
-        : `结算标准 ${target} 天 − 已达标 ${effDays} 天 = 还需 ${remain} 天` +
-          `（结算状态 ${settleState || "—"}；门槛可在「结算标准」里修改）`
+      // v3.57.0：结算分析 / 预警用原始口径字段
+      settled, pending, settledState, notQualified, isLeft, postLeave, postLeave7, leftUnsettled,
+      entryYmd, leaveYmd, settleYmd, postSettleDays,
+      riskKey, riskText, riskHtml, riskRank, riskTip,
+      // v3.57.5：只有真正已结算（金额 > 0）才写「已结算」，金额 0 一律写「已达标」
+      // v3.57.6：账单已确认（成功 / 结算完成）且金额 0 → 写「未达标」
+      remainText: settled ? "已结算" : notQualified ? "未达标"
+        : reached ? "已达标" : int(remain),
+      remainCls: reached ? "is-ok" : notQualified ? "is-risk"
+        : (onJob === "否" ? "is-risk"
+          : (remain <= HR_NEAR_DAYS ? "is-near" : "")),
+      remainTip: settled
+        ? `已结算：达标天数 ${effDays} 天 ≥ 结算标准 ${target} 天`
+          + `（金额 ${money(settleAmount)}，系统状态 ${settleState || "—"}`
+          + `，档位 ${c.level == null ? "—" : c.level}）`
+        : notQualified
+          ? `已确认不达标：系统账单状态 ${settleState || "—"} 已确认，结算金额 ¥0，本月不结算`
+            + `（达标天数 ${effDays} 天，档位 ${c.level == null ? "—" : c.level}）`
+          : reached
+            ? `已达标但未结算：达标天数 ${effDays} 天 ≥ 结算标准 ${target} 天`
+              + `（系统状态 ${settleState || "—"}，档位 ${c.level == null ? "—" : c.level}）`
+            : `结算标准 ${target} 天 − 已达标 ${effDays} 天 = 还需 ${remain} 天` +
+              `（系统状态 ${settleState || "—"}，未结算；门槛可在「结算标准」里修改）`
     });
   }
   return out;
@@ -983,6 +1207,8 @@ function hrBuildRows() {
 /** 默认排序：未达标的按「还差几天」升序（快达标的在最前），已达标沉底。 */
 function hrSortVal(r, c) {
   if (c.k === "remainText") return r.reached ? 1e6 : r.remain;
+  if (c.k === "riskHtml") return r.riskRank;
+  if (c.k === "settleAmountText") return r.settleAmount;
   if (c.k === "onJobHtml") return r.onJob;
   if (c.k === "riderHtml") return r.riderName;
   return r[c.k];
@@ -1005,18 +1231,42 @@ function hrCardMatch(r, f) {
     case "onJob": return r.onJob === "是";
     case "reached": return !!r.reached;
     case "pending": return !r.reached;
-    case "near5": return !r.reached && r.remain <= HR_NEAR_DAYS;
+    case "near5": return !r.reached && !r.notQualified && r.remain <= HR_NEAR_DAYS;
     case "leftPending": return !r.reached && r.onJob === "否";
     case "hasOrders": return num(r.finishOrders) > 0;
     case "hasBad": return num(r.bad) > 0;
     default: return true;
   }
 }
+/** v3.57.0：结算预警卡片筛选。postLeave 是累计口径（含 ≤7 天离职）。 */
+function hrRiskMatch(r, f) {
+  if (!f) return true;
+  if (f === "__any") return !!r.riskKey;
+  if (f === "postLeave") return r.riskKey === "postLeave" || r.riskKey === "postLeave7";
+  return r.riskKey === f;
+}/** 单元格纯文本值：列筛选候选值、筛选比较、导出口径共用。 */
+function hrCellText(r, c) {
+  if (!r || !c) return "";
+  if (c.k === "onJobHtml") return r.onJob || "—";
+  if (c.k === "riderHtml") return r.riderName || "";
+  if (c.k === "riskHtml") return r.riskText || "—";
+  const v = r[c.k];
+  return v == null ? "" : String(v);
+}
+function hrActiveFilterCount() {
+  return Object.keys(state.hr.colFilters || {}).length;
+}
+/** 工具条筛选（人资商 / 结算状态 / 站点 / 搜索 / 卡片）＋ 列筛选。
+ *  exceptKey：算某列筛选候选值时排除该列自身，做法同 Excel。 */
 function hrVisibleRows(opts) {
   const q = String(state.query || "").trim().toLowerCase();
   const site = String(state.site || "");
   const h = state.hr;
   const skipCard = !!(opts && opts.skipCard);
+  const skipRisk = !!(opts && opts.skipRisk);
+  const exceptKey = (opts && opts.exceptKey) || "";
+  const colFilters = Object.entries(h.colFilters || {})
+    .filter(([k, set]) => set && set.size && k !== exceptKey);
   const rows = (h.rows || []).filter((r) => {
     if (h.company && r.company !== h.company) return false;
     if (h.status && r.settleState !== h.status) return false;
@@ -1025,10 +1275,42 @@ function hrVisibleRows(opts) {
     if (q && !`${r.riderName} ${r.riderId} ${r.team} ${r.company} ${r.settleState}`
       .toLowerCase().includes(q)) return false;
     if (!skipCard && h.cardFilter && !hrCardMatch(r, h.cardFilter)) return false;
+    if (!skipRisk && h.riskFilter && !hrRiskMatch(r, h.riskFilter)) return false;
+    for (const [k, set] of colFilters) {
+      const c = HR_COLS.find((x) => x.k === k);
+      if (!c) continue;
+      if (!set.has(hrCellText(r, c))) return false;
+    }
     return true;
   });
   if (h.sort.key && h.sort.dir) rows.sort((a, b) => hrCompare(a, b, h.sort.key, h.sort.dir));
   return rows;
+}
+/** 某列筛选取值及出现次数；数值列按数值排，空值恒排最后。 */
+function hrColValues(key) {
+  const c = HR_COLS.find((x) => x.k === key);
+  if (!c) return [];
+  const m = new Map();
+  for (const r of hrVisibleRows({ exceptKey: key })) {
+    const v = hrCellText(r, c);
+    m.set(v, (m.get(v) || 0) + 1);
+  }
+  const emptyLast = (v) => EMPTY_CELL.has(String(v).trim()) ? 1 : 0;
+  const numeric = HR_NUM_CSV.has(c.csv) || c.k === "remainText";
+  const numOf = (v) => {
+    const s = String(v).replace(/[^\d.-]/g, "");
+    return s === "" ? null : Number(s);
+  };
+  return [...m].sort((a, b) => {
+    if (emptyLast(a[0]) !== emptyLast(b[0])) return emptyLast(a[0]) - emptyLast(b[0]);
+    if (!numeric) return COLLATOR.compare(a[0], b[0]);
+    const na = numOf(a[0]), nb = numOf(b[0]);
+    // 「已达标 / 已结算」这类非数值状态排在数字之后，避免混在 0 天附近
+    if (na === null && nb === null) return COLLATOR.compare(a[0], b[0]);
+    if (na === null) return 1;
+    if (nb === null) return -1;
+    return na - nb;
+  });
 }
 function hrSetCardFilter(f) {
   const h = state.hr;
@@ -1050,14 +1332,21 @@ function renderHrCompanyOptions() {
 function renderHrSummary(base, visible) {
   const rows = base || [];
   const all = state.hr.rows || [];
-  const on = rows.filter((r) => r.onJob === "是").length;
-  const reached = rows.filter((r) => r.reached).length;
-  const pending = rows.length - reached;
-  const near = rows.filter((r) => !r.reached && r.remain <= HR_NEAR_DAYS).length;
-  const leftPending = rows.filter((r) => !r.reached && r.onJob === "否").length;
-  const sum = (k) => rows.reduce((a, r) => a + num(r[k]), 0);
+  // v3.57.4：一行 = 一个结算批次，概览卡片按「骑手」去重计数，避免多批次骑手被算两次
+  const uniq = (list) => {
+    const m = new Map();
+    for (const r of list) if (!m.has(r.riderId)) m.set(r.riderId, r);
+    return [...m.values()];
+  };
+  const riders = uniq(rows);
+  const on = riders.filter((r) => r.onJob === "是").length;
+  const reached = riders.filter((r) => r.reached).length;
+  const pending = riders.length - reached;
+  const near = riders.filter((r) => !r.reached && !r.notQualified && r.remain <= HR_NEAR_DAYS).length;
+  const leftPending = riders.filter((r) => !r.reached && r.onJob === "否").length;
+  const sum = (k) => riders.reduce((a, r) => a + num(r[k]), 0);
   const values = {
-    all: int(rows.length), onJob: int(on), reached: int(reached), pending: int(pending),
+    all: int(riders.length), onJob: int(on), reached: int(reached), pending: int(pending),
     near5: int(near), leftPending: int(leftPending),
     hasOrders: int(sum("finishOrders")), hasBad: int(sum("bad"))
   };
@@ -1069,7 +1358,7 @@ function renderHrSummary(base, visible) {
   const companies = new Set(all.map((r) => r.company).filter(Boolean)).size;
   const days = hrBaseDay();
   const bits = [
-    `共 <b>${int(all.length)}</b> 名三方人资骑手（${int(companies)} 家人资商），当前筛选显示 <b>${int((visible || rows).length)}</b> 名`,
+    `共 <b>${int(uniq(all).length)}</b> 名三方人资骑手 / <b>${int(all.length)}</b> 条结算批次（${int(companies)} 家人资商），当前筛选显示 <b>${int(uniq(visible || rows).length)}</b> 名 / <b>${int((visible || rows).length)}</b> 条`,
     `结算达标门槛 <b>${int(state.hr.target)}</b> 天`,
     `T-3 / T-2 / T-1 实际日期 ${days.t3} / ${days.t2} / ${days.t1}`
       + (days.shifted ? "（出勤明细结算滞后，已按最近有数据日回退）" : "")
@@ -1078,9 +1367,226 @@ function renderHrSummary(base, visible) {
     const card = HR_CARDS.find((c) => c.k === state.hr.cardFilter);
     bits.push(`卡片筛选 <b>${esc(card ? card.h : state.hr.cardFilter)}</b>（再点该卡片取消）`);
   }
+  if (state.hr.riskFilter) {
+    const card = HR_RISK_CARDS.find((c) => c.k === state.hr.riskFilter);
+    bits.push(`预警筛选 <b>${esc(card ? card.h : state.hr.riskFilter)}</b>（再点该卡片取消）`);
+  }
+  const activeCols = Object.keys(state.hr.colFilters || {});
+  if (activeCols.length) {
+    const names = activeCols.map((k) => {
+      const c = HR_COLS.find((x) => x.k === k);
+      return c ? c.h : k;
+    });
+    bits.push(`列筛选 <b>${int(activeCols.length)}</b> 列（${esc(names.join("、"))}，可点表头 ▾ 调整）`);
+  }
   if (!state.attReady) bits.push("本月出勤明细未取到，班次异常数 / 首跑时间 / T-1~T-3 显示「—」");
-  if (!state.kpiReady) bits.push("考核运单明细未取到，4 类坏单显示「—」");
+  if (!state.kpiReady) bits.push("考核运单明细未取到，5 类坏单显示「—」");
   $("hr-note").innerHTML = bits.join("　·　");
+}
+/** v3.57.0：结算预警卡片。数字基于「工具条筛选后、不含卡片 / 预警筛选」的集合，
+ *  这样点某张预警卡片后其它卡片数字不会跳。 */
+function hrSetRiskFilter(f) {
+  const h = state.hr;
+  h.riskFilter = (!f || h.riskFilter === f) ? "" : f;
+  renderHr();
+}
+function renderHrRisk(base) {
+  const box = $("hr-risk");
+  if (!box) return;
+  const rows = base || [];
+  const cur = state.hr.riskFilter || "";
+  // v3.57.4：按骑手去重计数，同一骑手多个结算批次只算 1 人
+  const count = (k) => {
+    const set = new Set();
+    for (const r of rows) if (hrRiskMatch(r, k)) set.add(r.riderId);
+    return set.size;
+  };
+  box.innerHTML = HR_RISK_CARDS.map((c) =>
+    `<button type="button" class="wf-card hr-card ${c.cls}${cur === c.k ? " active" : ""}"`
+    + ` data-hr-risk="${c.k}" title="点击按「${esc(c.h)}」筛选，再点一次取消">`
+    + `<span class="k">${esc(c.h)}</span><span class="v">${esc(int(count(c.k)))}</span></button>`).join("");
+}
+/** v3.57.0：按人资商结算分析。
+ *  已结算 = 归因状态「成功 / 结算完成」且结算金额 > 0；待结算 = 归因状态「待确认」。
+ *  已结算单均成本 = 已结算金额 ÷（已结算骑手总单量 + 未结算且已离职骑手单量）
+ *  待结算单均成本 =（待确认且有效留存 ≥7 天人数 × 待结算单价）÷ 待确认骑手总单量 */
+const HR_AN_COLS = [
+  { h: "人资商", k: "company", cls: "h-company" },
+  { h: "推荐", k: "rec", cls: "h-num", tip: "线索结果明细里该人资商的推荐记录数（同一骑手多批次会重复计）" },
+  { h: "入职", k: "join", cls: "h-num", tip: "去重骑手里有入职时间的人数" },
+  { h: "离职", k: "left", cls: "h-num", tip: "成员管理里 workStatus=2（离职）的去重骑手数" },
+  { h: "在职", k: "onJob", cls: "h-num", tip: "成员管理里 workStatus=1（在职）的去重骑手数" },
+  { h: "离职率", k: "leaveRate", cls: "h-num", tip: "离职 ÷ 入职" },
+  { h: "已结算人数", k: "settledCount", cls: "h-num", tip: "任一批次归因状态 = 成功 / 结算完成且金额 > 0 的去重骑手数" },
+  { h: "结算金额", k: "settleAmount", cls: "h-money", tip: "所有已结算批次 finalSettlementAmount 合计（同一骑手多个结算月全部计入）" },
+  { h: "总订单量", k: "orders", cls: "h-num", tip: "所有结算批次 finishOrderNum 合计（含已结算 + 未结算）" },
+  { h: "单均招募成本", k: "avgCost", cls: "h-money", tip: "结算金额 ÷ 总订单量" },
+  { h: "已结算单均成本", k: "settledCost", cls: "h-money", tip: "结算金额 ÷（已结算骑手总单量 + 未结算且已离职骑手单量）" },
+  { h: "待确认人数", k: "pendingCount", cls: "h-num", tip: "归因状态 = 待确认" },
+  { h: "待确认≥7天", k: "pending7", cls: "h-num", tip: `待确认且有效留存天数 ≥ ${HR_PENDING_MIN_DAYS} 的人数` },
+  { h: "待确认订单", k: "pendingOrders", cls: "h-num", tip: "归因状态 = 待确认骑手的 finishOrderNum 合计" },
+  { h: "待结算预估", k: "pendingEstimate", cls: "h-money", tip: "待确认且有效留存 ≥7 天人数 × 待结算单价" },
+  { h: "待结算单均成本", k: "pendingCost", cls: "h-money", tip: "（待确认≥7天人数 × 待结算单价）÷ 待确认订单" },
+  { h: "结算后离职", k: "postLeave", cls: "h-num h-risk-num", tip: "真正已结算（成功 / 结算完成且金额 > 0）且已离职的骑手数（含 ≤7 天离职）；待确认或金额 ¥0 的离职不计入" },
+  { h: "其中≤7天", k: "postLeave7", cls: "h-num h-risk-num", tip: "已结算后 7 天内离职的骑手数" },
+  { h: "离职未结算", k: "leftUnsettled", cls: "h-num h-risk-num", tip: "已离职但没真正结算（待确认，或状态成功但金额为 0）的骑手数；不计入结算后离职" },
+  { h: "已达标未结算", k: "reachedOn", cls: "h-num", tip: "未出结算结果的在职骑手（已达标但账单还没确认），最需要盯" }
+];
+const HR_AN_MONEY = new Set(["settleAmount", "avgCost", "settledCost", "pendingEstimate", "pendingCost"]);
+function hrCompanyStats() {
+  const rows = state.hr.rows || [];
+  const recBy = new Map();
+  const seenRec = new Set();
+  for (const c of state.clueList || []) {
+    const hh = String((c && c.headHunterCompanyName) || "").trim();
+    const rid = normId(c && c.knightId);
+    if (!hh || !rid) continue;
+    // v3.57.4：按「骑手 + 结算月」去重，与主表的批次数保持一致
+    const key = hh + "|" + hrClueBatchKey(c);
+    if (seenRec.has(key)) continue;
+    seenRec.add(key);
+    recBy.set(hh, (recBy.get(hh) || 0) + 1);
+  }
+  const blank = (name) => ({ company: name, rec: 0, join: 0, left: 0, onJob: 0,
+    settledCount: 0, settleAmount: 0, orders: 0, settledOrders: 0, leftUnsettledOrders: 0,
+    pendingCount: 0, pending7: 0, pendingOrders: 0, postLeave: 0, postLeave7: 0,
+    leftUnsettled: 0, reachedOn: 0 });
+  const by = new Map();
+  for (const [name, n] of recBy) { const m = blank(name); m.rec = n; by.set(name, m); }
+  // v3.57.4：主表一行 = 一个结算批次，人数类指标按「骑手」去重；金额 / 订单按批次累加
+  const sets = new Map();
+  const setsOf = (name) => {
+    if (!sets.has(name)) sets.set(name, {
+      join: new Set(), left: new Set(), onJob: new Set(), settled: new Set(),
+      pending: new Set(), pending7: new Set(), postLeave: new Set(),
+      postLeave7: new Set(), leftUnsettled: new Set(), reachedOn: new Set()
+    });
+    return sets.get(name);
+  };
+  for (const r of rows) {
+    const name = r.company || "（未填人资商）";
+    if (!by.has(name)) by.set(name, blank(name));
+    const m = by.get(name);
+    const s = setsOf(name);
+    const rid = r.riderId;
+    if (r.entryYmd) s.join.add(rid);
+    if (r.isLeft) s.left.add(rid);
+    if (r.onJob === "是") s.onJob.add(rid);
+    m.orders += num(r.finishOrders);
+    if (r.settled) {
+      s.settled.add(rid);
+      m.settleAmount += num(r.settleAmount);
+      m.settledOrders += num(r.finishOrders);
+    }
+    if (!r.settled && r.isLeft) m.leftUnsettledOrders += num(r.finishOrders);
+    if (r.pending) {
+      s.pending.add(rid);
+      m.pendingOrders += num(r.finishOrders);
+      if (num(r.effDays) >= HR_PENDING_MIN_DAYS) s.pending7.add(rid);
+    }
+    // 严格按「已结算 且 已离职」统计；待确认离职单独计数，绝不并入结算后离职
+    if (r.postLeave) s.postLeave.add(rid);
+    if (r.postLeave7) s.postLeave7.add(rid);
+    if (r.leftUnsettled) s.leftUnsettled.add(rid);
+    if (r.riskKey === "reachedOn") s.reachedOn.add(rid);
+  }
+  for (const m of by.values()) {
+    const s = setsOf(m.company);
+    m.join = s.join.size;
+    m.left = s.left.size;
+    m.onJob = s.onJob.size;
+    m.settledCount = s.settled.size;
+    m.pendingCount = s.pending.size;
+    m.pending7 = s.pending7.size;
+    m.postLeave = s.postLeave.size;
+    m.postLeave7 = s.postLeave7.size;
+    m.leftUnsettled = s.leftUnsettled.size;
+    m.reachedOn = s.reachedOn.size;
+  }
+  const price = hrPrice();
+  for (const m of by.values()) {
+    m.settledCost = m.settledCount > 0 && (m.settledOrders + m.leftUnsettledOrders) > 0
+      ? m.settleAmount / (m.settledOrders + m.leftUnsettledOrders) : null;
+    m.pendingEstimate = m.pending7 * price;
+    m.pendingCost = m.pendingOrders > 0 ? m.pendingEstimate / m.pendingOrders : null;
+    m.avgCost = m.settledCount > 0 && m.orders > 0 ? m.settleAmount / m.orders : null;
+    m.leaveRate = m.join > 0 ? m.left / m.join : null;
+  }
+  return [...by.values()].sort((a, b) => b.rec - a.rec || COLLATOR.compare(a.company, b.company));
+}
+function hrAnalysisTotals(list) {
+  const keys = ["rec", "join", "left", "onJob", "settledCount", "settleAmount", "orders",
+    "settledOrders", "leftUnsettledOrders", "pendingCount", "pending7", "pendingOrders",
+    "postLeave", "postLeave7", "leftUnsettled", "reachedOn"];
+  const t = { company: `合计（${int((list || []).length)} 家人资商）` };
+  for (const k of keys) t[k] = (list || []).reduce((a, m) => a + num(m[k]), 0);
+  const price = hrPrice();
+  t.settledCost = t.settledCount > 0 && (t.settledOrders + t.leftUnsettledOrders) > 0
+    ? t.settleAmount / (t.settledOrders + t.leftUnsettledOrders) : null;
+  t.pendingEstimate = t.pending7 * price;
+  t.pendingCost = t.pendingOrders > 0 ? t.pendingEstimate / t.pendingOrders : null;
+  t.avgCost = t.settledCount > 0 && t.orders > 0 ? t.settleAmount / t.orders : null;
+  t.leaveRate = t.join > 0 ? t.left / t.join : null;
+  return t;
+}
+function hrAnCell(m, c) {
+  const v = m[c.k];
+  if (c.k === "company") return esc(String(v || ""));
+  if (c.k === "leaveRate") return v == null ? "—" : (v * 100).toFixed(1) + "%";
+  if (HR_AN_MONEY.has(c.k)) return v == null || !Number.isFinite(v) ? "—" : money(v);
+  return int(v);
+}
+function renderHrAnalysis() {
+  const t = $("hr-analysis-table");
+  if (!t) return;
+  const list = hrCompanyStats();
+  const total = hrAnalysisTotals(list);
+  const head = "<thead><tr>" + HR_AN_COLS.map((c) =>
+    `<th class="${c.cls}" title="${esc(c.tip || c.h)}">${esc(c.h)}</th>`).join("") + "</tr></thead>";
+  const body = ["<tbody>"];
+  if (!list.length) {
+    body.push(`<tr class="hr-empty"><td colspan="${HR_AN_COLS.length}">暂无三方人资数据</td></tr>`);
+  }
+  for (const m of list) {
+    body.push("<tr>" + HR_AN_COLS.map((c) =>
+      `<td class="${c.cls}">${hrAnCell(m, c)}</td>`).join("") + "</tr>");
+  }
+  if (list.length) {
+    body.push('<tr class="hr-total">' + HR_AN_COLS.map((c) =>
+      `<td class="${c.cls}">${hrAnCell(total, c)}</td>`).join("") + "</tr>");
+  }
+  body.push("</tbody>");
+  t.innerHTML = head + body.join("");
+  const note = $("hr-analysis-note");
+  if (note) {
+    note.innerHTML = `已结算 = 归因状态「成功 / 结算完成」且结算金额 > 0，待结算 = 归因状态「待确认」；账单已确认但金额为 ¥0 的按不达标处理（不计入已结算 / 已达标）。`
+      + `「结算后离职」只统计真正已结算且已离职的骑手；已离职但未真正结算的统一计入「离职未结算」，不混算。`
+      + `已结算单均成本 = 结算金额 ÷（已结算骑手总单量 + 未结算且已离职骑手单量）；`
+      + `待结算单均成本 =（待确认且有效留存 ≥${HR_PENDING_MIN_DAYS} 天人数 × 待结算单价 `
+      + `<b>${money(hrPrice())}</b>）÷ 待确认骑手订单量。`
+      + `本表按全量 ${int(new Set((state.hr.rows || []).map((r) => r.riderId)).size)} 名三方骑手 / `
+      + `${int((state.hr.rows || []).length)} 条结算批次计算，不随上方表格的搜索 / 筛选变化；`
+      + `人数类指标按骑手去重，结算金额按批次累加。`;
+  }
+}
+function hrExportAnalysisCsv() {
+  const list = hrCompanyStats();
+  const total = hrAnalysisTotals(list);
+  const head = HR_AN_COLS.map((c) => c.h);
+  const line = (m) => HR_AN_COLS.map((c) => {
+    const v = m[c.k];
+    if (c.k === "leaveRate") return csvCell(v == null ? "" : (v * 100).toFixed(2) + "%");
+    if (HR_AN_MONEY.has(c.k)) return csvCell(v == null ? "" : Number(v).toFixed(2));
+    return csvCell(c.k === "company" ? v : int(v));
+  }).join(",");
+  const text = [head.map(csvCell).join(","), ...list.map(line), line(total)].join("\r\n");
+  const blob = new Blob(["\ufeff" + text], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = `风神人资商结算分析_${state.month.replace("-", "")}.csv`;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  showNotice(`已导出 ${list.length} 家人资商的结算分析 CSV。`, "blue");
 }
 function renderHrTable(rows) {
   const t = $("hr-table");
@@ -1090,9 +1596,12 @@ function renderHrTable(rows) {
   const head = "<thead><tr>" + HR_COLS.map((c) => {
     const cls = (h.sort.key === c.k && h.sort.dir === 1) ? " sort-asc"
       : (h.sort.key === c.k && h.sort.dir === -1) ? " sort-desc" : "";
-    const tip = `${c.h}${dayOf[c.k] ? `（实际日期 ${dayOf[c.k]}）` : ""}：点击表头按此列排序（升序 → 降序 → 取消）`;
-    return `<th class="${cls.trim()}" data-hsort="${esc(c.k)}"`
-      + ` title="${esc(tip)}">${esc(c.h)}</th>`;
+    const filtered = h.colFilters[c.k] ? " filtered" : "";
+    const tip = `${c.h}${dayOf[c.k] ? `（实际日期 ${dayOf[c.k]}）` : ""}：点击表头排序（升序 → 降序 → 取消）；点右侧 ▾ 按此列筛选`;
+    return `<th class="${cls.trim()}${filtered}" data-hsort="${esc(c.k)}"`
+      + ` title="${esc(tip)}">${esc(c.h)}`
+      + `<button type="button" class="wf-th-filter" data-hfilter="${esc(c.k)}"`
+      + ` aria-label="按${esc(c.h)}筛选" title="按「${esc(c.h)}」筛选"></button></th>`;
   }).join("") + "</tr></thead>";
   const body = ["<tbody>"];
   if (!rows.length) {
@@ -1110,34 +1619,51 @@ function renderHrTable(rows) {
       const hot = !c.html && /^(badText|lgtText|complainText|negativeText|earlyText)$/.test(c.k)
         && num(raw) > 0;
       const cls = [c.cls, isEmpty ? "h-empty" : "", hot ? "h-hot" : ""].filter(Boolean).join(" ");
-      const title = c.k === "company" ? ` title="${esc(r.company)}"` : "";
+      const title = c.k === "company" ? ` title="${esc(r.company)}"`
+        : c.k === "riskHtml" ? ` title="${esc(r.riskTip || "")}"`
+        : c.k === "settleAmountText" ? ` title="${esc(r.settled
+          ? `归因状态 ${r.settleState}，结算金额 ${r.settleAmountText}`
+          : `归因状态 ${r.settleState || "—"}，未结算不显示金额`)}"`
+        : c.k === "settleMonthText" ? ` title="该结算批次的月份（金额只算这一批）"`
+        : "";
       return `<td class="${cls}"${title}>${txt}</td>`;
     }).join("") + "</tr>");
   }
   if (rows.length) {
     const sum = (k) => int(rows.reduce((a, r) => a + num(r[k]), 0));
+    // 班次异常 / 坏单 / T-3~T-1 是「骑手 × 本月」口径，多个结算批次会重复，合计按骑手去重
+    const uniq = new Map();
+    for (const r of rows) if (!uniq.has(r.riderId)) uniq.set(r.riderId, r);
+    const sumRider = (k) => int([...uniq.values()].reduce((a, r) => a + num(r[k]), 0));
     const total = {
-      company: `合计（${int(rows.length)} 人）`, team: "", riderHtml: "", onJobHtml: "",
-      remainText: `未达标 ${int(rows.filter((r) => !r.reached).length)}`, entry: "", leave: "",
+      company: `合计（${int(rows.length)} 条 / ${int(uniq.size)} 人）`, team: "", riderHtml: "", onJobHtml: "",
+      remainText: `未达标 ${int(new Set(rows.filter((r) => !r.reached).map((r) => r.riderId)).size)}`,
+      riskHtml: "",
+      settleAmountText: money(rows.reduce((a, r) => a + (r.settled ? num(r.settleAmount) : 0), 0)),
+      settleMonthText: "",
+      entry: "", leave: "",
       firstRun: "", effDaysText: sum("effDays"), finishText: sum("finishOrders"),
-      t3Text: sum("t3"), t2Text: sum("t2"), t1Text: sum("t1"),
-      badText: sum("bad"), lgtText: sum("lgt"), complainText: sum("complain"),
-      negativeText: sum("negative"), earlyText: sum("early")
+      t3Text: sumRider("t3"), t2Text: sumRider("t2"), t1Text: sumRider("t1"),
+      badText: sumRider("bad"), lgtText: sumRider("lgt"), complainText: sumRider("complain"),
+      negativeText: sumRider("negative"), earlyText: sumRider("early")
     };
     body.push('<tr class="hr-total">' + HR_COLS.map((c) =>
       `<td class="${c.cls}">${esc(total[c.k])}</td>`).join("") + "</tr>");
   }
   body.push("</tbody>");
   t.innerHTML = head + body.join("");
+  applyHrFreeze();
 }
 function renderHr() {
   state.hr.rows = hrBuildRows();
   renderHrCompanyOptions();
-  // 卡片数字基于「工具条筛选后、不含卡片筛选」的集合，点卡片后其它卡片数字不跳动
-  const base = hrVisibleRows({ skipCard: true });
+  // 卡片数字基于「工具条筛选后、不含卡片 / 预警筛选」的集合，点卡片后其它卡片数字不跳动
+  const base = hrVisibleRows({ skipCard: true, skipRisk: true });
   const rows = hrVisibleRows();
   renderHrSummary(base, rows);
+  renderHrRisk(base);
   renderHrTable(rows);
+  renderHrAnalysis();
   renderSiteOptions();     // 站点下拉按当前视图的数据源重建
   if (state.hr.active) renderViewState();
 }
@@ -1159,6 +1685,7 @@ function setHrView(on) {
   // 换子模块时清掉上一视图的搜索 / 站点筛选，避免切过去看到一张空表
   state.query = ""; state.site = "";
   state.hr.cardFilter = "";
+  state.hr.riskFilter = "";
   $("wf-search").value = ""; $("wf-site").value = "";
   closePop();
   renderMeta();
@@ -1174,9 +1701,9 @@ function hrToggleSort(key) {
 function hrExportCsv() {
   const rows = hrVisibleRows();
   const head = HR_COLS.map((c) => c.h).concat(
-    ["结算状态", "结算月份", "结算档位", "结算金额(元)", "归属站点id"]);
+    ["结算状态", "结算档位", "归属站点id"]);
   const line = (r) => HR_COLS.map((c) => csvCell(r[c.csv])).join(",")
-    + "," + [r.settleState, r.settleMonth, r.level, r.settleAmount, r.teamId]
+    + "," + [r.settleState, r.level, r.teamId]
       .map(csvCell).join(",");
   const text = [head.map(csvCell).join(","), ...rows.map(line)].join("\r\n");
   const blob = new Blob(["\ufeff" + text], { type: "text/csv;charset=utf-8" });
@@ -1185,7 +1712,7 @@ function hrExportCsv() {
   a.href = url; a.download = `风神三方人资监控_${state.month.replace("-", "")}.csv`;
   document.body.appendChild(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
-  showNotice(`已导出 ${rows.length} 名三方人资骑手为 CSV（Excel 可直接打开）。`, "blue");
+  showNotice(`已导出 ${rows.length} 条三方人资结算批次为 CSV（Excel 可直接打开）。`, "blue");
 }
 // 结算标准弹层 ---------------------------------------------------------------
 function placeHrTarget(anchor) {
@@ -1219,6 +1746,43 @@ function applyHrTarget() {
 function resetHrTarget() {
   $("hrt-days").value = String(HR_TARGET_DEFAULT);
   $("hrt-note").textContent = "已填入默认值，点「保存并重算」生效。";
+}
+// 待结算单价弹层 -------------------------------------------------------------
+function placeHrPrice(anchor) {
+  const p = $("hr-price");
+  p.hidden = false;
+  const r = anchor.getBoundingClientRect();
+  const w = p.offsetWidth || 420, h = p.offsetHeight || 240;
+  p.style.left = Math.max(8, Math.min(r.left, window.innerWidth - w - 8)) + "px";
+  p.style.top = (r.bottom + h > window.innerHeight - 8
+    ? Math.max(8, r.top - h - 6) : r.bottom + 6) + "px";
+}
+function openHrPrice() {
+  $("hrp-price").value = String(hrPrice());
+  const list = hrCompanyStats();
+  const t = hrAnalysisTotals(list);
+  $("hrp-note").textContent = `当前单价 ${money(hrPrice())}：待确认≥${HR_PENDING_MIN_DAYS} 天 `
+    + `${int(t.pending7)} 人，预估 ${money(t.pendingEstimate)}，`
+    + `待确认订单 ${int(t.pendingOrders)} 单，单均 ${t.pendingCost == null ? "—" : money(t.pendingCost)}。`;
+  placeHrPrice($("btn-hr-price"));
+}
+function closeHrPrice() { $("hr-price").hidden = true; }
+function applyHrPrice() {
+  const n = Math.round(num($("hrp-price").value));
+  if (!Number.isFinite(n) || n < HR_PRICE_MIN || n > HR_PRICE_MAX) {
+    $("hrp-note").textContent = `请输入 ${HR_PRICE_MIN}~${HR_PRICE_MAX} 之间的整数。`;
+    return;
+  }
+  state.hr.price = n;
+  saveHrPrice(n);
+  $("btn-hr-price").textContent = `待结算单价 ${int(n)}元`;
+  closeHrPrice();
+  renderHr();
+  showNotice(`待结算单价已改为 ${money(n)}，结算分析已重算（未重新取数）。`, "blue");
+}
+function resetHrPrice() {
+  $("hrp-price").value = String(HR_PRICE_DEFAULT);
+  $("hrp-note").textContent = "已填入默认值，点「保存并重算」生效。";
 }
 /** v3.55.0：与面板标题栏同款「↗ 新标签打开」—— 独立标签页打开当前子模块。
  *  带上 view 参数，新标签加载后自动切到三方人资监控 / 骑手账单，不用再点一次页签。 */
@@ -1274,6 +1838,8 @@ function bindHrEvents() {
     state.hr.pendingOnly = !!e.target.checked; renderHr();
   });
   $("hr-table").addEventListener("click", (e) => {
+    const f = e.target.closest && e.target.closest("button[data-hfilter]");
+    if (f) { openHrFilterPop(f.dataset.hfilter, f); return; }
     const th = e.target.closest && e.target.closest("th[data-hsort]");
     if (th) hrToggleSort(th.dataset.hsort);
   });
@@ -1285,6 +1851,26 @@ function bindHrEvents() {
   $("btn-hr-newtab").addEventListener("click", hrOpenNewTab);
   $("btn-hr-full").addEventListener("click", hrToggleFullscreen);
   document.addEventListener("fullscreenchange", hrSyncFullBtn);
+  $("hr-risk").addEventListener("click", (e) => {
+    const b = e.target.closest && e.target.closest("[data-hr-risk]");
+    if (b) hrSetRiskFilter(b.dataset.hrRisk);
+  });
+  $("btn-hr-analysis-csv").addEventListener("click", hrExportAnalysisCsv);
+  $("btn-hr-price").addEventListener("click", () => {
+    if (!$("hr-price").hidden) { closeHrPrice(); return; }
+    openHrPrice();
+  });
+  $("hrp-close").addEventListener("click", closeHrPrice);
+  $("hrp-apply").addEventListener("click", applyHrPrice);
+  $("hrp-reset").addEventListener("click", resetHrPrice);
+  $("hrp-price").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") applyHrPrice();
+  });
+  document.addEventListener("click", (e) => {
+    const p = $("hr-price");
+    if (p.hidden || p.contains(e.target) || e.target.closest("#btn-hr-price")) return;
+    closeHrPrice();
+  });
   $("btn-hr-target").addEventListener("click", () => {
     if (!$("hr-target").hidden) { closeHrTarget(); return; }
     openHrTarget();
@@ -1378,9 +1964,18 @@ function toggleSort(key) {
   applyData();
 }
 function clearView() {
+  // v3.56.0：按当前子模块清理，三方人资监控的排序 / 列筛选与骑手账单互不影响
+  closePop();
+  if (state.hr.active) {
+    state.hr.sort = { key: "remainText", dir: 1 };
+    state.hr.colFilters = Object.create(null);
+    state.hr.cardFilter = "";
+    state.hr.riskFilter = "";
+    renderHr();
+    return;
+  }
   state.sort = { key: "", dir: 0 };
   state.colFilters = Object.create(null);
-  closePop();
   applyData();
 }
 function activeFilterCount() { return Object.keys(state.colFilters).length; }
@@ -2740,7 +3335,7 @@ function renderTable(rows) {
         : key === "badText" ? ' title="按骑手id＋站点id 统计：出勤明细中除全天外「是否达成 = 未达成」的班次数"'
         : key === "firstRunText" && r.firstRun ? ` title="入职 ${esc(r.entry)} 起首个全天有单日"` : "";
       const na = !isHtml && (raw === "—" || raw === "" || raw === "…") ? " c-empty" : "";
-      const hot = !isHtml && /^(badText|lgtText|complainText|negativeText|earlyText)$/.test(key)
+      const hot = !isHtml && /^(badText|lgtText|complainText|negativeText|earlyText|claimText)$/.test(key)
         && Number(raw) > 0 ? " hot" : "";
       return `<td class="${(c.cls || "") + na + hot}"${title}>${txt}</td>`;
     }).join("") + "</tr>");
@@ -2749,6 +3344,42 @@ function renderTable(rows) {
   t.innerHTML = head + body.join("");
   applyFreeze();
   renderViewState();
+}
+
+// ---------------------------------------------------------------- v3.56.0 人资表冻结列
+// 固定冻结左侧三列（人资商 / 站点 / 骑手），横向滑到 T-3~T-1 或坏单列时仍能看到是谁。
+// 列宽由内容决定，每次重绘都重算 left。
+const HR_FROZEN = ["company", "team", "riderHtml"];
+function applyHrFreeze() {
+  const t = $("hr-table");
+  if (!t) return;
+  const ths = [...t.querySelectorAll("thead th")];
+  if (!ths.length) return;
+  // 窄屏时 .tbl-scroll 带 12px 内边距，sticky 的 left 以 padding 边缘为原点，
+  // 这里减掉内边距，避免冻结列左侧漏出一条滚动内容。
+  const box = t.parentElement;
+  const padLeft = box ? (parseFloat(getComputedStyle(box).paddingLeft) || 0) : 0;
+  const idx = HR_FROZEN.map((k) => HR_COLS.findIndex((c) => c.k === k))
+    .filter((i) => i >= 0).sort((a, b) => a - b);
+  const last = idx.length ? idx[idx.length - 1] : -1;
+  let left = 0;
+  const offsets = new Map();
+  for (const i of idx) {
+    offsets.set(i, left);
+    left += ths[i] ? ths[i].getBoundingClientRect().width : 0;
+  }
+  for (const tr of t.querySelectorAll("tr")) {
+    const cells = [...tr.children];
+    // 空表提示行 / 不完整行不做粘性定位，避免整格被拉去当冻结列
+    if (cells.length < HR_COLS.length) continue;
+    cells.forEach((td, i) => {
+      const hit = offsets.has(i);
+      td.classList.toggle("fz", hit);
+      td.classList.toggle("fz-edge", hit && i === last);
+      if (hit) td.style.left = Math.round(offsets.get(i) - padLeft) + "px";
+      else td.style.left = "";
+    });
+  }
 }
 
 // ---------------------------------------------------------------- v3.18.0 冻结列
@@ -2802,6 +3433,13 @@ function renderViewState() {
     const c = HR_COLS.find((x) => x.k === state.hr.sort.key);
     const bits = [c ? `排序：${c.h} ${state.hr.sort.dir > 0 ? "↑" : "↓"}`
       : "排序：剩余达标天数 ↑"];
+    if (hrActiveFilterCount()) {
+      const names = Object.keys(state.hr.colFilters).map((k) => {
+        const col = HR_COLS.find((x) => x.k === k);
+        return col ? col.h : k;
+      });
+      bits.push(`列筛选 ${hrActiveFilterCount()} 列（${names.join("、")}）`);
+    }
     if (state.hr.company) bits.push(`人资商：${state.hr.company}`);
     if (state.hr.status) bits.push(`结算：${state.hr.status}`);
     if (state.hr.pendingOnly) bits.push("只看未达标");
@@ -2809,9 +3447,15 @@ function renderViewState() {
       const card = HR_CARDS.find((x) => x.k === state.hr.cardFilter);
       bits.push(`卡片：${card ? card.h : state.hr.cardFilter}`);
     }
+    if (state.hr.riskFilter) {
+      const card = HR_RISK_CARDS.find((x) => x.k === state.hr.riskFilter);
+      bits.push(`预警：${card ? card.h : state.hr.riskFilter}`);
+    }
     $("wf-state").textContent = bits.join("　·　");
     $("btn-freeze").textContent = `冻结列 (${state.frozen.length})`;
-    $("btn-clear-view").disabled = true;
+    const sorted = state.hr.sort.key !== "remainText" || state.hr.sort.dir !== 1;
+    $("btn-clear-view").disabled = !sorted && !hrActiveFilterCount()
+      && !state.hr.cardFilter && !state.hr.riskFilter;
     return;
   }
   const bits = [];
@@ -2881,6 +3525,42 @@ function openFilterPop(key, anchor) {
   state.pop = { type: "filter", key, anchor };
   placePop(anchor);
 }
+/** v3.56.0：三方人资监控表头筛选浮层，复用同一个 #wf-pop 外壳。 */
+function openHrFilterPop(key, anchor) {
+  const c = HR_COLS.find((x) => x.k === key);
+  if (!c) return;
+  const values = hrColValues(key);
+  const chosen = state.hr.colFilters[key];
+  const p = popEl();
+  p.className = "wf-pop";
+  p.innerHTML =
+    `<div class="wf-pop-head"><span>按「${esc(c.h)}」筛选</span><button type="button" data-act="close" title="关闭">×</button></div>`
+    + `<div class="wf-pop-tools"><input type="search" class="wf-pop-search" placeholder="搜索取值…" aria-label="搜索取值">`
+    + `<button type="button" data-act="all">全选</button><button type="button" data-act="none">清空</button></div>`
+    + `<div class="wf-pop-list">` + (values.length ? values.map(([v, n]) =>
+      `<label class="wf-pop-item" data-v="${esc(v)}"><input type="checkbox" data-v="${esc(v)}"`
+      + `${!chosen || chosen.has(v) ? " checked" : ""}><span class="v" title="${esc(v)}">${esc(v || "（空）")}</span>`
+      + `<span class="n">${n}</span></label>`).join("")
+      : `<div class="wf-pop-empty">当前数据没有可用的取值</div>`) + `</div>`
+    + `<div class="wf-pop-foot"><button type="button" data-act="clear">清除该列</button>`
+    + `<button type="button" class="primary" data-act="apply">应用</button></div>`;
+  state.pop = { type: "hr-filter", key, anchor };
+  placePop(anchor);
+}
+function applyHrFilterPop() {
+  const p = popEl();
+  const boxes = [...p.querySelectorAll('input[type="checkbox"][data-v]')];
+  const all = boxes.length;
+  const picked = boxes.filter((b) => b.checked).map((b) => b.dataset.v);
+  if (!picked.length) {
+    showNotice("至少要保留一个取值；如需取消筛选，请点「清除该列」。", "blue");
+    return;
+  }
+  if (picked.length === all) delete state.hr.colFilters[state.pop.key];
+  else state.hr.colFilters[state.pop.key] = new Set(picked);
+  closePop();
+  renderHr();
+}
 function openFreezePop(anchor) {
   const p = popEl();
   p.className = "wf-pop freeze";
@@ -2918,13 +3598,16 @@ function onPopClick(e) {
   const act = btn.dataset.act;
   if (act === "close") { closePop(); return; }
   const p = popEl();
-  if (state.pop.type === "filter") {
+  if (state.pop.type === "filter" || state.pop.type === "hr-filter") {
+    const isHr = state.pop.type === "hr-filter";
     const boxes = [...p.querySelectorAll('input[type="checkbox"][data-v]')];
     if (act === "all" || act === "none") boxes.forEach((b) => { b.checked = act === "all"; });
-    if (act === "apply") applyFilterPop();
+    if (act === "apply") { if (isHr) applyHrFilterPop(); else applyFilterPop(); }
     if (act === "clear") {
-      delete state.colFilters[state.pop.key];
-      closePop(); applyData();
+      if (isHr) delete state.hr.colFilters[state.pop.key];
+      else delete state.colFilters[state.pop.key];
+      closePop();
+      if (isHr) renderHr(); else applyData();
     }
   } else if (state.pop.type === "freeze") {
     if (act === "none" || act === "default") {
@@ -2962,14 +3645,14 @@ function renderMeta() {
     ? `三方骑手 ${state.hr.rows.length} 人 · 人资商 ${new Set(state.hr.rows.map((r) => r.company).filter(Boolean)).size} 家 · 结算标准 ${state.hr.target} 天`
     : `账单 ${state.bills.length} 条 · 人资 ${state.staff.size} 人 · 线索 ${state.clues.size} 人`;
   $("doc-note").textContent = hr
-    ? "数据源：招募缺口管理 → 线索结果明细（带人资商，按骑手取最新结算批次）＋ 人资综合服务 → 成员管理（全部状态）＋ 出勤统计 → 明细数据（本月）＋ KPI管理 → 考核运单明细（4 类异常订单）；全部复用运力模块已取到的数据，切换子模块不产生额外请求。一行一名三方人资骑手；「本月班次异常数 / 坏单」跟随账单月份，结算字段与账单月份无关。"
-    : "数据源：骑手账单管家 → 账单查询 ＋ 人资综合服务 → 成员管理（全部状态）＋ 招募缺口管理 → 线索结果明细 ＋ 出勤统计 → 明细数据（本月）＋ KPI管理 → 考核运单明细（仅 4 类异常订单）；账单主表按骑手 id 合并，一行一条账单；出勤与问题订单按「骑手 id ＋ 站点 id」归集";
+    ? "数据源：招募缺口管理 → 线索结果明细（带人资商，按「骑手 + 结算月」取批次）＋ 人资综合服务 → 成员管理（全部状态）＋ 出勤统计 → 明细数据（本月）＋ KPI管理 → 考核运单明细（5 类异常订单）；全部复用运力模块已取到的数据，切换子模块不产生额外请求。一行一个结算批次，同一骑手多个结算月显示多行；「本月班次异常数 / 坏单」跟随账单月份，结算字段与账单月份无关。"
+    : "数据源：骑手账单管家 → 账单查询 ＋ 人资综合服务 → 成员管理（全部状态）＋ 招募缺口管理 → 线索结果明细 ＋ 出勤统计 → 明细数据（本月）＋ KPI管理 → 考核运单明细（仅 5 类异常订单）；账单主表按骑手 id 合并，一行一条账单；出勤与问题订单按「骑手 id ＋ 站点 id」归集";
   const parts = [
     `数据源：账单查询 ${state.month}（${state.bills.length} 条）`,
     `成员管理·全部（${state.staff.size} 人）`,
     `线索结果明细（${state.clues.size} 人带三方人资公司）`,
     `本月出勤明细（${monthSegments(state.month).length} 段 × 最多 7 天）`,
-    "考核运单明细（4 类异常订单筛选 + 违规处罚差评/投诉运单号批量补全，不拉全量运单）",
+    "考核运单明细（4 个问题订单筛选 + 违规处罚运单号批量补全；索赔 / 违规原因另取申诉明细，不拉全量运单）",
     state.loadedAt ? `取数完成 ${state.loadedAt}` : ""
   ].filter(Boolean);
   $("foot-meta").textContent = parts.join("　·　") + "　·　跟随当前浏览器登录态，换账号自动换商";
@@ -2978,12 +3661,12 @@ function renderMeta() {
     "人资名单取全部状态（含离职）；绑定扣款 = 住宿费用 + 车辆租金；" +
     "本月班次异常数 = 出勤明细里除「全天」外「是否达成 = 未达成」的班次数；" +
     "首跑时间只给本月入职骑手，取入职日起首个「全天」完单 > 0 的日期；" +
-    "物流责 / 投诉 / 差评 / 提前点 = 考核运单明细里 4 类异常订单计数；" +
+    "物流责 / 投诉 / 差评 / 提前点 / 索赔 = 考核运单明细里 5 类异常订单计数（索赔只算非提前点索赔）；" +
     "另用申诉 / 违规处罚列表（违规状态=成立、分类=差评+投诉、接口按 2 天分段）的运单号去重后" +
     "逗号拼接批量回查匹配考核运单明细，两路按运单去重；坏单标签与数量一律以考核运单明细 4 列为准，" +
     "违规分类本身不算标签、回查命中但 4 列全「否」的单不计入（与质量运营同口径）；" +
     "共享缓存只写 T+1 结算的历史出勤行，当天 T0 未结算数据不进缓存（与质量运营炸班次口径一致）；" +
-    "出勤异常 / 首跑 / 4 类坏单均按「骑手id＋站点id」归集，同一骑手跨站点各站分开计、不重复；金额单位人民币元。";
+    "出勤异常 / 首跑 / 坏单均按「骑手id＋站点id」归集，同一骑手跨站点各站分开计、不重复；金额单位人民币元。";
 }
 
 function applyData() {
@@ -3115,7 +3798,7 @@ async function loadDetailData(gen, teamIds) {
     const complete = a.status === "fulfilled" && k.status === "fulfilled";
     const teams = (state.scale.teams && state.scale.teams.length) ? state.scale.teams : scaleTeamsFromBills();
     const raw = {
-      v: 3, month: state.month, ts: Date.now(), complete,
+      v: 4, month: state.month, ts: Date.now(), complete,
       teams: (teams || []).map((t) => ({ id: String(t.id), name: String(t.name || "") })),
       recs: (a.status === "fulfilled" && Array.isArray(a.value.rows))
         ? settledRows(a.value.rows, state.month) : [],
@@ -3127,15 +3810,32 @@ async function loadDetailData(gen, teamIds) {
   } catch (e) { /* 配额不足不影响主表 */ }
 }
 
+/** v3.56.0：统一刷新月份步进控件 —— 边界按钮置灰、补足 title、当前月高亮。
+ *  月份选择器 / 左右箭头 / 本月按钮共用这一处状态，避免手动写三遍不同步。 */
+function syncMonthUI() {
+  const min = shiftMonth(curMonth(), -MONTHS_BACK), max = curMonth();
+  const picker = $("month-picker");
+  const prev = $("btn-prev-month"), next = $("btn-next-month"), now = $("btn-this-month");
+  picker.value = state.month;
+  picker.min = min;
+  picker.max = max;
+  prev.disabled = state.month <= min;
+  next.disabled = state.month >= max;
+  prev.title = prev.disabled ? `已到最早可查月份 ${min}` : `上一个月（${shiftMonth(state.month, -1)}）`;
+  next.title = next.disabled ? `已到当前月份 ${max}` : `下一个月（${shiftMonth(state.month, 1)}）`;
+  const isNow = state.month === curMonth();
+  if (now) {
+    now.classList.toggle("is-current", isNow);
+    now.title = isNow ? "当前已是本月（点击不重新取数）" : `切回本月（${curMonth()}）`;
+  }
+}
 function setMonth(m) {
   if (!validMonth(m)) return;
   const min = shiftMonth(curMonth(), -MONTHS_BACK), max = curMonth();
   if (m < min || m > max) return;
   state.month = m;
   localStorage.setItem("wb_wf_month", m);
-  $("month-picker").value = m;
-  $("btn-prev-month").disabled = m <= min;
-  $("btn-next-month").disabled = m >= max;
+  syncMonthUI();
   loadAll();
 }
 
@@ -3164,8 +3864,15 @@ function exportCsv() {
 // ---------------------------------------------------------------- 事件
 $("btn-prev-month").addEventListener("click", () => setMonth(shiftMonth(state.month, -1)));
 $("btn-next-month").addEventListener("click", () => setMonth(shiftMonth(state.month, 1)));
-$("btn-this-month").addEventListener("click", () => setMonth(curMonth()));
+$("btn-this-month").addEventListener("click", () => {
+  if (state.month === curMonth()) return;   // 已在当前月，避免重复取数
+  setMonth(curMonth());
+});
 $("month-picker").addEventListener("change", (e) => setMonth(e.target.value));
+// 点月份框直接拉起系统月份选择器，少点一次（浏览器不支持时静默回退原生交互）
+$("month-picker").addEventListener("click", (e) => {
+  try { if (e.target.showPicker) e.target.showPicker(); } catch (err) { /* ignore */ }
+});
 $("btn-refresh").addEventListener("click", () => loadAll());
 $("wf-search").addEventListener("input", (e) => { state.query = e.target.value; applyData(); });
 $("wf-site").addEventListener("change", (e) => { state.site = e.target.value; applyData(); });
@@ -3206,7 +3913,7 @@ document.addEventListener("click", (e) => {
   if (e.target.closest && e.target.closest("#btn-freeze")) return;
   closePop();
 });
-window.addEventListener("resize", applyFreeze);
+window.addEventListener("resize", () => { applyFreeze(); applyHrFreeze(); });
 $("btn-copy-image").addEventListener("click", async (e) => {
   const btn = $("btn-copy-image");
   if (btn.disabled) return;
@@ -3266,7 +3973,7 @@ window.__SET_WORKFORCE__ = (obj) => {
   else if (obj.staff instanceof Map) state.staff = obj.staff;
   if (Array.isArray(obj.clues)) state.clues = clueMap(obj.clues);
   else if (obj.clues instanceof Map) state.clues = obj.clues;
-  if (obj.month && validMonth(obj.month)) { state.month = obj.month; $("month-picker").value = obj.month; }
+  if (obj.month && validMonth(obj.month)) { state.month = obj.month; syncMonthUI(); }
   // 真机测试注入出勤 / 考核运单明细，不发网络请求
   if (obj.att) {
     state.attBad = hookPairMap(obj.att.bad, (v) => num(v));
@@ -3275,7 +3982,7 @@ window.__SET_WORKFORCE__ = (obj) => {
   }
   if (obj.kpi) {
     state.kpi = hookPairMap(obj.kpi, (v) =>
-      Object.assign({ lgt: 0, complain: 0, negative: 0, early: 0 }, v));
+      Object.assign({ lgt: 0, complain: 0, negative: 0, early: 0, claim: 0 }, v));
     state.kpiReady = true;
   }
   if (Array.isArray(obj.staff)) state.staffList = obj.staff;
@@ -3341,6 +4048,11 @@ window.__SET_WORKFORCE__ = (obj) => {
     state.hr.target = Math.max(HR_TARGET_MIN, Math.min(HR_TARGET_MAX, Math.round(num(obj.hrTarget))));
     $("btn-hr-target").textContent = `结算标准 ${state.hr.target}天`;
   }
+  // v3.57.0：离线回归可指定待结算单价
+  if (obj.hrPrice !== undefined) {
+    state.hr.price = Math.max(HR_PRICE_MIN, Math.min(HR_PRICE_MAX, Math.round(num(obj.hrPrice))));
+    if ($("btn-hr-price")) $("btn-hr-price").textContent = `待结算单价 ${int(state.hr.price)}元`;
+  }
   // 真机回归可显式指定视图状态，避免上一次跑留下的 localStorage 偏好干扰
   if (Array.isArray(obj.frozen)) setFrozen(obj.frozen);
   if (obj.sort) state.sort = { key: obj.sort.key || "", dir: num(obj.sort.dir) };
@@ -3354,6 +4066,7 @@ window.__SET_WORKFORCE__ = (obj) => {
 window.__WF__ = { state, COLS, PAGE_COLS, buildRows, attachDetail, visibleRows, splitSep,
   staffMap, clueMap, money, attStatsFromSheets, monthSegments, monthBounds, exportCsv,
   applyData, loadKpiFlags, loadAttendance, KPI_FILTERS, violationMeta, applyViolationMeta,
+  syncMonthUI, setMonth,
   hasKpiTag, keepKpiTagged, settledRows,
   // v3.41.0 差评 / 投诉补全（违规处罚 → 批量回查考核运单明细）
   parseKpiRows, loadViolationTrackingIds, API_VIOLATION, VIOL_SEG_DAYS, VIOL_BATCH,
@@ -3361,6 +4074,7 @@ window.__WF__ = { state, COLS, PAGE_COLS, buildRows, attachDetail, visibleRows, 
   // v3.18.0 视图能力（真机回归用）
   cellText, sortVal, compareCell, filteredRows, toggleSort, clearView, activeFilterCount,
   colValues, openFilterPop, openFreezePop, applyFilterPop, closePop, setFrozen, applyFreeze,
+  applyHrFreeze, HR_FROZEN,
   loadFrozen, DEFAULT_FROZEN, MAX_FROZEN, NUM_CSV,
   // v3.31.0 规模汇总 / v3.32.0 商圈片与口径修订 / v3.35.0 今日首跑新增口径
   ymdOf, parseYmd, shiftDay, todayYmd, defaultScaleRange, scaleOnJobRange, scaleFirstRange,
@@ -3392,7 +4106,14 @@ window.__WF__ = { state, COLS, PAGE_COLS, buildRows, attachDetail, visibleRows, 
   loadHrTarget, saveHrTarget, hrSettlement, hrClueRank, hrClueRows, hrTime, hrPick,
   hrBaseDay, hrDayOrderMap, hrDayOrder,
   hrReached, hrBuildRows, hrSortVal, hrCompare, hrVisibleRows,
+  hrCellText, hrColValues, hrActiveFilterCount, openHrFilterPop, applyHrFilterPop,
   hrCardMatch, hrSetCardFilter,
+  // v3.57.0 结算预警 / 人资商结算分析 / 待结算单价
+  HR_SETTLED_STATES, HR_PENDING_STATE, HR_PENDING_MIN_DAYS, HR_RISK_ORDER, HR_RISK_META,
+  HR_RISK_CARDS, HR_AN_COLS, HR_PRICE_LS, HR_PRICE_DEFAULT,
+  hrYmd, hrSettleYmd, hrDayDiff, hrRiskMatch, hrSetRiskFilter, renderHrRisk,
+  loadHrPrice, saveHrPrice, hrPrice, hrCompanyStats, hrAnalysisTotals, hrAnCell,
+  renderHrAnalysis, hrExportAnalysisCsv, openHrPrice, closeHrPrice, applyHrPrice, resetHrPrice,
   renderHr, renderHrSummary, renderHrTable, renderHrCompanyOptions,
   setHrView, hrToggleSort, hrExportCsv,
   openHrTarget, closeHrTarget, applyHrTarget, resetHrTarget, bindHrEvents,
@@ -3407,13 +4128,11 @@ window.__WF__ = { state, COLS, PAGE_COLS, buildRows, attachDetail, visibleRows, 
   bindScaleEvents();                 // v3.31.0：先设好汇总默认区间（天数可配），再渲染
   bindHrEvents();                     // v3.54.0：子模块页签 / 筛选 / 结算标准
   state.hr.target = loadHrTarget();
+  state.hr.price = loadHrPrice();
   $("btn-hr-target").textContent = `结算标准 ${state.hr.target}天`;
+  $("btn-hr-price").textContent = `待结算单价 ${int(state.hr.price)}元`;
   hrViewFromUrl();                    // v3.55.0：?view=hr 直接打开三方人资监控
-  $("month-picker").value = state.month;
-  $("month-picker").min = shiftMonth(curMonth(), -MONTHS_BACK);
-  $("month-picker").max = curMonth();
-  $("btn-prev-month").disabled = state.month <= shiftMonth(curMonth(), -MONTHS_BACK);
-  $("btn-next-month").disabled = state.month >= curMonth();
+  syncMonthUI();                       // v3.56.0：月份步进控件统一状态
   try {
     const m = chrome.runtime.getManifest && chrome.runtime.getManifest();
     if (m && m.version) $("tb-ver").textContent = "v" + m.version;

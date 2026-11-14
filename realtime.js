@@ -12,10 +12,12 @@
  * 口径（与线上页面逐项核对过）：
  *   应排   = Σ predictNum（排班需求人数）
  *   实排   = Σ actualNum（实际排班人数）
- *   在线   = workStatus === 1 的骑手数（含未排班但还在线的，所以在线率可能略高于 100%）
+ *   在线   = 本时段排班且 workStatus ∈ {1 上班, 4 申请小休, 5 申请下班} 的骑手数
+ *            （申请小休 / 申请下班还在等审批，人仍在线，风神「在线人数」也计入；
+ *             2 小休单独统计不算在线，3 下班不算在线）
  *   背单   = deliveryOrder > 0
- *   下线背单 = 不在线 && 背单 > 0
- *   异常   = 已排本时段 && 不在线 && 背单 === 0
+ *   下线背单 = 不在线 && 非小休 && 背单 > 0
+ *   异常   = 已排本时段 && 不在线 && 非小休 && 背单 === 0
  *   在线率 = 在线 ÷ 实排
  *
  * 架构：纯函数层（时段 / 单站汇总 / 商圈片聚合，不碰 DOM）+ 取数层（并发 4、单站失败不阻断）
@@ -33,7 +35,13 @@ const MIN_GAP = 10;            // 最小 10 秒，防止把接口打爆
 const MAX_GAP = 3600;          // 最大 1 小时
 const STAT_TTL = 5 * 60 * 1000; // 应排 / 实排缓存 5 分钟（排班不会 30 秒一变）
 const CONCURRENCY = 4;         // 同时最多 4 个站点在飞
-const ONLINE_WORK_STATUS = 1;  // workStatus=1 表示在线（线上「在线人数」就是这个数）
+/* v3.57.7：workStatus 枚举（风神前端）：
+ *   1 上班 / 2 小休 / 3 下班 / 4 申请小休 / 5 申请下班
+ * 线上「在线人数」= 上班 + 申请小休 + 申请下班（申请还在等审批，人仍在线），
+ * 小休单独统计，「下班」不算在线。旧版只算 workStatus===1，会漏掉申请小休 / 申请下班。 */
+const WORK_STATUS_TEXT = { 1: "上班", 2: "小休", 3: "下班", 4: "申请小休", 5: "申请下班" };
+const ONLINE_WORK_STATUS = [1, 4, 5];
+const REST_WORK_STATUS = 2;
 const SLOT_IGNORE = [2, 9999]; // 休息 / 全天，不参与时段选择
 
 const LS_GAP = "wb_rt_gap";
@@ -250,7 +258,9 @@ function isScheduled(row, code) {
   const codes = Array.isArray(row.timeCode) ? row.timeCode.map(num) : [num(row.timeCode)];
   return codes.includes(c);
 }
-const isOnline = (row) => num(row.workStatus) === ONLINE_WORK_STATUS;
+const isOnline = (row) => ONLINE_WORK_STATUS.includes(num(row.workStatus));
+const isRest = (row) => num(row.workStatus) === REST_WORK_STATUS;
+const workStatusText = (row) => WORK_STATUS_TEXT[num(row.workStatus)] || "—";
 const ordersOf = (row) => num(row.order == null ? row.deliveryOrder : row.order);
 const pct = (a, b) => (num(b) > 0 ? num(a) / num(b) : null);
 function fmtPct(v) {
@@ -266,8 +276,9 @@ function siteSummary(team, stat, rows, code) {
   const sched = list.filter((r) => isScheduled(r, code));
   const online = sched.filter((r) => isOnline(r));                 // 排班在线
   const onlineAll = list.filter((r) => isOnline(r)).length;        // 全站在线（仅展示用）
-  const offlineOrder = list.filter((r) => !isOnline(r) && ordersOf(r) > 0);
-  const abnormal = sched.filter((r) => !isOnline(r) && ordersOf(r) === 0);
+  // 小休单独看，不算下线背单、也不算异常
+  const offlineOrder = list.filter((r) => !isOnline(r) && !isRest(r) && ordersOf(r) > 0);
+  const abnormal = sched.filter((r) => !isOnline(r) && !isRest(r) && ordersOf(r) === 0);
   const cell = (stat && stat.byCode && stat.byCode[num(code)]) || null;
   return {
     teamId: String(team.id), teamName: team.name,
@@ -311,7 +322,7 @@ function detailRow(site, row) {
     area: site.area, site: site.teamName, teamId: site.teamId,
     knightId: num(row.knightId), name: String(row.name || ""), mobile: String(row.mobile || ""),
     shifts: (row.timeName || []).join(" / "),
-    online, orders: ordersOf(row),
+    online, orders: ordersOf(row), statusText: workStatusText(row),
     onlineMin: rawMin, validMin, targetMin, onlineTipText: tip,
     lastOnline: num(row.startOnline) > 0 ? hhmm(new Date(num(row.startOnline))) : "",
     kind: online ? "online" : (ordersOf(row) > 0 ? "offline-order" : "abnormal")
@@ -429,10 +440,10 @@ function renderKpis() {
   const list = [
     ["应排", String(t.应排), "排班需求人数"],
     ["实排", String(t.实排), "实际排班人数"],
-    ["在线", String(t.在线), "本时段排班且在线（workStatus=1）的人数；未排班但在线的不计入"],
-    ["下线背单", String(t.下线背单), "不在线但背着单"],
+    ["在线", String(t.在线), "本时段排班且在线（上班 / 申请小休 / 申请下班）的人数；未排班但在线的不计入；小休单独统计，不算在线"],
+    ["下线背单", String(t.下线背单), "不在线、也不是小休，但手里还背着单"],
     ["在线率", fmtPct(t.rate), "排班在线 ÷ 实排，不会超过 100%"],
-    ["异常", String(t.异常), "已排本时段、不在线且 0 背单"]
+    ["异常", String(t.异常), "已排本时段、不在线且不是小休、0 背单"]
   ];
   box.innerHTML = list.map(([k, v, tip], i) => `<div class="rt-kpi${i === 5 && t.异常 ? " bad" : ""}" title="${esc(tip)}">` +
     `<b>${esc(v)}</b><span>${esc(k)}</span></div>`).join("") +
@@ -455,10 +466,10 @@ function renderAreas() {
   const head = `<thead><tr><th class="c-idx"></th><th class="c-area">商圈片</th><th class="c-num">站点</th>` +
     `<th class="c-num" title="排班需求人数（listScheduleStatistics 的 predictNum）">应排</th>` +
     `<th class="c-num" title="实际排班人数（listScheduleStatistics 的 actualNum）">实排</th>` +
-    `<th class="c-num" title="本时段排班且在线（workStatus=1）的人数；未排班但在线的不计入，所以不会高于实排">在线</th>` +
-    `<th class="c-num" title="不在线但手里还有单（deliveryOrder>0）">下线背单</th>` +
+    `<th class="c-num" title="本时段排班且在线（上班 / 申请小休 / 申请下班）的人数；未排班但在线的不计入，所以不会高于实排；小休单独统计，不算在线">在线</th>` +
+    `<th class="c-num" title="不在线、也不是小休，但手里还有单（deliveryOrder>0）">下线背单</th>` +
     `<th class="c-rate" title="排班在线 ÷ 实排">在线率</th>` +
-    `<th class="c-num" title="已排本时段 + 不在线 + 0 背单">异常</th></tr></thead>`;
+    `<th class="c-num" title="已排本时段 + 不在线 + 非小休 + 0 背单">异常</th></tr></thead>`;
   if (!state.areas.length) {
     t.innerHTML = head + `<tbody><tr><td colspan="9" class="rt-empty">${state.loading ? "正在取数…" : "还没有数据，点「立即刷新」"}</td></tr></tbody>`;
     return;
@@ -524,7 +535,7 @@ function renderDetails() {
         `<td class="c-shift" title="${esc(r.shifts)}">${esc(r.shifts || "—")}</td>` +
         `<td class="c-num" title="${esc(r.onlineTipText)}">${r.validMin} 分</td>` +
         `<td class="c-num">${esc(r.lastOnline || "—")}</td>` +
-        `<td class="c-state bad">异常 · 0 背单不在线</td></tr>`).join("")
+        `<td class="c-state bad" title="工作状态 ${esc(r.statusText)}">异常 · ${esc(r.statusText)} · 0 背单</td></tr>`).join("")
       : `<tr><td colspan="8" class="rt-empty">${state.loading ? "正在取数…" : "本时段没有异常骑手 🎉"}</td></tr>`) + `</tbody>`;
   }
   if (to) {
@@ -538,7 +549,7 @@ function renderDetails() {
         `<td class="c-num warn">${r.orders}</td>` +
         `<td class="c-num" title="${esc(r.onlineTipText)}">${r.validMin} 分</td>` +
         `<td class="c-num">${esc(r.lastOnline || "—")}</td>` +
-        `<td class="c-state warn">下线背单</td></tr>`).join("")
+        `<td class="c-state warn" title="工作状态 ${esc(r.statusText)}">${esc(r.statusText)} · 下线背单</td></tr>`).join("")
       : `<tr><td colspan="9" class="rt-empty">${state.loading ? "正在取数…" : "本时段没有下线背单的骑手"}</td></tr>`) + `</tbody>`;
   }
 }
@@ -900,12 +911,12 @@ window.__SET_RT__ = (o) => {
 };
 window.__RT__ = {
   state, postApi, loadTeams, loadSlots, loadStat, loadAttendance, mapLimit,
-  timeToMin, slotAt, pickSlot, slotText, isScheduled, isOnline, ordersOf, pct, fmtPct,
+  timeToMin, slotAt, pickSlot, slotText, isScheduled, isOnline, isRest, workStatusText, ordersOf, pct, fmtPct,
   siteSummary, aggByArea, detailRow, buildDetails, totals, statFor, refresh,
   startTimer, stopTimer, tick, setGap, setAuto, saveSites, loadOpts, renderAll, renderAreas, renderDetails,
   copyImage, shotName, shotTitle, shotSubtitle, agencyName, projectName, loadProject, saveProject,
   selectedTeams, siteLabel, activeSlot, SITE_TO_AREA, DEFAULT_GAP, MIN_GAP, MAX_GAP, STAT_TTL,
-  CONCURRENCY, ONLINE_WORK_STATUS, LS_GAP, LS_SITES, LS_SLOT, LS_PROJECT, DEFAULT_PROJECT, AGENCY_FALLBACK,
+  CONCURRENCY, ONLINE_WORK_STATUS, REST_WORK_STATUS, WORK_STATUS_TEXT, LS_GAP, LS_SITES, LS_SLOT, LS_PROJECT, DEFAULT_PROJECT, AGENCY_FALLBACK,
   API_TEAMS, API_TIMES, API_STAT, API_ATT
 };
 
