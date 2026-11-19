@@ -114,3 +114,141 @@ table.ql-tbl th.ql-rider .qr-sub { display: block; font-weight: 400; color: #9CA
 .ql-cfg-acts { display: flex; justify-content: space-between; gap: 10px; padding: 12px 18px 18px; }
 .ql-pop-body .ql-sup { margin-left: 4px; padding: 0 5px; border-radius: 6px; background: #EEF2FF; color: #4338CA; font-size: 10px; font-weight: 600; }
 .tb-right #btn-allday b { color: #1D4ED8; font-weight: 700; }
+
+/* v3.57.19：坏单视图合计行下方的标签汇总 */
+table.ql-tbl tr.ql-badsum-row td { background: #F7FAFF; border-top: 2px solid #C9D8EE;
+  text-align: left; padding: 8px 10px; font-size: 12px; color: #374151; line-height: 1.6;
+  white-space: normal; }
+table.ql-tbl tr.ql-badsum-row b { color: #1D4ED8; }
+
+/* v3.57.20：坏单明细 → 运单详情弹层 */
+.ql-order-mask { position: fixed; inset: 0; background: rgba(15,23,42,.48);
+  display: flex; align-items: center; justify-content: center; z-index: 2147483000; padding: 18px; }
+.ql-order-mask[hidden] { display: none !important; }
+.ql-order { width: min(980px, 100%); max-height: 92vh; background: #F5F7FB; border-radius: 14px;
+  box-shadow: 0 18px 60px rgba(15,23,42,.35); display: flex; flex-direction: column; overflow: hidden; }
+.ql-order-head { display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 13px 18px; background: #FFFFFF; border-bottom: 1px solid #E2E8F2; }
+.ql-order-head strong { font-size: 15px; color: #1F2937; }
+.ql-order-head button { padding: 2px 11px; font-size: 18px; line-height: 1.2; }
+.ql-order-body { overflow: auto; padding: 14px 16px 18px; }
+.ql-order-loading { padding: 40px 0; text-align: center; color: #6B7280; font-size: 13px; }
+.ql-order-error { padding: 34px 18px; text-align: center; color: #B91C1C; font-size: 13px; line-height: 1.8; }
+.ql-order-sec { background: #FFFFFF; border: 1px solid #E7ECF5; border-radius: 10px;
+  padding: 12px 14px; margin-bottom: 10px; }
+.ql-order-sec h4 { margin: 0 0 8px; font-size: 13px; color: #1D4ED8; font-weight: 700;
+  display: flex; align-items: center; gap: 6px; }
+.ql-order-sec h4::before { content: ""; width: 3px; height: 13px; background: #3B82F6; border-radius: 2px; }
+.ql-order-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 5px 24px;
+  font-size: 12.5px; line-height: 1.8; color: #374151; }
+.ql-order-grid span.k { color: #94A3B8; display: inline-block; min-width: 78px; }
+.ql-order-grid .wide { grid-column: 1 / -1; }
+.ql-order-status { display: inline-block; padding: 1px 8px; border-radius: 9px; font-size: 12px;
+  font-weight: 700; background: #EFF6FF; color: #1D4ED8; }
+.ql-order-status.ok { background: #ECFDF3; color: #15803D; }
+.ql-order-status.cancel { background: #FEF2F2; color: #B91C1C; }
+.ql-order-items { width: 100%; border-collapse: collapse; font-size: 12px; }
+.ql-order-items th, .ql-order-items td { border-bottom: 1px solid #F1F5F9; padding: 4px 6px; text-align: left; }
+.ql-order-items th { color: #94A3B8; font-weight: 500; }
+.ql-order-items td.n { text-align: right; font-variant-numeric: tabular-nums; }
+.ql-order-timeline { list-style: none; margin: 0; padding: 0; }
+.ql-order-timeline li { position: relative; padding: 0 0 7px 16px; font-size: 12.5px; color: #374151; }
+.ql-order-timeline li::before { content: ""; position: absolute; left: 0; top: 6px; width: 7px; height: 7px;
+  border-radius: 50%; background: #93C5FD; }
+.ql-order-timeline time { color: #94A3B8; margin-right: 8px; font-variant-numeric: tabular-nums; }
+.ql-order-timeline .bad { color: #B91C1C; font-weight: 600; }
+.ql-order-photos { display: flex; flex-wrap: wrap; gap: 6px; }
+.ql-order-photos a { display: block; width: 64px; height: 64px; border-radius: 6px; overflow: hidden;
+  border: 1px solid #E2E8F2; background: #F8FAFC; }
+.ql-order-photos img { width: 100%; height: 100%; object-fit: cover; }
+.ql-order-tip { margin: 6px 0 0; font-size: 11.5px; color: #94A3B8; line-height: 1.6; }
+.ql-order-link { border: 0; background: none; padding: 0; color: #1D4ED8; font: inherit;
+  text-decoration: underline dotted; cursor: pointer; }
+.ql-order-link:hover { color: #1E40AF; text-decoration-style: solid; }
+
+/* v3.57.21：运单详情补充状态条 / 五段时效 / 双栏信息，尽量对齐运单数据弹层 */
+.ql-order-statusbar { background: linear-gradient(135deg,#F0FDF4 0%,#ECFEFF 100%);
+  border: 1px solid #BBF7D0; border-radius: 11px; padding: 12px 14px; margin-bottom: 10px; }
+.ql-order-statusbar.bad { background: linear-gradient(135deg,#FEF2F2 0%,#FFF7ED 100%);
+  border-color: #FECACA; }
+.ql-order-statusbar .top { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
+.ql-ostatus-big { font-size: 19px; font-weight: 800; color: #15803D; }
+.ql-order-statusbar.bad .ql-ostatus-big { color: #B91C1C; }
+.ql-otags { display: inline-flex; flex-wrap: wrap; gap: 5px; }
+.ql-otag { font-size: 11px; padding: 1px 7px; border-radius: 8px; background: #E0F2FE; color: #0369A1; }
+.ql-otag.warn { background: #FEF3C7; color: #B45309; }
+.ql-ometa { margin-top: 7px; font-size: 12.5px; color: #4B5563; line-height: 1.9;
+  display: flex; flex-wrap: wrap; gap: 4px 14px; align-items: center; }
+.ql-ometa b { color: #B45309; }
+.ql-ometa .sep { color: #D1D5DB; }
+.ql-copy { border: 1px solid #BFDBFE; background: #EFF6FF; color: #1D4ED8; border-radius: 6px;
+  padding: 0 7px; font-size: 11px; cursor: pointer; line-height: 18px; }
+.ql-copy:hover { background: #DBEAFE; }
+.ql-order-steps { display: flex; align-items: flex-start; gap: 0; background: #FFFFFF;
+  border: 1px solid #E7ECF5; border-radius: 10px; padding: 12px 8px; margin-bottom: 10px; }
+.ql-ostep { flex: 1; min-width: 0; text-align: center; position: relative; padding: 0 3px; }
+.ql-ostep::before { content: ""; position: absolute; top: 9px; left: 0; right: 50%; height: 2px; background: #E5E7EB; }
+.ql-ostep::after { content: ""; position: absolute; top: 9px; left: 50%; right: 0; height: 2px; background: #E5E7EB; }
+.ql-ostep:first-child::before, .ql-ostep:last-child::after { display: none; }
+.ql-ostep.done::before, .ql-ostep.done::after { background: #93C5FD; }
+.ql-ostep .dot { position: relative; z-index: 1; width: 20px; height: 20px; margin: 0 auto 5px;
+  border-radius: 50%; background: #E5E7EB; color: #64748B; font-size: 10px; line-height: 20px; font-weight: 700; }
+.ql-ostep.done .dot { background: #3B82F6; color: #FFFFFF; }
+.ql-ostep.bad .dot { background: #EF4444; color: #FFFFFF; }
+.ql-ostep .nm { font-size: 12px; color: #374151; font-weight: 600; }
+.ql-ostep .tm { font-size: 11px; color: #6B7280; margin-top: 2px; font-variant-numeric: tabular-nums; }
+.ql-ostep .du { font-size: 10.5px; color: #3B82F6; margin-top: 1px; }
+.ql-order-cols { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: 10px; align-items: start; }
+.ql-order-cols .ql-order-sec { margin-bottom: 10px; }
+@media (max-width: 760px) { .ql-order-cols { grid-template-columns: 1fr; } }
+
+.ql-order-total { display: flex; justify-content: space-between; align-items: center;
+  border-top: 1px dashed #E5E7EB; margin-top: 8px; padding-top: 8px; font-size: 13px; color: #4B5563; }
+.ql-order-total b { color: #B91C1C; font-size: 15px; }
+.ql-order-total span b { margin-left: 3px; }
+.ql-order-events { margin-top: 2px; }
+.ql-order-events summary { cursor: pointer; font-size: 12px; color: #1D4ED8; margin-bottom: 6px; }
+.ql-order-events ul { margin: 4px 0 0; }
+
+/* v3.57.22：报备详情 / 图片视频在线查看 */
+.ql-abn-card { border: 1px solid #E2E8F0; border-radius: 9px; padding: 10px 12px; margin-bottom: 8px;
+  background: #F8FAFF; }
+.ql-abn-head { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center; font-size: 12.5px; color: #475569; }
+.ql-abn-head b { color: #B91C1C; font-size: 13px; }
+.ql-abn-badge { font-size: 11px; padding: 1px 7px; border-radius: 8px; background: #DCFCE7; color: #15803D; }
+.ql-abn-badge.bad { background: #FEE2E2; color: #B91C1C; }
+.ql-abn-sub { margin-top: 6px; font-size: 12px; color: #64748B; line-height: 1.8; }
+.ql-abn-sub b { color: #334155; font-weight: 600; }
+.ql-abn-proofs { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 7px; }
+.ql-media-thumb { position: relative; width: 72px; height: 72px; border-radius: 7px; overflow: hidden;
+  border: 1px solid #DBEAFE; background: #EFF6FF; padding: 0; cursor: zoom-in; }
+.ql-media-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.ql-media-thumb.video, .ql-media-thumb.audio { display: flex; flex-direction: column; align-items: center;
+  justify-content: center; gap: 2px; color: #1D4ED8; cursor: pointer; font-size: 11px; }
+.ql-media-thumb .ico { font-size: 20px; line-height: 1; }
+.ql-media-thumb em { font-style: normal; font-size: 10px; color: #475569; }
+.ql-abn-process { margin: 7px 0 0; padding: 0; list-style: none; }
+.ql-abn-process li { font-size: 11.5px; color: #64748B; line-height: 1.75; padding-left: 12px; position: relative; }
+.ql-abn-process li::before { content: ""; position: absolute; left: 2px; top: 7px; width: 5px; height: 5px;
+  border-radius: 50%; background: #93C5FD; }
+.ql-abn-process time { color: #94A3B8; margin-right: 5px; }
+.ql-abn-process b { color: #334155; font-weight: 600; }
+.ql-abn-rights { margin-top: 6px; font-size: 11.5px; color: #6B7280; line-height: 1.7;
+  border-top: 1px dashed #E2E8F0; padding-top: 5px; }
+.ql-media-mask { position: fixed; inset: 0; z-index: 2147483100; background: rgba(2,6,23,.86);
+  display: flex; align-items: center; justify-content: center; padding: 24px; }
+.ql-media-mask[hidden] { display: none !important; }
+.ql-media-box { position: relative; max-width: 94vw; max-height: 92vh; display: flex; flex-direction: column;
+  align-items: center; gap: 8px; }
+.ql-media-body img, .ql-media-body video { max-width: 92vw; max-height: 82vh; border-radius: 8px;
+  background: #000; display: block; }
+.ql-media-body audio { width: min(560px, 88vw); }
+.ql-media-body iframe { width: 90vw; height: 82vh; border: 0; border-radius: 8px; background: #fff; }
+.ql-media-close { position: absolute; right: -8px; top: -38px; width: 32px; height: 32px; border-radius: 50%;
+  border: 0; background: rgba(255,255,255,.16); color: #FFFFFF; font-size: 20px; cursor: pointer; }
+.ql-media-close:hover { background: rgba(255,255,255,.28); }
+.ql-media-cap { color: #CBD5E1; font-size: 12px; max-width: 90vw; text-align: center; line-height: 1.6; }
+
+/* v3.57.59：日期区间选择（全月 / 近7天 / 自定义） */
+.date-pick .dp-label { padding: 0 6px 0 7px; font-size: 11.5px; font-weight: 700; color: #374151; }
+.date-pick .scale-tilde { color: #6B7280; font-size: 12px; }

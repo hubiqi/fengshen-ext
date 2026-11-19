@@ -52,7 +52,9 @@ jobs:
             rent.html rent.css rent.js \
             realtime.html realtime.css realtime.js \
             quality.html quality.css quality.js \
-            assess.js sync.js capture.js xlsx.js \
+            todo.html todo.css todo.js \
+            assess.js sync.js capture.js xlsx.js hevc-player.js \
+            vendor/ \
             scripts/hot-update.command \
             native/host.js install-native.command
 

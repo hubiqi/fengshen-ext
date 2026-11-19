@@ -30,7 +30,9 @@ const RENT = chrome.runtime.getURL("rent.html");
 const REALTIME = chrome.runtime.getURL("realtime.html");
 // v3.42.0：质量运营是第七个独立页面
 const QUALITY = chrome.runtime.getURL("quality.html");
-const PAGE_URL = { assess: DASHBOARD, attendance: ATTENDANCE, workforce: WORKFORCE, schedule: SCHEDULE, rent: RENT, realtime: REALTIME, quality: QUALITY };
+// v3.57.79：今日待办是第八个独立页面
+const TODO = chrome.runtime.getURL("todo.html");
+const PAGE_URL = { assess: DASHBOARD, attendance: ATTENDANCE, workforce: WORKFORCE, schedule: SCHEDULE, rent: RENT, realtime: REALTIME, quality: QUALITY, todo: TODO };
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -186,6 +188,52 @@ async function bridgeApi(api, payload, method) {
   return { ok: false, error: String(lastErr || "桥接通道失败") };
 }
 
+/** 通用代理：扩展页直连被 CORS / 重定向拦住时，改由 SW 代取（带 Cookie，可读文本）。 */
+/** 传 6MB 报表页太占消息通道，直接在 SW 里把 secParam / reportIdToken 抠出来返回。 */
+async function quarkSec(reportId) {
+  const base = `https://app2-edu.ele.me/kunkka-svr/fs/fbi/getReport?reportId=${encodeURIComponent(reportId || 860325)}`;
+  try {
+    const meta = await fetch(base, { credentials: "include" });
+    const txt = await meta.text();
+    let j = null;
+    try { j = JSON.parse(txt); } catch (e) { j = null; }
+    const url = j && j.data && j.data.url;
+    if (!url) return { ok: false, error: "没有取到培训报表地址（风神登录态可能已过期）" };
+    const page = await fetch(url, { credentials: "include" });
+    const html = await page.text();
+    const pick = (key) => {
+      const i = html.indexOf('\\"' + key + '\\":\\"');
+      if (i < 0) return "";
+      const from = i + key.length + 6;
+      const to = html.indexOf('\\"', from);
+      return to > from ? html.slice(from, to).replace(/\\\//g, "/") : "";
+    };
+    const sec = pick("secParam");
+    const token = pick("reportIdToken");
+    if (!sec) {
+      return { ok: false, url, error: "报表配置里没有拿到访问密钥（可能需要重新登录风神 / 打开一次 FBI 报表）" };
+    }
+    return { ok: true, sec, token, url };
+  } catch (e) {
+    return { ok: false, error: String(e && e.message ? e.message : e) };
+  }
+}
+
+async function fetchProxy(msg) {
+  const url = msg.url;
+  const method = String(msg.method || "GET").toUpperCase();
+  const init = { method, credentials: "include", redirect: "follow" };
+  if (msg.headers && typeof msg.headers === "object") init.headers = msg.headers;
+  if (msg.body != null) init.body = msg.body;
+  try {
+    const r = await fetch(url, init);
+    const text = await r.text();
+    return { ok: r.ok, status: r.status, finalUrl: r.url, text };
+  } catch (e) {
+    return { ok: false, error: String(e && e.message ? e.message : e) };
+  }
+}
+
 async function fetchBinary(url) {
   try {
     const r = await fetch(url, { credentials: "omit" });
@@ -225,6 +273,16 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     const isGet = msg.type === "BRIDGE_GET";
     bridgeApi(msg.api || msg.url || QUERY_API, msg.payload, isGet ? "GET" : (msg.method || "POST"))
       .then(sendResponse);
+    return true;
+  }
+
+  if (msg.type === "QUARK_SEC") {
+    quarkSec(msg.reportId).then(sendResponse);
+    return true;
+  }
+
+  if (msg.type === "FETCH_PROXY") {
+    fetchProxy(msg).then(sendResponse);
     return true;
   }
 

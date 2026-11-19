@@ -852,7 +852,7 @@ function downloadCsv(filename, rows) {
   a.download = filename;
   document.body.appendChild(a);
   a.click();
-  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 3000);
+  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 300000);
 }
 /** 全部站点名单：逐个站点拉（每个站点一次请求），失败的站点记下来但不阻断。 */
 async function loadAllRoster() {

@@ -30,6 +30,7 @@ const API_SCHEDULE = XT + "xtop.fs.special.schedule.exportSchedule/1.0";
 const API_ATTENDANCE = XT + "xtop.fs.special.realtimeattendance.exportAttendance/1.0";
 // 出勤统计 → 导出明细数据：按 teamIds + 日期范围一次性返回所有骑手的时段明细
 const API_ATT_DETAIL = XT + "xtop.fs.special.examine.exportStatisticsDetail/1.0";
+const API_KPI_DAY = XT + "xtop.performance.fs.opp.perfDetail.queryDetailList/1.0";
 const PAGE_SIZE = 90;
 const THROTTLE_MS = 1200;
 const REFRESH_MS = 5 * 60 * 1000;
@@ -38,6 +39,8 @@ const HISTORY_DAYS = 90;
 const $ = (id) => document.getElementById(id);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const fmt = (n) => String(Math.round(Number(n || 0)));
+const num = (v) => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
+const int = (v) => String(Math.round(num(v)));
 // 与截图一致：整数不补 .0（95%、100%、102.3%、400%）
 const attPct = (n) => {
   const v = Math.round(Number(n || 0) * 10) / 10;
@@ -177,6 +180,7 @@ async function callApi(api, payload, isFirst) {
     } catch (e) {
       lastErr = e;
       if (e.code === "REQUEST_TOO_FREQUENT") { await sleep(1800 * (attempt + 1)); continue; }
+      if (e.code === "303" || /频繁/.test(String(e.message || ""))) { await sleep(1600 * (attempt + 1)); continue; }
       if (e.code === "PAGE_SIZE_OVER_RANGE") { await sleep(1500); continue; }
       if (isFirst && state.via === "direct" && !state.fallbackTried) {
         state.fallbackTried = true;
@@ -422,11 +426,11 @@ function dayFailCount(att) {
 function renderAttTable(id, att, mode, periods) {
   const P = pickP(att, periods);
   // 总宽仍锁 1218px（导出图宽度不变）：末列「时段排班率」固定 112px，其余班次均分，字号保持常规
-  const firstW = 210, rateW = 112, totalW = 1218;
-  const subW = ((totalW - firstW - rateW) / Math.max(1, P.length)).toFixed(2);
+  // 表宽跟随页面可用宽度：前两列固定，其余班次均分剩余空间，右侧空白不再留
+  const firstW = 210, rateW = 112, kpiW = 104;
   const cols = `<colgroup><col style="width:${firstW}px">` +
-    P.map(() => `<col style="width:${subW}px">`).join("") +
-    `<col style="width:${rateW}px"></colgroup>`;
+    P.map(() => "<col>").join("") +
+    `<col style="width:${rateW}px"><col style="width:${kpiW}px"></colgroup>`;
   const rateHeadTip = attRateTip({ wsum: attWeightSum(state.weights) });
   const head = `<thead><tr><th>团队名称</th>` + P.map((p) => {
     const st = att.standards[p];
@@ -434,20 +438,22 @@ function renderAttTable(id, att, mode, periods) {
       ? "全天：有效在线≥6小时 且 完单≥18单"
       : `有效在线≥${(st && st.timeMin) || 0}分钟 且 完单≥${(st && st.orders) || 0}单`;
     return `<th title="${esc(hint)}">${esc(p)}</th>`;
-  }).join("") + `<th class="att-rate" title="${esc(rateHeadTip)}">时段排班率</th></tr></thead>`;
+  }).join("") + `<th class="att-rate" title="${esc(rateHeadTip)}">时段排班率</th>` +
+    `<th class="att-kpi-col" title="达标异常：全天出勤完成（是否有效出勤=1），但 KPI 骑手日明细的骑手达标标准为空">达标异常</th></tr></thead>`;
   const body = ["<tbody>"];
   for (const r of att.rows) {
     body.push(`<tr><td class="name" title="${esc(r.area)}">${esc(shortArea(r.area))}</td>` +
       P.map((p) => attCell(r.cells[p], p, mode, att, r.area)).join("") +
-      attRateCell(attPeriodRate(r.cells, att)) + `</tr>`);
+      attRateCell(attPeriodRate(r.cells, att)) + attKpiCell(r.area) + `</tr>`);
   }
   body.push(`<tr class="total"><td>总计</td>` +
     P.map((p) => attCell(att.totals[p], p, mode, att, "")).join("") +
-    attRateCell(attPeriodRate(att.totals, att)) + `</tr></tbody>`);
+    attRateCell(attPeriodRate(att.totals, att)) + attKpiCell("*") + `</tr></tbody>`);
   const t = $(id);
-  t.style.width = totalW + "px";
-  t.style.minWidth = totalW + "px";
+  t.style.width = "100%";
+  t.style.minWidth = "1218px";
   t.innerHTML = cols + head + body.join("");
+  renderKpiCells();
 }
 
 // ---------------------------------------------------------------- 炸班明细矩阵（v3.14.0）
@@ -702,6 +708,143 @@ function renderRosterMatrix(att, periods) {
   tbl.innerHTML = head + body.join("");
   return total;
 }
+/** 达标异常列：先占位，KPI 日明细到位后回填（按商圈片匹配）。 */
+function attKpiCell(area) {
+  return `<td class="att-kpi-cell" data-kpi-area="${esc(area)}">—</td>`;
+}
+function kpiAreaKey(s) { return shortArea(String(s || "").trim()); }
+function renderKpiCells() {
+  const k = state.kpi || {};
+  const byArea = new Map();
+  for (const x of (k.list || [])) {
+    const key = kpiAreaKey(x.area);
+    byArea.set(key, (byArea.get(key) || 0) + 1);
+  }
+  let total = 0;
+  for (const n of byArea.values()) total += n;
+  for (const td of document.querySelectorAll(".att-kpi-cell")) {
+    const key = td.dataset.kpiArea;
+    const n = key === "*" ? total : (byArea.get(kpiAreaKey(key)) || 0);
+    td.textContent = k.err ? "—" : (n || "—");
+    td.classList.toggle("has-kpi", !k.err && n > 0);
+    td.title = k.err ? "读取失败：" + k.err
+      : (n ? `点击查看 ${key === "*" ? "" : shortArea(key) + " "}达标异常骑手（${n} 人）` : "");
+    td.dataset.kpiCount = String(n || 0);
+  }
+}
+
+/** v3.57.60：KPI「UB 骑手日明细」——全天出勤完成（是否有效出勤=1）但骑手达标标准为空 = 达标异常。 */
+const KPI_DAY_IDX = { day: 0, area: 6, agency: 4, rid: 7, name: 8, orders: 9, online: 11, valid: 12, standard: 15, quitOther: 17, quitArea: 18, delivered: 19, spec: 21, gear: 25 };
+function kpiCell(r, i) {
+  const c = r && r[i];
+  return String(c && c.content != null ? c.content : "").trim();
+}
+async function loadKpiDay(date) {
+  const [y, m, d] = String(date).split("-").map(Number);
+  const start = new Date(y, m - 1, d, 0, 0, 0).getTime();
+  const end = new Date(y, m - 1, d, 23, 59, 59).getTime();
+  const rows = [];
+  for (let page = 1; page <= 30; page++) {
+    const data = await callApi(API_KPI_DAY, { params: { request: {
+      queryParam: { ds: [start, end] }, planType: "UPLUS_AGENCY",
+      tabCode: "RIDER_DAY_DATA_UB", pageIndex: page, pageSize: 100
+    } } });
+    const list = Array.isArray(data && data.data) ? data.data : [];
+    rows.push(...list);
+    if (!list.length || rows.length >= num(data && data.total)) break;
+    await sleep(320);
+  }
+  return rows.map((r) => ({
+    rid: kpiCell(r, KPI_DAY_IDX.rid),
+    name: kpiCell(r, KPI_DAY_IDX.name),
+    area: kpiCell(r, KPI_DAY_IDX.area),
+    agency: kpiCell(r, KPI_DAY_IDX.agency),
+    orders: num(kpiCell(r, KPI_DAY_IDX.orders)),
+    online: num(kpiCell(r, KPI_DAY_IDX.online)),
+    valid: kpiCell(r, KPI_DAY_IDX.valid) === "1",
+    standard: kpiCell(r, KPI_DAY_IDX.standard),
+    quitOther: kpiCell(r, KPI_DAY_IDX.quitOther),
+    quitArea: kpiCell(r, KPI_DAY_IDX.quitArea),
+    delivered: num(kpiCell(r, KPI_DAY_IDX.delivered)),
+    spec: num(kpiCell(r, KPI_DAY_IDX.spec)),
+    gear: kpiCell(r, KPI_DAY_IDX.gear)
+  }));
+}
+/** KPI 骑手日明细的「有效在线时长」单位是秒。 */
+function kpiDurText(sec) {
+  const n = num(sec);
+  if (!n) return "0";
+  const h = Math.floor(n / 3600), m = Math.round((n % 3600) / 60);
+  return h ? `${h}小时${m ? m + "分" : ""}` : `${m}分钟`;
+}
+async function refreshKpiAbnormal(date) {
+  const token = (state.kpiToken = (state.kpiToken || 0) + 1);
+  const link = $("kpi-abn");
+  if (link) { link.textContent = "…"; link.classList.remove("is-err"); }
+  try {
+    const list = await loadKpiDay(date);
+    if (token !== state.kpiToken) return;
+    state.kpi = { date, list: list.filter((x) => x.valid && !x.standard), err: "" };
+  } catch (e) {
+    if (token !== state.kpiToken) return;
+    state.kpi = { date, list: [], err: String((e && e.message) || e) };
+  }
+  renderKpiAbnormal();
+  renderKpiCells();
+}
+function renderKpiAbnormal() {
+  const link = $("kpi-abn");
+  if (!link) return;
+  const k = state.kpi || {};
+  if (k.err) {
+    link.textContent = "读取失败";
+    link.classList.add("is-err");
+    link.title = k.err;
+    return;
+  }
+  link.classList.remove("is-err");
+  const n = (k.list || []).length;
+  link.textContent = n;
+  link.title = n ? "点击查看达标异常骑手明细" : "没有达标异常骑手";
+}
+function openKpiModal(area) {
+  const k = state.kpi || {};
+  if (!k.list || !k.list.length) return;
+  const modal = $("kpi-modal");
+  if (!modal) return;
+  const all = k.list.slice();
+  const list = area && area !== "*"
+    ? all.filter((x) => kpiAreaKey(x.area) === kpiAreaKey(area))
+    : all;
+  if (!list.length) return;
+  const areaLabel = area && area !== "*" ? shortArea(area) + " · " : "";
+  $("kpi-title").textContent = `达标异常骑手 · ${areaLabel}${list.length} 人`;
+  $("kpi-sub").textContent = `${state.kpi.date} · 全天出勤完成但 KPI 骑手日明细「骑手达标标准」为 -`;
+  $("kpi-tip").innerHTML = "判定：骑手日明细 <b>是否有效出勤 = 1</b> 且 <b>骑手达标标准 / W1目标骑手数【商圈片维度】为空</b>。" +
+    "通常是商圈片没绑或目标未配置，导致该骑手当天拿不到达标标准。";
+  const rows = list.sort((a, b) => String(a.name).localeCompare(String(b.name), "zh-CN"));
+  $("kpi-tbl").innerHTML =
+    "<thead><tr><th>骑手</th><th>站点 / 片区</th><th>全天有效时长</th><th>全天完单</th>" +
+    "<th>妥投(不含改派)</th><th>同城异商最后离职</th><th>同商异片最后离职</th>" +
+    "<th>投机单量</th><th>装备抽检不通过</th></tr></thead><tbody>" +
+    rows.map((x) => "<tr>" +
+      `<td>${esc(x.name || "—")}<em>${esc(x.rid)}</em></td>` +
+      `<td>${esc(x.area || x.agency || "—")}</td>` +
+      `<td>${esc(kpiDurText(x.online))}</td>` +
+      `<td>${int(x.orders)}</td>` +
+      `<td>${int(x.delivered)}</td>` +
+      `<td>${esc(x.quitOther || "—")}</td>` +
+      `<td>${esc(x.quitArea || "—")}</td>` +
+      `<td>${int(x.spec)}</td>` +
+      `<td class="${x.gear === "是" ? "kpi-gear-bad" : ""}">${esc(x.gear || "—")}</td>` +
+      "</tr>").join("") + "</tbody>";
+  modal.hidden = false;
+}
+function closeKpiModal() {
+  const m = $("kpi-modal");
+  if (m) m.hidden = true;
+}
+
 function render() {
   const a = state.assess;
   if (!a) return;
@@ -744,7 +887,8 @@ function render() {
       `整商全天：应排 <b>${fmt(day.due)}</b> · 实排 <b>${fmt(day.real)}</b> · 有效出勤 <b>${fmt(day.valid)}</b>` +
       `　｜　实排达成 <b>${day.realRate == null ? "—" : attPct(day.realRate)}</b>` +
       ` · 应排达成 <b>${day.dueRate == null ? "—" : attPct(day.dueRate)}</b>` +
-      ` · 时段排班率 <b>${rateAll.value == null ? "—" : attPct(rateAll.value)}</b>`;
+      ` · 时段排班率 <b>${rateAll.value == null ? "—" : attPct(rateAll.value)}</b>` +
+      `　｜　达标异常 <b class="att-link" id="kpi-abn" title="全天出勤完成但骑手达标标准为 -">…</b> 人`;
     let note = `应排 = 排班统计「应排人数」；实排 = 「排班人数」；有效出勤 = 考勤「排班状态=排班」且` +
       `（时段有效在线≥该时段标准 且 时段完单≥该时段标准）的去重骑手数，全天按 6h / 18 单。` +
       `实排达成 = 有效出勤÷实排；应排达成 = 有效出勤÷应排（多排班可 >100%，不封顶）。` +
@@ -764,6 +908,7 @@ function render() {
     if (skipped.length && P.length <= 1) {
       note += ` <span class="warn-text">今天还没有已结束的班次（${skipped.join("、")} 进行中），矩阵先只看全天。</span>`;
     }
+    refreshKpiAbnormal(state.date);
     $("att-note").innerHTML = note;
     $("att-title-real").textContent = `${state.date} · 实排达成（有效出勤 / 实排）`;
     $("att-title-due").textContent = `${state.date} · 应排达成（有效出勤 / 应排）`;
@@ -1213,6 +1358,31 @@ $("btn-next-day").addEventListener("click", () => setDate(shiftDate(state.date, 
 
 // ---------------------------------------------------------------- 事件
 $("btn-refresh").addEventListener("click", () => restart(true));
+// 达标异常：KPI 骑手日明细入口 + 弹窗
+(function bindKpiAbnormal() {
+  const box = $("att-kpi");
+  if (box) box.addEventListener("click", (e) => {
+    if (e.target && e.target.id === "kpi-abn") openKpiModal();
+  });
+  const m = $("kpi-modal");
+  if (m) m.addEventListener("click", (e) => {
+    if (e.target === m || (e.target.dataset && e.target.dataset.close !== undefined)) closeKpiModal();
+  });
+  const x = $("kpi-x");
+  if (x) x.addEventListener("click", closeKpiModal);
+  for (const id of ["table3", "table4"]) {
+    const t = $(id);
+    if (!t) continue;
+    t.addEventListener("click", (e) => {
+      const td = e.target.closest && e.target.closest("td.att-kpi-cell");
+      if (!td || !num(td.dataset.kpiCount)) return;
+      openKpiModal(td.dataset.kpiArea);
+    });
+  }
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && $("kpi-modal") && !$("kpi-modal").hidden) closeKpiModal();
+  });
+})();
 $("btn-copy-image").addEventListener("click", async (e) => {
   const btn = $("btn-copy-image");
   if (btn.disabled) return;

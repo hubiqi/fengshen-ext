@@ -94,7 +94,7 @@
   </section>
 
   <div class="rt-note" id="rt-note">
-    数据源：<code>getTeamsAll</code> / <code>listCustomTime</code> / <code>listScheduleStatistics</code> / <code>listAttendance</code>（全部沿用风神「实时出勤监控」页的接口，不新增后端）。
+    <span class="src-note">数据源：<code>getTeamsAll</code> / <code>listCustomTime</code> / <code>listScheduleStatistics</code> / <code>listAttendance</code>（全部沿用风神「实时出勤监控」页的接口，不新增后端）。</span>
     <b>口径</b>：应排 = 排班需求人数（<code>predictNum</code>），实排 = 实际排班人数（<code>actualNum</code>），
     在线 = <b>本时段排班且工作状态为在线（<code>workStatus</code> = 1 上班 / 4 申请小休 / 5 申请下班）</b> 的人数（未排班但仍在线的<b>不计入</b>），
     小休（<code>workStatus=2</code>）单独统计、不算在线；下班（<code>workStatus=3</code>）也不算在线；

@@ -386,7 +386,7 @@ ${sheetRels}<Relationship Id="rId${n + 1}" Type="${REL_NS}/styles" Target="style
     a.download = filename;
     document.body.appendChild(a);
     a.click();
-    setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 3000);
+    setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 300000);
     return { blob, bytes };
   }
 

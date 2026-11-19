@@ -19,11 +19,13 @@
   </div>
   <div class="tb-right">
     <div class="date-pick">
-      <button id="btn-prev-month" class="date-step" type="button" title="上一个月" aria-label="上一个月"></button>
-      <input type="month" id="month-picker" aria-label="月份">
-      <button id="btn-next-month" class="date-step" type="button" title="下一个月" aria-label="下一个月"></button>
+      <span class="dp-label">日期</span>
+      <input type="date" id="ql-start" aria-label="开始日期" title="开始日期">
+      <span class="scale-tilde">~</span>
+      <input type="date" id="ql-end" aria-label="结束日期" title="结束日期">
     </div>
-    <button id="btn-this-month" class="ghost date-quick" title="切回当前月份"><span class="dq-dot"></span>本月</button>
+    <button id="btn-full-month" class="ghost date-quick" title="当前整月（1 号 ~ 月底）"><span class="dq-dot"></span>全月</button>
+    <button id="btn-last-7" class="ghost date-quick" title="近 7 天：T-7 ~ T-1（不含今天）">近7天</button>
     <button id="btn-allday" class="ghost" title="设置「全天」班次的达标标准（完单量 / 有效在线时长），可编辑">全天标准 <b id="allday-cfg">18单 / 6小时</b></button>
     <button id="btn-t0-allday" class="ghost" title="今天（T0）是否把「全天」汇总行也算炸班：默认关（一天没过完判不准），打开后仅供参考">T0 全天 <b id="t0-allday-cfg">关</b></button>
     <div class="ql-dims" role="group" aria-label="维度切换">
@@ -64,6 +66,26 @@
       </span>
     </div>
     <div class="ql-pop-body" id="ql-pop-body"></div>
+  </div>
+</div>
+
+<!-- v3.57.20：坏单明细里点运单号，插件内直接看运单详情 -->
+<div class="ql-order-mask" id="ql-order-mask" hidden>
+  <div class="ql-order" role="dialog" aria-modal="true" aria-label="运单详情">
+    <div class="ql-order-head">
+      <strong id="ql-order-title">运单详情</strong>
+      <button id="ql-order-close" class="ghost" title="关闭（Esc）">×</button>
+    </div>
+    <div class="ql-order-body" id="ql-order-body"></div>
+  </div>
+</div>
+
+<!-- v3.57.22：报备图片 / 视频 / 录音在线查看（不下载） -->
+<div class="ql-media-mask" id="ql-media-mask" hidden>
+  <div class="ql-media-box" role="dialog" aria-modal="true">
+    <button class="ql-media-close" id="ql-media-close" title="关闭（Esc）">×</button>
+    <div class="ql-media-body" id="ql-media-body"></div>
+    <div class="ql-media-cap" id="ql-media-cap"></div>
   </div>
 </div>
 

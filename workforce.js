@@ -19,9 +19,9 @@
  *      → 「首跑时间」= 本月入职骑手，入职日期起第一次「全天」行完单量 > 0 的日期
  *   5) KPI管理 → 考核数据明细 · UB考核运单明细（targetId=56740 / kpi/detail）
  *      POST xtop.performance.fs.opp.perfDetail.queryDetailList/1.0，tabCode=TRACK_UB
- *      4 个 Radio 筛选各查一次（物流责未完成单 / 不满意单_投诉单 / 不满意单_差评单 /
- *      不满意单_索赔单），按运单ID去重后读 5 个「是否XX单」列，按复合键计数
- *      → 物流责 / 投诉 / 差评 / 提前点 / 索赔（索赔排除提前点索赔）
+ *      v3.57.17：本月违规处罚 → 剔除申诉成功 / 超时 → 运单号批量回查考核运单明细，
+ *      读 6 个「是否XX单」列，按复合键计数
+ *      → 物流责 / 投诉 / 差评 / 提前点 / 索赔（排除提前点索赔）/ 高笔单未完成单
  *   v3.51.0：坏单链路与质量运营完全对齐 —— 违规 / 申诉明细只做回查匹配、
  *      坏单只认考核明细 4 列（hasKpiTag / keepKpiTagged 单一真源）、
  *      写共享缓存的原始出勤行用 settledRows 过滤当天 T0。
@@ -29,7 +29,7 @@
  *      POST xtop.lpd.quality.control.violation.violationOrderAeolusCenterApi.queryList/1.0
  *      违规状态=成立、违规分类=差评+投诉，接口单次窗口 ≤2 天 → 按 2 天分段拉整月；
  *      运单号去重后逗号拼接（50 单/批）回查「匹配」考核运单明细；
- *      v3.49.0 起坏单标签一律以考核运单明细 5 个「是否XX单」列为准，
+ *      v3.49.0 起坏单标签一律以考核运单明细「是否XX单」列为准，
  *      违规分类本身不算标签、回查命中但 4 列全「否」的单不计入。
  *
  * 与另两个页面一样：直连优先、失败自动切「静默桥接」；跟随当前登录态，不依赖本地服务。
@@ -56,10 +56,11 @@ const API_KPI_DETAIL = XT + "xtop.performance.fs.opp.perfDetail.queryDetailList/
 const API_VIOLATION = XT + "xtop.lpd.quality.control.violation.violationOrderAeolusCenterApi.queryList/1.0";
 const VIOL_SEG_DAYS = 2;          // 违规处罚接口硬限制：单次查询 ≤ 2 天
 const VIOL_BATCH = 50;            // 差评/投诉运单号逗号拼接批量回查考核运单明细的批次大小
-const VIOL_MAX_PAGES = 4;         // 每个 2 天段最多翻 4 页（pageSize=500，异常情况防全量翻页）
+const VIOL_MAX_PAGES = 6;         // 每个 2 天段最多翻 6 页（pageSize=500，异常情况防全量翻页）
 const API_TEAMS = XT + "xtop.lpd.intelligentConfig.getTeamsAll/1.0";
-const SHARE_LS = "wb_wf_raw_v4_";      // v3.57.8：质量运营复用运力模块整月原始明细（同源 localStorage，v4 起含索赔与违规原因）
+const SHARE_LS = "wb_wf_raw_v6_";      // v3.57.18：质量运营复用运力模块整月原始明细（v6 起高笔单与物流责双标签并存）
 const SCALE_LS = "wb_wf_scale_v1";        // v3.31.0：手填的规模目标 / 招募目标 / 招聘缺口 / 渠道名称
+const SCALE_HEAD_LS = "wb_wf_scale_head_v1"; // v3.57.12：可编辑的「规模目标 Wxx」标题（按周次记忆）
 const SCALE_LS_DAYS = "wb_wf_scale_days_v1"; // v3.34.0 两个可调统计天数；v3.35.0 增加首跑对比天数
 const SCALE_DAYS = 5;                      // 有效出勤规模默认近 5 天
 const SCALE_ONJOB_DAYS = 7;                // 在职规模默认近 7 天
@@ -67,6 +68,8 @@ const SCALE_FIRST_DAYS = 14;               // v3.35.0：今日首跑对比窗口
 const SCALE_DAYS_MIN = 1, SCALE_DAYS_MAX = 10;              // 有效出勤规模可选 1~10 天
 const SCALE_ONJOB_DAYS_MIN = 3, SCALE_ONJOB_DAYS_MAX = 15;  // 在职规模可选 3~15 天
 const SCALE_FIRST_DAYS_MIN = 1, SCALE_FIRST_DAYS_MAX = 30;  // 首跑对比窗口可选 1~30 天
+const SCALE_NEAR_DAYS = 7;                 // v3.57.75：近 N 天入职/首跑/离职/流失，默认 7 天
+const SCALE_NEAR_MIN = 1, SCALE_NEAR_MAX = 30;
 const SCALE_MODE_LABEL = {
   any: "有效在线时长>0 或 完单量>0",
   both: "有效在线时长>0 且 完单量>0",
@@ -109,19 +112,19 @@ const MAX_PAGES = 20;
 const SRC_LABEL = { bill: "薪资账单", staff: "人资名单", clue: "线索结果明细",
   att: "本月出勤明细", kpi: "考核运单明细", viol: "违规处罚明细" };
 
-// 考核运单明细的筛选：分别把命中的少量订单拉回来，按运单ID去重后读列值聚合。
-// 三个 is_early_delivery_* 是「提前点送达不满意单」的下属分类，合并后正好覆盖提前点列。
-// v3.57.8：索赔单没有可用的 queryParam 筛选，改从违规处罚列表的 CLAIM 分类取运单号
-// 回查考核明细，读「是否索赔单」列；同时命中提前点的索赔单不计入索赔（避免与提前点重复）。
+// v3.57.17：旧 4 个 Radio 筛选已停用 —— 坏单统一走「本月违规处罚 → 去申诉成功 / 超时
+// → 运单号批量回查考核明细」。常量保留仅为兼容旧测试引用。
 const KPI_FILTERS = [
   { is_lgt_duty_incompleted_order: "1" },
   { is_early_delivery_complain_order: "1" },
   { is_early_delivery_negative_rating_order: "1" },
   { is_early_delivery_claim_order: "1" }
 ];
-const KPI_COLS = ["是否物流责取消单", "是否投诉单", "是否差评单", "是否提前点送达不满意单", "是否索赔单"];
+const KPI_COLS = ["是否物流责取消单", "是否投诉单", "是否差评单", "是否提前点送达不满意单", "是否索赔单", "是否高笔单"];
+// v3.57.17：高笔单只有同时命中物流责取消单才算坏单，且标签显示为「高笔单未完成单」
+const KPI_HIGH_TAG = "高笔单未完成单";
 // 违规分类 → 坏单标签：只取与坏单类型对应的分类，OVERTIME 不参与坏单原因
-const VIOL_CAT_BY_TAG = { lgt: "CANCEL", complain: "COMPLAIN", negative: "BAD_REVIEW", claim: "CLAIM", early: "COMPLAIN" };
+const VIOL_CAT_BY_TAG = { lgt: "CANCEL", complain: "COMPLAIN", negative: "BAD_REVIEW", claim: "CLAIM", early: "COMPLAIN", high: "CANCEL" };
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g,
@@ -189,13 +192,14 @@ const COLS = [
   { h: "投诉", k: "complainText", cls: "num c-flag", csv: "complain" },
   { h: "差评", k: "negativeText", cls: "num c-flag", csv: "negative" },
   { h: "提前点", k: "earlyText", cls: "num c-flag", csv: "early" },
-  { h: "索赔", k: "claimText", cls: "num c-flag", csv: "claim" }
+  { h: "索赔", k: "claimText", cls: "num c-flag", csv: "claim" },
+  { h: "高笔单未完成单", k: "highText", cls: "num c-flag", csv: "high" }
 ];
 const PAGE_COLS = COLS.filter((c) => c.page !== false);
 
 // v3.18.0：排序用「原始数值」而不是带 ¥ / 千分位的显示串；这些 csv 字段都是数值型。
 const NUM_CSV = new Set(["inOrders", "outOrders", "takeSep", "giveSep", "total",
-  "prepay", "bind", "bad", "lgt", "complain", "negative", "early", "claim"]);
+  "prepay", "bind", "bad", "lgt", "complain", "negative", "early", "claim", "high"]);
 const COLLATOR = new Intl.Collator("zh-CN", { numeric: true, sensitivity: "base" });
 const LS_FROZEN = "wb_wf_frozen";
 const DEFAULT_FROZEN = ["teamId", "team"];   // 默认冻结最左两列，可在面板里任意改
@@ -228,12 +232,13 @@ const state = {
   // effective / onJob / firstRun = 商圈片名 -> Set(骑手id)，均已排除人资名单里的离职状态。
   scale: {
     days: loadScaleDays().days, onJobDays: loadScaleDays().onJobDays,
-    firstDays: loadScaleDays().firstDays,
+    firstDays: loadScaleDays().firstDays, nearDays: loadScaleDays().nearDays,
     start: "", end: "", mode: "any", week: "",
     teams: [], areas: [], byTeam: Object.create(null),
     effective: new Map(), onJob: new Map(), firstRun: new Map(), left: new Set(),
     firstDiag: [],                 // v3.35.0：今日首跑逐人判定明细（姓名 / 完单 / 排除原因）
-    manual: loadScaleManual(), ready: false, onJobReady: false, firstReady: false,
+    manual: loadScaleManual(), heads: loadScaleHeads(),
+    ready: false, onJobReady: false, firstReady: false,
     sheets: null, todayRows: null, liveToday: false,
     loading: false, err: "", attAt: ""
   },
@@ -468,7 +473,7 @@ function attStatsFromSheets(sheets) {
 
 // ---------------------------------------------------------------- 考核运单明细
 // 只按 4 个 Radio 筛选拉「有问题」的订单，绝不发起不带筛选的全量运单查询
-// （本月约 6 万单、整月可达 20 万单）。multiHeaders + data 逐行读 5 个「是否XX单」列，
+// （本月约 6 万单、整月可达 20 万单）。multiHeaders + data 逐行读 6 个「是否XX单」列，
 // 按运单ID 去重后按「骑手 id + 站点 id」汇总。
 // 「提前点送达不满意单」没有独立筛选项，实测 3 个 is_early_delivery_* 子筛选的并集
 // 完整覆盖该列。
@@ -476,11 +481,11 @@ function attStatsFromSheets(sheets) {
 // 普通差评 / 投诉单会漏。改从违规处罚列表（违规状态=成立、违规分类=差评+投诉）
 // 拉整月运单号（接口单次 ≤2 天 → 按 2 天分段），去重后逗号拼接 50 单/批回查
 // 考核运单明细，把「是否投诉单 / 是否差评单」等标记与 Radio 筛选的结果取并集。
-// 解析一页考核运单明细：读 5 个「是否XX单」列，按运单ID去重合并进 seen。
+// 解析一页考核运单明细：读 6 个「是否XX单」列，按运单ID去重合并进 seen。
 // 已存在的运单取各标记的并集（max），补全路不会把 Radio 路已拿到的标记冲掉。
 /** 违规处罚 / 申诉明细 item → 仅解析元信息（v3.49.0，与质量运营同口径）。
  *  用户口径：申诉明细只提供运单号用于回查匹配考核运单明细，坏单标签一律以考核明细
- *  5 个「是否XX单」列为准；违规分类（COMPLAIN / BAD_REVIEW）不再产生任何标签。 */
+ *  6 个「是否XX单」列为准；违规分类（COMPLAIN / BAD_REVIEW）不再产生任何标签。 */
 function violationMeta(x) {
   const tid = String((x && x.trackingId) || "").trim();
   if (!tid) return null;
@@ -495,6 +500,7 @@ function violationMeta(x) {
     category: String((x && x.violationCategory) || "").toUpperCase(),
     vtype: num(x && x.violationType),
     status: num(x && x.violationStatus),
+    appeal: num(x && x.appealStatus),
     reason: String((x && x.violationReason) || "").trim()
   };
 }
@@ -542,7 +548,7 @@ function applyViolationMeta(seen) {
   return { filled };
 }
 /** 坏单标签唯一来源 = 考核运单明细 5 列；全「否」的回查命中行不算坏单。 */
-function hasKpiTag(o) { return !!(o && (o.lgt || o.complain || o.negative || o.early || o.claim)); }
+function hasKpiTag(o) { return !!(o && (o.lgt || o.complain || o.negative || o.early || o.claim || o.high)); }
 function keepKpiTagged(seen) {
   let dropped = 0;
   for (const [tid, o] of seen) {
@@ -578,15 +584,19 @@ function parseKpiRows(j, seen) {
       || (iCreate >= 0 ? val(iCreate) : "").replace(/\D/g, "").slice(0, 8);
     const day = /^\d{8}$/.test(d8) ? `${d8.slice(0, 4)}-${d8.slice(4, 6)}-${d8.slice(6, 8)}` : "";
     const early = val(iF[3]) === "是" ? 1 : 0;
+    const lgtRaw = val(iF[0]) === "是";
+    const high = lgtRaw && val(iF[5]) === "是" ? 1 : 0;
     const flags = {
       rid: val(iR), teamId: iS >= 0 ? val(iS) : "",
       tid, day, rname: iName >= 0 ? val(iName) : "", siteName: iN >= 0 ? val(iN) : "",
-      lgt: val(iF[0]) === "是" ? 1 : 0,
+      // 高笔单未完成单：高笔单 + 物流责取消；两个标签同时保留（物流责 + 高笔单未完成单）
+      lgt: lgtRaw ? 1 : 0,
       complain: val(iF[1]) === "是" ? 1 : 0,
       negative: val(iF[2]) === "是" ? 1 : 0,
       early,
       // 索赔单全量，但排除提前点索赔（已计入提前点，不重复计）
-      claim: val(iF[4]) === "是" && !early ? 1 : 0
+      claim: val(iF[4]) === "是" && !early ? 1 : 0,
+      high
     };
     const prev = tid && seen.get(tid);
     if (prev) {
@@ -595,6 +605,7 @@ function parseKpiRows(j, seen) {
       prev.negative = Math.max(prev.negative, flags.negative);
       prev.early = Math.max(prev.early, flags.early);
       prev.claim = Math.max(prev.claim, flags.claim);
+      prev.high = Math.max(prev.high, flags.high);
       if (!prev.day && flags.day) prev.day = flags.day;
       if (!prev.rname && flags.rname) prev.rname = flags.rname;
       if (!prev.siteName && flags.siteName) prev.siteName = flags.siteName;
@@ -605,12 +616,16 @@ function parseKpiRows(j, seen) {
   return { rows: rows.length };
 }
 
-// 违规处罚列表（申诉明细）：按 2 天分段拉整月，返回需要回查考核明细的运单号数组。
-// v3.57.8：不再限制「成立」状态 —— 拉投诉 / 差评 / 索赔 / 物流责分类用于补「违规原因」；只有差评 / 投诉 / 索赔
-// 三类运单号会参与回查（物流责已有专用筛选，OVERTIME 不参与坏单）。
-const VIOL_SUPPLEMENT_CATS = new Set(["BAD_REVIEW", "COMPLAIN", "CLAIM"]);
+// 违规处罚列表（申诉明细）：按 2 天分段拉整月。
+// v3.57.17：新口径 —— 先取本月违规处罚全量，删掉「申诉成功」(appealStatus=30)
+// 和「违规分类 = 超时」(OVERTIME)，剩下的运单号批量回查考核明细确认坏单标签。
 async function loadViolationTrackingIds(b) {
   const tids = new Set();
+  const claimTids = new Set();
+  state.violClaimCount = 0;
+  state.violTotal = 0;
+  state.violAppealPass = 0;
+  state.violOvertime = 0;
   state.violMap = new Map();
   for (let d = 1; d <= b.maxDay; d += VIOL_SEG_DAYS) {
     const segEnd = Math.min(d + VIOL_SEG_DAYS - 1, b.maxDay);
@@ -620,17 +635,19 @@ async function loadViolationTrackingIds(b) {
       const j = await request(API_VIOLATION, "POST", {
         params: { request: {
           violationStartTime: start, violationEndTime: end,
-          // 只要与坏单相关的分类；OVERTIME 占九成且不参与坏单
-          violationCategories: ["BAD_REVIEW", "COMPLAIN", "CLAIM", "CANCEL"],
           pageNo: p, pageSize: 500
         } }
       });
       const d0 = (j && j.result && j.result.data) || {};
       const list = Array.isArray(d0.violationEventList) ? d0.violationEventList : [];
       for (const x of list) {
+        state.violTotal += 1;
         const v = violationMeta(x);
         if (!v) continue;
-        if (VIOL_SUPPLEMENT_CATS.has(v.category)) tids.add(v.tid);
+        if (v.appeal === 30) { state.violAppealPass += 1; continue; }   // 申诉成功
+        if (v.category === "OVERTIME") { state.violOvertime += 1; continue; } // 超时
+        tids.add(v.tid);
+        if (v.category === "CLAIM") claimTids.add(v.tid);
         const prev = state.violMap.get(v.tid);
         if (prev) {
           if (!prev.day && v.day) prev.day = v.day;
@@ -647,6 +664,7 @@ async function loadViolationTrackingIds(b) {
       if (!list.length || list.length < 500 || (d0.count && p * 500 >= d0.count)) break;
     }
   }
+  state.violClaimCount = claimTids.size;
   return [...tids];
 }
 
@@ -654,30 +672,16 @@ async function loadKpiFlags(month) {
   const b = monthBounds(month);
   const seen = new Map();
   state.violMap = new Map();
-  for (const filter of KPI_FILTERS) {
-    for (let p = 1; p <= KPI_MAX_PAGES; p++) {
-      const j = await request(API_KPI_DETAIL, "POST", {
-        params: { request: {
-          queryParam: Object.assign({ ds: [b.start, b.end] }, filter),
-          planType: "UPLUS_AGENCY", tabCode: "TRACK_UB",
-          pageIndex: p, pageSize: KPI_PAGE_SIZE
-        } }
-      });
-      const { rows } = parseKpiRows(j, seen);
-      const d = (j && j.result && j.result.data) || {};
-      const total = num(d.total);
-      if (rows < KPI_PAGE_SIZE || (total && p * KPI_PAGE_SIZE >= total)) break;
-    }
-  }
-  // v3.41.0 差评 / 投诉补全：违规处罚（成立）运单号 → 逗号拼接批量回查考核运单明细。
-  // 失败只少补一部分数据，不让整个考核运单明细源挂掉。
+  // v3.57.17：坏单唯一入口 = 本月违规处罚（去申诉成功 / 去超时）→ 考核运单确认，
+  // 不再额外跑 4 个 Radio 筛选，避免把已申诉成功或超时单混进来。
   try {
     const tids = await loadViolationTrackingIds(b);
     for (let i = 0; i < tids.length; i += VIOL_BATCH) {
       const batch = tids.slice(i, i + VIOL_BATCH);
       const j = await request(API_KPI_DETAIL, "POST", {
         params: { request: {
-          queryParam: { ds: [b.start, b.end], trackingId: batch.join(",") },
+          // 按运单号回查不带 ds —— 索赔 / 投诉可能跨月，带本月区间会把旧运单漏掉
+          queryParam: { trackingId: batch.join(",") },
           planType: "UPLUS_AGENCY", tabCode: "TRACK_UB",
           pageIndex: 1, pageSize: KPI_PAGE_SIZE
         } }
@@ -685,8 +689,10 @@ async function loadKpiFlags(month) {
       parseKpiRows(j, seen);
     }
   } catch (e) {
-    console.warn("[viol] 差评/投诉补全失败（不影响 Radio 筛选结果）:", e && e.message);
+    console.warn("[viol] 坏单确认失败:", e && e.message);
   }
+  // 索赔单同样只认考核运单明细的确认结果
+  state.claimConfirmed = [...seen.values()].filter((o) => o.claim).length;
   // v3.49.0：坏单标签与数量一律以考核运单明细 4 列为准 —— 申诉 / 违规明细只提供
   // 运单号做回查匹配，违规分类不再产生标签；4 列全「否」的回查命中行直接剔除。
   applyViolationMeta(seen);
@@ -697,15 +703,15 @@ async function loadKpiFlags(month) {
     .map((v) => ({ tid: v.tid, day: v.day, rid: v.rid, rname: v.rname || "",
       teamId: normId(v.teamId || ""), siteName: v.siteName || "",
       lgt: v.lgt, complain: v.complain, negative: v.negative, early: v.early,
-      claim: v.claim || 0, reason: v.reason || "" }));
+      claim: v.claim || 0, high: v.high || 0, reason: v.reason || "" }));
   const out = new Map();
   for (const v of seen.values()) {
     if (!v.rid) continue;
     const key = pairKey(v.rid, v.teamId);
-    const cur = out.get(key) || { lgt: 0, complain: 0, negative: 0, early: 0, claim: 0 };
+    const cur = out.get(key) || { lgt: 0, complain: 0, negative: 0, early: 0, claim: 0, high: 0 };
     cur.lgt += v.lgt; cur.complain += v.complain;
     cur.negative += v.negative; cur.early += v.early;
-    cur.claim += v.claim || 0;
+    cur.claim += v.claim || 0; cur.high += v.high || 0;
     out.set(key, cur);
   }
   return out;
@@ -775,7 +781,7 @@ function buildRows(bills, staff, clues) {
         : '<i class="mk na">否</i>',
       bindTip, staffFound: !!st,
       thirdYesRaw: hh ? "是" : "否",
-      bad: 0, firstRun: "", lgt: 0, complain: 0, negative: 0, early: 0, claim: 0
+      bad: 0, firstRun: "", lgt: 0, complain: 0, negative: 0, early: 0, claim: 0, high: 0
     };
   });
 }
@@ -798,11 +804,11 @@ function attachDetail(rows) {
     const f = pairGet(state.kpi, rid, tid) || {};
     r.lgt = f.lgt || 0; r.complain = f.complain || 0;
     r.negative = f.negative || 0; r.early = f.early || 0;
-    r.claim = f.claim || 0;
+    r.claim = f.claim || 0; r.high = f.high || 0;
     const kt = (n) => state.pendingKpi ? "…" : (state.kpiReady ? int(n) : "—");
     r.lgtText = kt(r.lgt); r.complainText = kt(r.complain);
     r.negativeText = kt(r.negative); r.earlyText = kt(r.early);
-    r.claimText = kt(r.claim);
+    r.claimText = kt(r.claim); r.highText = kt(r.high);
   }
   return rows;
 }
@@ -1380,7 +1386,7 @@ function renderHrSummary(base, visible) {
     bits.push(`列筛选 <b>${int(activeCols.length)}</b> 列（${esc(names.join("、"))}，可点表头 ▾ 调整）`);
   }
   if (!state.attReady) bits.push("本月出勤明细未取到，班次异常数 / 首跑时间 / T-1~T-3 显示「—」");
-  if (!state.kpiReady) bits.push("考核运单明细未取到，5 类坏单显示「—」");
+  if (!state.kpiReady) bits.push("考核运单明细未取到，6 类坏单显示「—」");
   $("hr-note").innerHTML = bits.join("　·　");
 }
 /** v3.57.0：结算预警卡片。数字基于「工具条筛选后、不含卡片 / 预警筛选」的集合，
@@ -1585,7 +1591,7 @@ function hrExportAnalysisCsv() {
   const a = document.createElement("a");
   a.href = url; a.download = `风神人资商结算分析_${state.month.replace("-", "")}.csv`;
   document.body.appendChild(a); a.click(); a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  setTimeout(() => URL.revokeObjectURL(url), 300000);
   showNotice(`已导出 ${list.length} 家人资商的结算分析 CSV。`, "blue");
 }
 function renderHrTable(rows) {
@@ -1711,7 +1717,7 @@ function hrExportCsv() {
   const a = document.createElement("a");
   a.href = url; a.download = `风神三方人资监控_${state.month.replace("-", "")}.csv`;
   document.body.appendChild(a); a.click(); a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  setTimeout(() => URL.revokeObjectURL(url), 300000);
   showNotice(`已导出 ${rows.length} 条三方人资结算批次为 CSV（Excel 可直接打开）。`, "blue");
 }
 // 结算标准弹层 ---------------------------------------------------------------
@@ -2007,27 +2013,44 @@ function loadScaleManual() {
 function saveScaleManual() {
   try { localStorage.setItem(SCALE_LS, JSON.stringify(state.scale.manual)); } catch (e) { /* ignore */ }
 }
+/** v3.57.12：表头「规模目标 Wxx」可编辑，按周次记在本机；空 = 用默认标题。 */
+function loadScaleHeads() {
+  try {
+    const o = JSON.parse(localStorage.getItem(SCALE_HEAD_LS) || "{}");
+    return o && typeof o === "object" && !Array.isArray(o) ? o : {};
+  } catch (e) { return {}; }
+}
+function saveScaleHeads() {
+  try { localStorage.setItem(SCALE_HEAD_LS, JSON.stringify(state.scale.heads || {})); } catch (e) { /* ignore */ }
+}
+function scaleTargetHead(week) {
+  const w = week || scaleWeek();
+  const custom = String((state.scale.heads || {})[w] || "").trim();
+  return custom || `规模目标 ${w}`;
+}
 /** v3.34.0：天数只允许各自范围内的整数，越界 / 非数字 / 缺失都退回默认。 */
 function clampScaleDays(v, lo, hi, dflt) {
   const n = Math.round(Number(v));
   return Number.isFinite(n) && n >= lo && n <= hi ? n : dflt;
 }
 function loadScaleDays() {
-  let days = SCALE_DAYS, onJobDays = SCALE_ONJOB_DAYS, firstDays = SCALE_FIRST_DAYS;
+  let days = SCALE_DAYS, onJobDays = SCALE_ONJOB_DAYS, firstDays = SCALE_FIRST_DAYS, nearDays = SCALE_NEAR_DAYS;
   try {
     const o = JSON.parse(localStorage.getItem(SCALE_LS_DAYS) || "{}");
     if (o && typeof o === "object" && !Array.isArray(o)) {
       days = clampScaleDays(o.days, SCALE_DAYS_MIN, SCALE_DAYS_MAX, SCALE_DAYS);
       onJobDays = clampScaleDays(o.onJobDays, SCALE_ONJOB_DAYS_MIN, SCALE_ONJOB_DAYS_MAX, SCALE_ONJOB_DAYS);
       firstDays = clampScaleDays(o.firstDays, SCALE_FIRST_DAYS_MIN, SCALE_FIRST_DAYS_MAX, SCALE_FIRST_DAYS);
+      nearDays = clampScaleDays(o.nearDays, SCALE_NEAR_MIN, SCALE_NEAR_MAX, SCALE_NEAR_DAYS);
     }
   } catch (e) { /* 读不到就用默认 */ }
-  return { days, onJobDays, firstDays };
+  return { days, onJobDays, firstDays, nearDays };
 }
 function saveScaleDays() {
   try {
     localStorage.setItem(SCALE_LS_DAYS, JSON.stringify({
-      days: state.scale.days, onJobDays: state.scale.onJobDays, firstDays: state.scale.firstDays
+      days: state.scale.days, onJobDays: state.scale.onJobDays,
+      firstDays: state.scale.firstDays, nearDays: state.scale.nearDays
     }));
   } catch (e) { /* ignore */ }
 }
@@ -2288,15 +2311,22 @@ function scaleTeamsWithAgency(teams) {
 /** 人资名单：在职 / 今日入职 / 今日离职，按 departmentId 聚合（先按骑手去重）。 */
 function scaleStaffStats(list, today) {
   const out = Object.create(null);
-  const empty = () => ({ onJob: 0, entry: 0, leave: 0 });
+  const empty = () => ({ onJob: 0, entry: 0, leave: 0, entry7: 0, leave7: 0 });
   const m = staffMap(list);
+  const days7 = new Set();
+  const near = state.scale.nearDays || 7;
+  for (let i = 1; i <= near; i++) days7.add(shiftDay(today, -i));
   for (const s of m.values()) {
     const tid = normId(s.departmentId);
     if (!tid) continue;
     if (!out[tid]) out[tid] = empty();
     if (num(s.workStatus) === 1) out[tid].onJob++;
-    if (String(s.entryTime || "").slice(0, 10) === today) out[tid].entry++;
-    if (String(s.leaveTime || "").slice(0, 10) === today) out[tid].leave++;
+    const ed = String(s.entryTime || "").slice(0, 10);
+    const ld = String(s.leaveTime || "").slice(0, 10);
+    if (ed === today) out[tid].entry++;
+    if (ld === today) out[tid].leave++;
+    if (days7.has(ed)) out[tid].entry7++;
+    if (days7.has(ld)) out[tid].leave7++;
   }
   return out;
 }
@@ -2538,6 +2568,7 @@ function scaleTodayFromLiveSheets(liveSheets, nameToId, opts) {
 function computeScaleRows() {
   const s = state.scale;
   const ready = s.ready, onJobReady = s.onJobReady;
+  const staffReady = !!s.staffReady;
   const areas = (s.areas && s.areas.length) ? s.areas : scaleAreaGroups(s.teams);
   s.areas = areas;
   const rows = areas.map((g) => {
@@ -2548,17 +2579,29 @@ function computeScaleRows() {
     const eff = effBase == null ? null : Math.max(0, effBase + effAdj);
     const onJob = onJobBase == null ? null : Math.max(0, onJobBase + onJobAdj);
     const firstRun = s.firstReady ? (s.firstRun.get(g.key) || new Set()).size : null;
-    const dyn = { entry: 0, leave: 0 };
+    const dyn = { entry: 0, leave: 0, entry7: 0, leave7: 0 };
     for (const tid of g.teamIds) {
       const st = s.byTeam[tid] || {};
       dyn.entry += num(st.entry);
       dyn.leave += num(st.leave);
+      dyn.entry7 += num(st.entry7);
+      dyn.leave7 += num(st.leave7);
     }
+    const first7 = s.first7 ? (s.first7.byArea.get(g.key) || 0) : null;
+    const lost = s.lost || null;
+    const lostToday = lost ? (lost.todayByArea.get(g.key) || 0) : null;
+    const lost7 = lost ? (lost.weekByArea.get(g.key) || 0) : null;
     const target = manualNum(m.target), recruit = manualNum(m.recruit), gap = manualNum(m.gap);
     return {
       teamId: g.key, name: g.name, agency: g.agency,
       onJob, onJobBase, onJobAdj, effective: eff, effBase, effAdj,
-      entry: dyn.entry, leave: dyn.leave, firstRun,
+      entry: staffReady ? dyn.entry : null,
+      leave: staffReady ? dyn.leave : null,
+      firstRun,
+      entry7: staffReady ? dyn.entry7 : null,
+      leave7: staffReady ? dyn.leave7 : null,
+      first7,
+      lostToday, lost7,
       target, recruit, gap,
       rate: onJob != null && target && target > 0 ? onJob / target : null,
       net: onJob != null && target !== null ? onJob - target : null
@@ -2581,7 +2624,12 @@ function computeScaleRows() {
   const effAll = effAllBase == null ? null : Math.max(0, effAllBase + effAdjAll);
   const onJobAll = onJobAllBase == null ? null : Math.max(0, onJobAllBase + onJobAdjAll);
   const firstAll = union(s.firstRun, s.firstReady);
-  const target = sum("target", true);
+  // v3.57.11：汇总行手填优先；没填才按商圈片合计（避免空汇总行无法直接改）
+  const tb = s.manual[scaleWeek()] || {};
+  const overTarget = manualNum(tb.target);
+  const overRecruit = manualNum(tb.recruit);
+  const overGap = manualNum(tb.gap);
+  const target = overTarget != null ? overTarget : sum("target", true);
   // 汇总净缺口：只加负数（缺口），超编单独统计，不抵别的片区
   const nets = rows.map((r) => r.net).filter((v) => v != null);
   const netTotal = nets.length ? nets.reduce((a, v) => a + Math.min(v, 0), 0) : null;
@@ -2591,8 +2639,16 @@ function computeScaleRows() {
     teamId: "*", name: "", agency: scaleGlobalAgency(), isTotal: true,
     onJob: onJobAll, onJobBase: onJobAllBase, onJobAdj: onJobAdjAll,
     effective: effAll, effBase: effAllBase, effAdj: effAdjAll,
-    entry: sum("entry"), leave: sum("leave"), firstRun: firstAll,
-    target, recruit: sum("recruit", true), gap: sum("gap", true),
+    entry: staffReady ? sum("entry") : null,
+    leave: staffReady ? sum("leave") : null,
+    firstRun: firstAll,
+    entry7: staffReady ? sum("entry7") : null,
+    leave7: staffReady ? sum("leave7") : null,
+    first7: s.first7 ? s.first7.total : null,
+    lostToday: s.lost ? s.lost.todayTotal : null,
+    lost7: s.lost ? s.lost.weekTotal : null,
+    target, recruit: overRecruit != null ? overRecruit : sum("recruit", true),
+    gap: overGap != null ? overGap : sum("gap", true),
     rate: onJobAll != null && target && target > 0 ? onJobAll / target : null,
     net: netTotal, surplus, defAreas
   };
@@ -2630,6 +2686,22 @@ function scaleCell(field, r) {
     const adjKey = field === "effective" ? "eff" : field;
     return { text: int(v), html, cls, attrs: attrs + ` data-adj="${adjKey}"`, title: tip };
   }
+  if (field === "lostToday" || field === "lost7" || field === "entry7" || field === "leave7" || field === "first7") {
+    const has = num(v) > 0;
+    const label = {
+      lostToday: "今日流失", lost7: "近7天流失",
+      entry7: "近7天入职", leave7: "近7天离职", first7: "近7天首跑"
+    }[field];
+    const tip = field === "lostToday" || field === "lost7"
+      ? `${label}：最后跑单日 n，n+4 为流失日；点击查看骑手与流失前 7 天完单`
+      : `${label}：T-7 ~ T-1（不含今天）逐日计算后求和；点击查看骑手明细`;
+    return {
+      text: int(v),
+      cls: "num" + (has ? " wf-people" : "") + (field === "lostToday" || field === "lost7" ? " cell-lost" : ""),
+      attrs: attrPlus(attrs, has, field),
+      title: tip
+    };
+  }
   if (field === "entry" || field === "firstRun" || field === "leave") {
     const has = num(v) > 0;
     const cls = "num" + (has ? " wf-people" : "");
@@ -2659,9 +2731,8 @@ function scaleTextCell(field, text, cls) {
 }
 function scaleRowHtml(r, isTotal) {
   const s = state.scale;
-  const numTotal = (field) => isTotal
-    ? `<td class="num${r[field] == null ? " c-empty" : ""}" data-row="*" data-cell="${field}">${r[field] == null ? "—" : int(r[field])}</td>`
-    : scaleEditCell(r, field, true, isTotal);
+  // v3.57.11：汇总行的规模目标 / 招募目标 / 招聘缺口也可直接手填（填了以汇总行为准）
+  const numTotal = (field) => scaleEditCell(r, field, true, isTotal);
   const c = (field) => {
     const d = scaleCell(field, r);
     return `<td class="${d.cls}"${d.attrs}${d.title ? ` title="${esc(d.title)}"` : ""}>` +
@@ -2674,13 +2745,142 @@ function scaleRowHtml(r, isTotal) {
   const second = isTotal ? scaleTextCell("agency", r.agency, "name") : scaleTextCell("name", r.name, "name");
   return "<tr" + (isTotal ? ' class="wf-scale-total"' : "") + ">" + [
     first, second, numTotal("target"), c("onJob"), c("effective"), c("rate"), c("net"),
-    c("entry"), c("firstRun"), c("leave"), numTotal("recruit"), numTotal("gap")
+    c("entry"), c("firstRun"), c("leave"),
+    c("lostToday"),
+    c("entry7"), c("first7"), c("leave7"), c("lost7"),
+    numTotal("recruit"), numTotal("gap")
   ].join("") + "</tr>";
 }
 /** v3.35.0：今日首跑逐人判定明细的计数（口径说明与浮层共用）。 */
 function scaleDiagCount(status) {
   return (state.scale.firstDiag || []).filter((x) => x.status === status).length;
 }
+/** 近 7 天首跑：对 T-7~T-1 每一天都用「当天完单>0 且前 N 天无完单」的原定义各算一次，再求和。 */
+let scaleFirst7Cache = { key: "", val: null };
+function scaleFirstRun7(sheets, nameToId, today, histDays, opts) {
+  const o = opts || {};
+  const near = state.scale.nearDays || 7;
+  const key = `${today}|${histDays}|${near}|${(sheets && sheets.length) || 0}|${o.todayRows ? o.todayRows.length : 0}`;
+  if (scaleFirst7Cache.key === key && scaleFirst7Cache.val) return scaleFirst7Cache.val;
+  const byArea = new Map();
+  const people = [];
+  let total = 0;
+  for (let i = near; i >= 1; i--) {
+    const day = shiftDay(today, -i);
+    if (!day) continue;
+    const todayRows = day === today ? o.todayRows : null;
+    const diag = [];
+    const map = scaleFirstRunFromSheets(
+      sheets, nameToId, day, shiftDay(day, -histDays), shiftDay(day, -1),
+      Object.assign({}, o, { todayRows, diag })
+    );
+    const seen = new Set();
+    for (const set of map.values()) {
+      for (const rid of set) {
+        if (seen.has(rid)) continue;
+        seen.add(rid);
+        total++;
+      }
+    }
+    for (const [area, set] of map) byArea.set(area, (byArea.get(area) || 0) + set.size);
+    for (const d of diag) {
+      if (d.status !== "new") continue;
+      people.push({ rid: d.rid, name: d.name || "", area: d.area || ANY_SITE, day, orders: num(d.orders) });
+    }
+  }
+  const val = { byArea, total, people };
+  scaleFirst7Cache = { key, val };
+  return val;
+}
+
+/** 把出勤明细（本月原始行 + 规模区间行）统一成 {rid, name, day, orders, teamId, siteName}。 */
+function scaleLostRows() {
+  const out = [];
+  for (const r of state.attRows || []) {
+    if (!r || r.per !== "全天" || !r.day) continue;
+    if (num(r.orders) <= 0) continue;
+    out.push({ rid: normId(r.rid), name: r.name || "", day: r.day, orders: num(r.orders), teamId: r.teamId, siteName: r.siteName || "" });
+  }
+  for (const sh of state.scale.sheets || []) {
+    const rows = sh && sh.rows;
+    if (!rows || rows.length < 2) continue;
+    const col = Object.create(null);
+    rows[0].forEach((h, i) => {
+      const k = String(h == null ? "" : h).trim();
+      if (k && col[k] === undefined) col[k] = i;
+    });
+    const iR = col["骑手ID"] != null ? col["骑手ID"] : col["骑手id"];
+    const iD = col["考勤日期"] != null ? col["考勤日期"] : col["日期"];
+    const iP = col["时段"];
+    const iO = col["完单量"] != null ? col["完单量"] : col["时段完单量"];
+    if (iR === undefined || iD === undefined || iO === undefined || iP === undefined) continue;
+    const iS = col["站点ID"] != null ? col["站点ID"] : col["站点id"];
+    const iN = col["站点名称"];
+    const iNm = col["骑手姓名"] != null ? col["骑手姓名"] : col["骑手名称"];
+    for (const r of rows.slice(1)) {
+      if (String(r[iP] == null ? "" : r[iP]).trim() !== "全天") continue;
+      if (num(r[iO]) <= 0) continue;
+      const rid = normId(r[iR]);
+      if (!rid) continue;
+      const raw = String(r[iD] == null ? "" : r[iD]);
+      const d8 = raw.replace(/\D/g, "").slice(0, 8);
+      const day = /^\d{8}$/.test(d8) ? `${d8.slice(0, 4)}-${d8.slice(4, 6)}-${d8.slice(6, 8)}` : raw.slice(0, 10);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) continue;
+      out.push({
+        rid,
+        name: iNm === undefined ? "" : String(r[iNm] == null ? "" : r[iNm]).trim(),
+        day, orders: num(r[iO]), teamId: normId(r[iS]),
+        siteName: iN === undefined ? "" : String(r[iN] == null ? "" : r[iN]).trim()
+      });
+    }
+  }
+  return out;
+}
+
+/** 流失：先取骑手最后一次跑单日 n，n+4 即流失日；
+ *  今日流失 = 流失日 = T0；近7天流失 = 流失日落在 T-7 ~ T-1（每天单独计数后求和）。
+ *  只统计近 30 天有过完单的骑手（新人 / 从没跑过的不算）。 */
+function scaleLostStats(rows, teams, today) {
+  const byRider = new Map();
+  for (const x of rows || []) {
+    if (!x.rid || !x.day) continue;
+    let r = byRider.get(x.rid);
+    if (!r) byRider.set(x.rid, r = { name: x.name || "", lastDay: "", area: "", days: new Map() });
+    r.days.set(x.day, Math.max(num(r.days.get(x.day)), num(x.orders)));
+    if (!r.name && x.name) r.name = x.name;
+    if (!r.lastDay || x.day > r.lastDay) {
+      r.lastDay = x.day;
+      r.area = scaleAreaKey(x.teamId, x.siteName, teams) || ANY_SITE;
+    }
+  }
+  const d7 = shiftDay(today, -(state.scale.nearDays || 7));
+  const todayByArea = new Map(), weekByArea = new Map();
+  const people = [];
+  let todayTotal = 0, weekTotal = 0;
+  for (const [rid, info] of byRider) {
+    const lostDay = shiftDay(info.lastDay, 4);
+    if (!lostDay || lostDay > today) continue;
+    const series = [];
+    for (let i = 7; i >= 1; i--) {
+      const day = shiftDay(lostDay, -i);
+      series.push({ day, orders: num(info.days.get(day)) });
+    }
+    const isToday = lostDay === today;
+    const isWeek = lostDay >= d7 && lostDay < today;
+    if (!isToday && !isWeek) continue;
+    people.push({ rid, name: info.name, area: info.area, lastDay: info.lastDay, lostDay, series, today: isToday });
+    if (isToday) {
+      todayTotal++;
+      todayByArea.set(info.area, (todayByArea.get(info.area) || 0) + 1);
+    }
+    if (isWeek) {
+      weekTotal++;
+      weekByArea.set(info.area, (weekByArea.get(info.area) || 0) + 1);
+    }
+  }
+  return { todayByArea, weekByArea, todayTotal, weekTotal, people, riders: byRider.size };
+}
+
 const SCALE_FIRST_STATUS = {
   new: ["计入首跑", "sfd-ok"],
   old: ["窗口内有完单", "sfd-old"],
@@ -2753,8 +2953,14 @@ function bindFirstDetail() {
 const SCALE_PEOPLE = {
   entry: { title: "今日入职", col: "入职时间", tip: "人资名单 entryTime 为今天" },
   leave: { title: "今日离职", col: "离职时间", tip: "人资名单 leaveTime 为今天" },
-  firstRun: { title: "今日首跑", col: "今日完单", tip: "今日完单>0 且对比窗口内从无完单" }
+  firstRun: { title: "今日首跑", col: "今日完单", tip: "今日完单>0 且对比窗口内从无完单" },
+  entry7: { title: "近7天入职", col: "入职时间", tip: "entryTime 落在 T-7 ~ T-1" },
+  leave7: { title: "近7天离职", col: "离职时间", tip: "leaveTime 落在 T-7 ~ T-1" },
+  first7: { title: "近7天首跑", col: "首跑日 / 完单", tip: "T-7 ~ T-1 每天按首跑定义判定后求和" },
+  lostToday: { title: "今日流失", col: "流失日", tip: "最后跑单日 n，n+4 为流失日；取流失日=今天" },
+  lost7: { title: "近7天流失", col: "流失日", tip: "流失日落在 T-7 ~ T-1（逐日计数后求和）" }
 };
+const SCALE_LOST_KINDS = { lostToday: 1, lost7: 1 };
 let peopleState = { kind: "entry", key: "*" };
 function scaleAreaNameOf(key) {
   if (!key || key === "*") return "全部商圈片";
@@ -2770,10 +2976,16 @@ function scaleAreaOfTeam(tid) {
 /** 今日入职 / 离职：人资名单里 entryTime / leaveTime 落在今天的骑手。 */
 function scaleStaffPeople(kind, key) {
   const today = todayYmd();
+  const ranged = kind === "entry7" || kind === "leave7";
+  const near = state.scale.nearDays || 7;
+  const from = ranged ? shiftDay(today, -near) : today;
+  const to = ranged ? shiftDay(today, -1) : today;
+  const isEntry = kind === "entry" || kind === "entry7";
   const out = [];
   for (const s of staffMap(state.staffList || []).values()) {
-    const raw = String((kind === "entry" ? s.entryTime : s.leaveTime) || "");
-    if (raw.slice(0, 10) !== today) continue;
+    const raw = String((isEntry ? s.entryTime : s.leaveTime) || "");
+    const day = raw.slice(0, 10);
+    if (day < from || day > to) continue;
     const area = scaleAreaOfTeam(s.departmentId) || "未识别站点";
     if (key && key !== "*" && area !== key) continue;
     out.push({
@@ -2790,9 +3002,31 @@ function scaleFirstPeople(key) {
     .filter((x) => x.status === "new" && (!key || key === "*" || x.area === key))
     .map((x) => ({ rid: x.rid, name: x.name, area: x.area, time: "", orders: x.orders }));
 }
+/** 各口径下的骑手明细列表。 */
+function scalePeopleList(kind, key) {
+  if (kind === "firstRun") return scaleFirstPeople(key);
+  if (kind === "first7") {
+    const p = state.scale.first7;
+    return ((p && p.people) || []).filter((x) => !key || key === "*" || x.area === key)
+      .map((x) => ({ rid: x.rid, name: x.name, area: x.area, time: `${x.day} · ${int(x.orders)} 单`, orders: x.orders }));
+  }
+  if (kind === "lostToday" || kind === "lost7") {
+    const lost = state.scale.lost;
+    return ((lost && lost.people) || [])
+      .filter((x) => (kind === "lostToday" ? x.today : !x.today))
+      .filter((x) => !key || key === "*" || x.area === key);
+  }
+  return scaleStaffPeople(kind, key);
+}
+function scaleSeriesHtml(series) {
+  return (series || []).map((s) => {
+    const d = String(s.day || "").slice(5);
+    return `<span class="lost-cell${num(s.orders) ? "" : " is-zero"}">${esc(d)}<b>${int(s.orders)}</b></span>`;
+  }).join("");
+}
 function scalePeopleRows() {
   const { kind, key } = peopleState;
-  const list = kind === "firstRun" ? scaleFirstPeople(key) : scaleStaffPeople(kind, key);
+  const list = scalePeopleList(kind, key);
   const q = String(($("sp-search") || {}).value || "").trim().toLowerCase();
   const hit = !q ? list : list.filter((x) =>
     String(x.name || "").toLowerCase().includes(q) || String(x.rid).includes(q)
@@ -2806,28 +3040,39 @@ function renderScalePeople() {
   if (!p) return;
   const { kind, key } = peopleState;
   const meta = SCALE_PEOPLE[kind] || SCALE_PEOPLE.entry;
-  const all = kind === "firstRun" ? scaleFirstPeople(key) : scaleStaffPeople(kind, key);
+  const all = scalePeopleList(kind, key);
   const rows = scalePeopleRows();
   const title = $("sp-title");
-  if (title) title.textContent = `${meta.title} · ${scaleAreaNameOf(key)} · ${all.length} 人`;
+  const nearN = int(state.scale.nearDays || 7);
+  const metaTitle = String(meta.title || "").replace("近7天", `近${nearN}天`);
+  if (title) title.textContent = `${metaTitle} · ${scaleAreaNameOf(key)} · ${all.length} 人`;
   const sum = $("sp-sum");
   if (sum) {
-    sum.textContent = `${meta.title}共 ${all.length} 人 ｜ 口径：${meta.tip}` +
+    sum.textContent = `${metaTitle}共 ${all.length} 人 ｜ 口径：${String(meta.tip).replace("T-7", `T-${nearN}`)}` +
       (all.length ? `；按商圈片列出，点表格里某个片区的数字只看该片区，点汇总行看全部。` : "。");
   }
   const col = $("sp-col4");
   if (col) col.textContent = meta.col;
+  const lostKind = !!SCALE_LOST_KINDS[kind];
+  const col5 = $("sp-col5");
+  if (col5) col5.hidden = !lostKind;
   const hint = $("sp-hint");
-  if (hint) hint.textContent = kind === "firstRun"
+  if (hint) hint.textContent = (kind === "firstRun" || kind === "first7")
     ? "历史按骑手全局对比（换站点不算首跑），已排除离职状态"
     : "来源：人资综合服务 → 成员管理（全部状态）";
   const box = $("sp-body");
   if (!box) return;
-  box.innerHTML = rows.length ? rows.map((x) => `<tr>` +
-    `<td class="sfd-name">${esc(x.name || "未命名")}<em>${esc(x.rid)}</em></td>` +
-    `<td>${esc(x.rid)}</td><td>${esc(x.area || "未识别站点")}</td>` +
-    `<td>${kind === "firstRun" ? int(x.orders) : esc(x.time || "—")}</td></tr>`).join("")
-    : `<tr><td colspan="4" class="c-empty">没有匹配的骑手</td></tr>`;
+  box.innerHTML = rows.length ? rows.map((x) => {
+    const c4 = lostKind
+      ? `${esc(x.lostDay || "—")}<em>最后跑单 ${esc(x.lastDay || "—")}</em>`
+      : (kind === "firstRun" || kind === "first7") ? esc(x.time || "—") : esc(x.time || "—");
+    const c5 = lostKind ? `<td class="lost-series">${scaleSeriesHtml(x.series)}</td>` : "";
+    return `<tr>` +
+      `<td class="sfd-name">${esc(x.name || "未命名")}<em>${esc(x.rid)}</em></td>` +
+      `<td>${esc(x.rid)}</td><td>${esc(x.area || "未识别站点")}</td>` +
+      `<td>${c4}</td>${c5}</tr>`;
+  }).join("")
+    : `<tr><td colspan="${lostKind ? 5 : 4}" class="c-empty">没有匹配的骑手</td></tr>`;
 }
 function openScalePeople(kind, key) {
   const p = $("scale-people");
@@ -2957,28 +3202,44 @@ function renderScale() {
   if (!s.teams.length) s.teams = scaleTeamsWithAgency(scaleTeamsFromBills());
   const week = scaleWeek();
   s.week = week;
+  const targetHead = scaleTargetHead(week);
   const heads = [
-    ["渠道名称", "grp-d"], ["商圈片信息", "grp-d"], [`规模目标 ${week}`, "grp-a"],
+    ["渠道名称", "grp-d"], ["商圈片信息", "grp-d"], [targetHead, "grp-a"],
     ["在职规模", "grp-a"], [`${scaleRangeDays()}天有效出勤规模 ${scaleShortRange()}`, "grp-a"],
     ["规模达成率", "grp-a"], ["净缺口", "grp-c"],
     ["今日入职", "grp-b"], ["今日首跑", "grp-b"], ["今日离职", "grp-b"],
+    ["今日流失", "grp-b"],
+    [`近${int(s.nearDays || 7)}天入职`, "grp-b"], [`近${int(s.nearDays || 7)}天首跑`, "grp-b"],
+    [`近${int(s.nearDays || 7)}天离职`, "grp-b"], [`近${int(s.nearDays || 7)}天流失`, "grp-b"],
     ["招募目标", "grp-b"], ["渠道招聘缺口", "grp-c"]
   ];
   const subs = ["代理商名称", "商圈片名称", ...heads.slice(2).map((h) => h[0])];
-  const cols = [13, 15, 7, 6, 12, 7, 7, 6, 6, 6, 7, 8];
+  const cols = [11, 13, 6, 6, 10, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 7, 8];
+  const lostReady = !!(s.ready || s.onJobReady || s.firstReady);
+  const lostRows = (lostReady && ((state.attRows && state.attRows.length) || (s.sheets && s.sheets.length)))
+    ? scaleLostRows() : null;
+  try { s.lost = lostRows && lostRows.length ? scaleLostStats(lostRows, s.teams, todayYmd()) : null; }
+  catch (e) {
+    try { console.warn("[lost] 流失计算失败", e); } catch (x) { /* ignore */ }
+    s.lost = null;
+  }
   const { rows, total } = computeScaleRows();
   const colgroup = "<colgroup>" + cols.map((w) => `<col style="width:${w}%">`).join("") + "</colgroup>";
   // v3.35.0：「今日首跑」主表头 / 副表头可点，打开逐人判定明细自查
   const clickAttr = ' data-first-detail="1" title="点击查看今日首跑逐人判定明细"';
-  const head = "<thead><tr>" + heads.map(([t, g], i) =>
-    `<th class="${g}"${i === 8 ? clickAttr : ""}>${esc(t)}</th>`).join("") + "</tr></thead>";
+  const head = "<thead><tr>" + heads.map(([t, g], i) => {
+    const title = i === 8 ? clickAttr
+      : i === 2 ? ' contenteditable="true" spellcheck="false" data-scale-head="target" title="点击修改标题（默认 规模目标 Wxx），按周次记忆"'
+      : (i >= 10 && i <= 12 ? ' title="含今天：T-6 ~ T0（今日 + 前 6 天）"' : "");
+    return `<th class="${g}"${title}>${esc(t)}</th>`;
+  }).join("") + "</tr></thead>";
   const subhead = '<tbody><tr class="wf-scale-subhead">' + subs.map((t, i) =>
-    `<th class="${heads[i][1]}"${i === 8 ? clickAttr : ""}>${esc(t)}</th>`).join("") + "</tr></tbody>";
+    `<th class="${heads[i][1]}"${i === 8 ? clickAttr : i === 2 ? ' data-scale-head-sub="target"' : ""}>${esc(t)}</th>`).join("") + "</tr></tbody>";
   // v3.33.0：按参考图「上半渠道汇总 1 行 / 下半代理商名称 · 商圈片名称明细 N 行」，
   // 渠道汇总行紧跟主表头，明细子表头移到汇总行下面（原来第 2 / 3 行对调）。
   const totalBody = "<tbody>" + scaleRowHtml(total, true) + "</tbody>";
   const detailBody = "<tbody>" + (rows.length ? rows.map((r) => scaleRowHtml(r, false)).join("")
-    : `<tr><td colspan="12" class="c-empty">没有取到商圈片，点「立即刷新」重试</td></tr>`) + "</tbody>";
+    : `<tr><td colspan="17" class="c-empty">没有取到商圈片，点「立即刷新」重试</td></tr>`) + "</tbody>";
   box.innerHTML = colgroup + head + totalBody + subhead + detailBody;
 
   const title = $("wf-scale-title");
@@ -2999,6 +3260,10 @@ function renderScale() {
       `<b>在职规模</b> = T-${s.onJobDays}~T-1（${esc(scaleShortOnJobRange())}）考勤明细里「全天」行有效的骑手去重，同样排除离职；` +
       `明细行按商圈片聚合（站点名映射到商圈片，未识别的按站点自成一组）。` +
       `今日入职 / 离职 = 人资名单 <code>entryTime / leaveTime</code> 为今天；` +
+      `<b>今日流失 / 近7天流失</b> = 先取骑手最后一次跑单日 n，<b>n+4 天即流失日</b>；` +
+      `今日 = 流失日期是今天，近N天 = 流失日期落在 T-N~T-1（每天单独判定再求和）；只算近 30 天（T-30~T0）内有过完单的骑手，数据与规模汇总共用同一批出勤明细；` +
+      `<b>近N天入职 / 离职</b> = 前 N 个完整日（T-N ~ T-1，<u>不含今天</u>，N 可在规模设置里改，默认 7）内 entryTime / leaveTime 落在当天的骑手数之和；` +
+      `<b>近N天首跑</b> = T-N ~ T-1（<u>不含今天</u>）每一天都按「当天完单量&gt;0，且该日往前 T-${s.firstDays}~T-1 内没有完单」单独判定，再把 7 天求和（同一骑手在不同天各算一次）；` +
       `<b>今日首跑</b> = 今日「完单量&gt;0」的出勤骑手里，T-${s.firstDays}~T-1（${esc(scaleShortFirstRange())}）` +
       `从未有过完单的「新增」骑手，历史按骑手全局对比（换站点 / 商圈片不算新增）、按今日所在商圈片计数` +
       `、汇总行再跨片区去重，同样排除离职；` +
@@ -3008,7 +3273,9 @@ function renderScale() {
       `<b>在职规模 / ${esc(heads[4][0])}</b> 单元格<u>右键</u>可手动增加 / 减少 n 人（按 ${esc(week)}、按商圈片记在本机，汇总行自动合计）；` +
       `点 <b>今日入职 / 今日首跑 / 今日离职</b> 的数字可看骑手明细。` +
       `浅黄格（渠道名称 / 规模目标 / 招募目标 / 渠道招聘缺口）点击即可填写，按 ${esc(week)} 记在本机；` +
-      `汇总行自动合计。数据源：站点列表 / 人资名单 / 线索结果明细 / 历史出勤明细 ` +
+      `表头「${esc(targetHead)}」也可点击直接改标题（按 ${esc(week)} 记忆，留空恢复默认）；` +
+      `汇总行也能直接填，填了以汇总行为准，没填则自动按片区合计。` +
+      `数据源：站点列表 / 人资名单 / 线索结果明细 / 历史出勤明细 ` +
       `<code>exportStatisticsDetail</code>（T-N~T-1）＋ 今日实时考勤快照 ` +
       `<code>exportAttendance/1.0</code>（T0，与「出勤达成」同源，含当天累计完单量，快照失败才回退当天明细）。` +
       `<br><b>今日首跑自查</b>：点表头「今日首跑」看逐人判定；` +
@@ -3023,12 +3290,30 @@ function renderScale() {
 }
 /** 手填后只改派生格，不整表重绘，编辑焦点不会被抢走。 */
 function updateScaleDerived() {
+  const sc = state.scale;
+  const lostRows = ((state.attRows && state.attRows.length) || (sc.sheets && sc.sheets.length))
+    ? scaleLostRows() : null;
+  try { sc.lost = lostRows && lostRows.length ? scaleLostStats(lostRows, sc.teams, todayYmd()) : null; }
+  catch (e) {
+    try { console.warn("[lost] 流失计算失败", e); } catch (x) { /* ignore */ }
+    sc.lost = null;
+  }
   const { rows, total } = computeScaleRows();
   const byId = Object.create(null);
   for (const r of rows) byId[r.teamId] = r;
   const tds = document.querySelectorAll("#wf-scale-table td.wf-scale-total-cell, #wf-scale-table td[data-cell]");
+  const bucket = state.scale.manual[scaleWeek()] || {};
   for (const td of tds) {
-    if (td.classList.contains("wf-edit")) continue;
+    if (td.classList.contains("wf-edit")) {
+      // v3.57.11：汇总行没手填时，规模目标 / 招募目标 / 招聘缺口跟随片区合计实时更新
+      if (td.dataset.team === "*" && td.dataset.cell && td.dataset.cell !== "channel"
+          && document.activeElement !== td && manualNum(bucket[td.dataset.cell]) == null) {
+        const v = total[td.dataset.cell];
+        td.textContent = v == null ? "" : int(v);
+        td.classList.toggle("empty", v == null);
+      }
+      continue;
+    }
     const r = td.dataset.row === "*" ? total : byId[td.dataset.row];
     if (!r || !td.dataset.cell) continue;
     const d = scaleCell(td.dataset.cell, r);
@@ -3040,9 +3325,11 @@ function updateScaleDerived() {
 /** 汇总数据：站点→商圈片 / 人资统计 / 历史窗口 + 当天两段考勤明细；失败只提示，不挡主表。 */
 async function loadScaleData(gen) {
   const s = state.scale;
+  if (!s.start || !s.end) { const [a, b] = defaultScaleRange(); s.start = a; s.end = b; }
   if (s.loading) return;
   s.loading = true; s.err = "";
   s.ready = false; s.onJobReady = false; s.firstReady = false;
+  s.staffReady = false; s.first7 = null; s.lost = null;
   s.sheets = null; s.firstDiag.length = 0;
   renderScale();
   try {
@@ -3057,6 +3344,7 @@ async function loadScaleData(gen) {
     s.areas = scaleAreaGroups(s.teams);
     s.left = scaleLeftRiders(state.staffList);
     s.byTeam = scaleStaffStats(state.staffList, todayYmd());
+    s.staffReady = !!(state.staffList && state.staffList.length);
     const opts = scaleSheetOpts(s);
     const [os, oe] = scaleOnJobRange();
     const [fs, fe] = scaleFirstRange();
@@ -3066,7 +3354,9 @@ async function loadScaleData(gen) {
     // v3.36.0：今日骑手改走「出勤达成」T0 同款实时考勤快照 exportAttendance（当天完单实时可得）；
     // 快照不可用时才回退当天的 exportStatisticsDetail 明细（可能尚未结算）。
     const last = shiftDay(today, -1);
-    const histStart = [s.start, os, fs].filter(Boolean).sort()[0] || fs;
+    // 流失判定要看近 30 天，历史区间至少拉到 T-30（同一批导出，不额外重复取数）
+    const lostStart = shiftDay(today, -30);
+    const histStart = [s.start, os, fs, lostStart].filter(Boolean).sort()[0] || lostStart;
     const histEnd = [s.end, oe, fe, last].filter(Boolean).sort().pop() || last;
     let hist = null, liveRows = null, todaySheets = null;
     try {
@@ -3101,6 +3391,8 @@ async function loadScaleData(gen) {
       s.todayRows = liveRows;
       const firstOpts = liveRows ? Object.assign({}, opts, { todayRows: liveRows }) : opts;
       s.firstRun = scaleFirstRunFromSheets(s.sheets, nameToId, today, fs, fe, firstOpts);
+      s.first7 = scaleFirstRun7(s.sheets, nameToId, today, s.firstDays,
+        Object.assign({}, firstOpts, { todayRows: s.todayRows }));
       s.firstReady = true;
     }
   } finally {
@@ -3118,6 +3410,8 @@ function refreshScaleFirstRun() {
   const [fs, fe] = scaleFirstRange();
   const opts = Object.assign({}, scaleSheetOpts(s), s.todayRows ? { todayRows: s.todayRows } : {});
   s.firstRun = scaleFirstRunFromSheets(s.sheets, nameToId, todayYmd(), fs, fe, opts);
+  s.first7 = scaleFirstRun7(s.sheets, nameToId, todayYmd(), s.firstDays,
+    Object.assign({}, opts, { todayRows: s.todayRows }));
   s.firstReady = true;
   renderScale();
 }
@@ -3154,13 +3448,15 @@ function openScaleSettings(anchor) {
   scaleDayOptions("ss-days", SCALE_DAYS_MIN, SCALE_DAYS_MAX, state.scale.days);
   scaleDayOptions("ss-onjob-days", SCALE_ONJOB_DAYS_MIN, SCALE_ONJOB_DAYS_MAX, state.scale.onJobDays);
   scaleDayOptions("ss-first-days", SCALE_FIRST_DAYS_MIN, SCALE_FIRST_DAYS_MAX, state.scale.firstDays);
+  scaleDayOptions("ss-near-days", SCALE_NEAR_MIN, SCALE_NEAR_MAX, state.scale.nearDays || SCALE_NEAR_DAYS);
   const note = $("ss-note");
   if (note) {
     const [os, oe] = scaleOnJobRange();
     const [fs, fe] = scaleFirstRange();
     note.textContent = `当前有效出勤区间：${state.scale.start} ~ ${state.scale.end}（${scaleRangeDays()} 天）；`
       + `在职规模：${os} ~ ${oe}（近 ${state.scale.onJobDays} 天）；`
-      + `今日首跑对比：${fs} ~ ${fe}（近 ${state.scale.firstDays} 天）。`;
+      + `今日首跑对比：${fs} ~ ${fe}（近 ${state.scale.firstDays} 天）；`
+      + `近N天指标：${shiftDay(todayYmd(), -(state.scale.nearDays || 7))} ~ ${shiftDay(todayYmd(), -1)}（近 ${state.scale.nearDays || 7} 天）。`;
   }
   placeScaleSettings(anchor);
 }
@@ -3169,24 +3465,25 @@ function closeScaleSettings() {
   if (p) p.hidden = true;
 }
 function applyScaleSettings() {
-  const d = $("ss-days"), j = $("ss-onjob-days"), f = $("ss-first-days");
+  const d = $("ss-days"), j = $("ss-onjob-days"), f = $("ss-first-days"), nd = $("ss-near-days");
   state.scale.days = clampScaleDays(d && d.value, SCALE_DAYS_MIN, SCALE_DAYS_MAX, SCALE_DAYS);
   state.scale.onJobDays = clampScaleDays(j && j.value,
     SCALE_ONJOB_DAYS_MIN, SCALE_ONJOB_DAYS_MAX, SCALE_ONJOB_DAYS);
   state.scale.firstDays = clampScaleDays(f && f.value,
     SCALE_FIRST_DAYS_MIN, SCALE_FIRST_DAYS_MAX, SCALE_FIRST_DAYS);
-  // 应用天数 = 快捷把区间重设为 T-N ~ T-1；手动改日期框仍可继续微调
+  state.scale.nearDays = clampScaleDays(nd && nd.value, SCALE_NEAR_MIN, SCALE_NEAR_MAX, SCALE_NEAR_DAYS);
+  // 统计区间只由「有效出勤天数」决定（T-N ~ T-1），不再单独维护日期框
   const [ds, de] = defaultScaleRange();
   state.scale.start = ds;
   state.scale.end = de;
-  const a = $("scale-start"), b = $("scale-end");
-  if (a) a.value = ds;
-  if (b) b.value = de;
   saveScaleDays();
   closeScaleSettings();
   state.scale.ready = false;
   state.scale.onJobReady = false;
   state.scale.firstReady = false;
+  state.scale.staffReady = false;
+  state.scale.first7 = null;
+  state.scale.lost = null;
   renderScale();
   loadScaleData(state.gen);
 }
@@ -3213,54 +3510,61 @@ function bindScaleSettings() {
   });
 }
 function bindScaleEvents() {
-  const start = $("scale-start"), end = $("scale-end"), mode = $("scale-mode");
+  const mode = $("scale-mode");
   const [ds, de] = defaultScaleRange();
-  state.scale.start = start.value || ds;
-  state.scale.end = end.value || de;
-  start.value = state.scale.start;
-  end.value = state.scale.end;
+  state.scale.start = ds;
+  state.scale.end = de;
   mode.value = state.scale.mode;
-  const reload = () => {
-    const a = parseYmd(start.value), b = parseYmd(end.value);
-    if (!a || !b || b < a) { showNotice("汇总日期区间不合法：结束日不能早于起始日。", "blue"); return; }
-    if ((b - a) / 86400000 > 60) { showNotice("汇总区间最长 60 天，请缩短日期。", "blue"); return; }
-    state.scale.start = start.value;
-    state.scale.end = end.value;
-    // 手动改日期后让「规模设置」里的天数跟实际区间同步（超出 1~10 天保留上次值）
-    const n = Math.round((b - a) / 86400000) + 1;
-    state.scale.days = clampScaleDays(n, SCALE_DAYS_MIN, SCALE_DAYS_MAX, state.scale.days);
-    saveScaleDays();
-    state.scale.ready = false;
-    state.scale.onJobReady = false;
-    renderScale();
-    loadScaleData(state.gen);
-  };
-  start.addEventListener("change", reload);
-  end.addEventListener("change", reload);
   mode.addEventListener("change", () => {
     state.scale.mode = mode.value;
     state.scale.ready = false;
     state.scale.onJobReady = false;
+    state.scale.firstReady = false;
+    state.scale.staffReady = false;
+    state.scale.first7 = null;
+    state.scale.lost = null;
     renderScale();
     loadScaleData(state.gen);
   });
   const table = $("wf-scale-table");
   table.addEventListener("focusin", (e) => {
+    const th = e.target.closest && e.target.closest('th[data-scale-head="target"]');
+    if (th) { th.dataset.orig = th.textContent; return; }
     const td = e.target.closest && e.target.closest("td.wf-edit");
     if (td) td.dataset.orig = td.textContent;
   });
   table.addEventListener("input", (e) => {
+    if (e.target.closest && e.target.closest('th[data-scale-head="target"]')) return;
     const td = e.target.closest && e.target.closest("td.wf-edit");
     if (!td) return;
     td.classList.toggle("empty", !td.textContent.trim());
   });
   table.addEventListener("focusout", (e) => {
+    const th = e.target.closest && e.target.closest('th[data-scale-head="target"]');
+    if (th) {
+      // v3.57.12：标题可改成任意文字，按周次记忆；留空 / 改回默认则恢复自动标题
+      const week = scaleWeek();
+      const def = `规模目标 ${week}`;
+      const txt = th.textContent.replace(/\u00a0/g, " ").replace(/\s+/g, " ").trim();
+      const custom = txt && txt !== def ? txt : "";
+      if (custom) state.scale.heads[week] = custom;
+      else delete state.scale.heads[week];
+      saveScaleHeads();
+      th.textContent = custom || def;
+      const sub = table.querySelector('th[data-scale-head-sub="target"]');
+      if (sub) sub.textContent = custom || def;
+      return;
+    }
     const td = e.target.closest && e.target.closest("td.wf-edit");
     if (!td) return;
     const v = td.textContent.replace(/\u00a0/g, " ").trim();
     const field = td.dataset.field;
     if (field === "channel") scaleBucket().channel = v;
-    else {
+    else if (td.dataset.team === "*") {
+      // v3.57.11：汇总行手填写在周次 bucket 上，填了覆盖片区合计
+      scaleBucket()[field] = td.dataset.numeric === "1"
+        ? (v !== "" && Number.isFinite(Number(v)) ? v : "") : v;
+    } else {
       const m = manualRow(td.dataset.team);
       m[field] = td.dataset.numeric === "1"
         ? (v !== "" && Number.isFinite(Number(v)) ? v : "") : v;
@@ -3271,6 +3575,12 @@ function bindScaleEvents() {
     updateScaleDerived();
   });
   table.addEventListener("keydown", (e) => {
+    const th = e.target.closest && e.target.closest('th[data-scale-head="target"]');
+    if (th) {
+      if (e.key === "Enter") { e.preventDefault(); th.blur(); }
+      else if (e.key === "Escape") { e.preventDefault(); th.textContent = th.dataset.orig || ""; th.blur(); }
+      return;
+    }
     const td = e.target.closest && e.target.closest("td.wf-edit");
     if (!td) return;
     if (e.key === "Enter") { e.preventDefault(); td.blur(); }
@@ -3335,7 +3645,7 @@ function renderTable(rows) {
         : key === "badText" ? ' title="按骑手id＋站点id 统计：出勤明细中除全天外「是否达成 = 未达成」的班次数"'
         : key === "firstRunText" && r.firstRun ? ` title="入职 ${esc(r.entry)} 起首个全天有单日"` : "";
       const na = !isHtml && (raw === "—" || raw === "" || raw === "…") ? " c-empty" : "";
-      const hot = !isHtml && /^(badText|lgtText|complainText|negativeText|earlyText|claimText)$/.test(key)
+      const hot = !isHtml && /^(badText|lgtText|complainText|negativeText|earlyText|claimText|highText)$/.test(key)
         && Number(raw) > 0 ? " hot" : "";
       return `<td class="${(c.cls || "") + na + hot}"${title}>${txt}</td>`;
     }).join("") + "</tr>");
@@ -3645,8 +3955,8 @@ function renderMeta() {
     ? `三方骑手 ${state.hr.rows.length} 人 · 人资商 ${new Set(state.hr.rows.map((r) => r.company).filter(Boolean)).size} 家 · 结算标准 ${state.hr.target} 天`
     : `账单 ${state.bills.length} 条 · 人资 ${state.staff.size} 人 · 线索 ${state.clues.size} 人`;
   $("doc-note").textContent = hr
-    ? "数据源：招募缺口管理 → 线索结果明细（带人资商，按「骑手 + 结算月」取批次）＋ 人资综合服务 → 成员管理（全部状态）＋ 出勤统计 → 明细数据（本月）＋ KPI管理 → 考核运单明细（5 类异常订单）；全部复用运力模块已取到的数据，切换子模块不产生额外请求。一行一个结算批次，同一骑手多个结算月显示多行；「本月班次异常数 / 坏单」跟随账单月份，结算字段与账单月份无关。"
-    : "数据源：骑手账单管家 → 账单查询 ＋ 人资综合服务 → 成员管理（全部状态）＋ 招募缺口管理 → 线索结果明细 ＋ 出勤统计 → 明细数据（本月）＋ KPI管理 → 考核运单明细（仅 5 类异常订单）；账单主表按骑手 id 合并，一行一条账单；出勤与问题订单按「骑手 id ＋ 站点 id」归集";
+    ? "数据源：招募缺口管理 → 线索结果明细（带人资商，按「骑手 + 结算月」取批次）＋ 人资综合服务 → 成员管理（全部状态）＋ 出勤统计 → 明细数据（本月）＋ KPI管理 → 考核运单明细（6 类异常订单）；全部复用运力模块已取到的数据，切换子模块不产生额外请求。一行一个结算批次，同一骑手多个结算月显示多行；「本月班次异常数 / 坏单」跟随账单月份，结算字段与账单月份无关。"
+    : "数据源：骑手账单管家 → 账单查询 ＋ 人资综合服务 → 成员管理（全部状态）＋ 招募缺口管理 → 线索结果明细 ＋ 出勤统计 → 明细数据（本月）＋ KPI管理 → 考核运单明细（仅 6 类异常订单）；账单主表按骑手 id 合并，一行一条账单；出勤与问题订单按「骑手 id ＋ 站点 id」归集";
   const parts = [
     `数据源：账单查询 ${state.month}（${state.bills.length} 条）`,
     `成员管理·全部（${state.staff.size} 人）`,
@@ -3661,7 +3971,7 @@ function renderMeta() {
     "人资名单取全部状态（含离职）；绑定扣款 = 住宿费用 + 车辆租金；" +
     "本月班次异常数 = 出勤明细里除「全天」外「是否达成 = 未达成」的班次数；" +
     "首跑时间只给本月入职骑手，取入职日起首个「全天」完单 > 0 的日期；" +
-    "物流责 / 投诉 / 差评 / 提前点 / 索赔 = 考核运单明细里 5 类异常订单计数（索赔只算非提前点索赔）；" +
+    "物流责 / 投诉 / 差评 / 提前点 / 索赔 / 高笔单未完成单 = 考核运单明细里 6 类异常订单计数（索赔只算非提前点索赔；高笔单须同时命中物流责取消单，两个标签都保留）；" +
     "另用申诉 / 违规处罚列表（违规状态=成立、分类=差评+投诉、接口按 2 天分段）的运单号去重后" +
     "逗号拼接批量回查匹配考核运单明细，两路按运单去重；坏单标签与数量一律以考核运单明细 4 列为准，" +
     "违规分类本身不算标签、回查命中但 4 列全「否」的单不计入（与质量运营同口径）；" +
@@ -3798,7 +4108,7 @@ async function loadDetailData(gen, teamIds) {
     const complete = a.status === "fulfilled" && k.status === "fulfilled";
     const teams = (state.scale.teams && state.scale.teams.length) ? state.scale.teams : scaleTeamsFromBills();
     const raw = {
-      v: 4, month: state.month, ts: Date.now(), complete,
+      v: 6, month: state.month, ts: Date.now(), complete,
       teams: (teams || []).map((t) => ({ id: String(t.id), name: String(t.name || "") })),
       recs: (a.status === "fulfilled" && Array.isArray(a.value.rows))
         ? settledRows(a.value.rows, state.month) : [],
@@ -3857,7 +4167,7 @@ function exportCsv() {
   const a = document.createElement("a");
   a.href = url; a.download = `风神运力模块_${state.month.replace("-", "")}.csv`;
   document.body.appendChild(a); a.click(); a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  setTimeout(() => URL.revokeObjectURL(url), 300000);
   showNotice(`已导出 ${rows.length} 条账单为 CSV（Excel 可直接打开）。`, "blue");
 }
 
@@ -3982,7 +4292,7 @@ window.__SET_WORKFORCE__ = (obj) => {
   }
   if (obj.kpi) {
     state.kpi = hookPairMap(obj.kpi, (v) =>
-      Object.assign({ lgt: 0, complain: 0, negative: 0, early: 0, claim: 0 }, v));
+      Object.assign({ lgt: 0, complain: 0, negative: 0, early: 0, claim: 0, high: 0 }, v));
     state.kpiReady = true;
   }
   if (Array.isArray(obj.staff)) state.staffList = obj.staff;
@@ -3993,8 +4303,8 @@ window.__SET_WORKFORCE__ = (obj) => {
   if (obj.scale) {
     const sc = state.scale, o = obj.scale;
     sc.firstDiag = [];
-    if (o.start) { sc.start = o.start; $("scale-start").value = o.start; }
-    if (o.end) { sc.end = o.end; $("scale-end").value = o.end; }
+    if (o.start) sc.start = o.start;
+    if (o.end) sc.end = o.end;
     if (o.mode) { sc.mode = o.mode; $("scale-mode").value = o.mode; }
     if (o.days !== undefined) sc.days = clampScaleDays(o.days, SCALE_DAYS_MIN, SCALE_DAYS_MAX, SCALE_DAYS);
     if (o.onJobDays !== undefined) sc.onJobDays = clampScaleDays(o.onJobDays,
@@ -4022,6 +4332,8 @@ window.__SET_WORKFORCE__ = (obj) => {
       sc.onJobReady = true;
       const firstOpts = sc.todayRows ? Object.assign({}, opts, { todayRows: sc.todayRows }) : opts;
       sc.firstRun = scaleFirstRunFromSheets(o.sheets, nameToId, o.today || todayYmd(), fs, fe, firstOpts);
+      sc.first7 = scaleFirstRun7(o.sheets, nameToId, o.today || todayYmd(), sc.firstDays,
+        Object.assign({}, firstOpts, { todayRows: sc.todayRows }));
       sc.firstReady = true;
       sc.sheets = o.sheets;
     }

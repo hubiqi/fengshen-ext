@@ -26,7 +26,8 @@
     schedule: HAS_EXT ? chrome.runtime.getURL("schedule.html") : "schedule.html",
     rent: HAS_EXT ? chrome.runtime.getURL("rent.html") : "rent.html",
     realtime: HAS_EXT ? chrome.runtime.getURL("realtime.html") : "realtime.html",
-    quality: HAS_EXT ? chrome.runtime.getURL("quality.html") : "quality.html"
+    quality: HAS_EXT ? chrome.runtime.getURL("quality.html") : "quality.html",
+    todo: HAS_EXT ? chrome.runtime.getURL("todo.html") : "todo.html"
   };
   const POS_KEY = "wb_assess_launcher_pos";   // 只有一颗总按钮，位置只记一份
   const DEF_TOP = DEFAULT_TOP;
@@ -37,7 +38,8 @@
     schedule: { title: "排班模块", sub: "每日排班缺口 · 排班率 · 4排班占比" },
     rent: { title: "物资租用", sub: "电动车 / 住宿 · 逐条与批量登记" },
     realtime: { title: "实时出勤监控", sub: "商圈片 应排 / 实排 / 在线 / 异常 · 30 秒自动刷新" },
-    quality: { title: "质量运营", sub: "整商 / 商圈片 / 站点 / 骑手 · 炸班次 / 坏单日期矩阵" }
+    quality: { title: "质量运营", sub: "整商 / 商圈片 / 站点 / 骑手 · 炸班次 / 坏单日期矩阵" },
+    todo: { title: "今日待办", sub: "商站任务 · 已开始 · 今日预警 / 到期 / 超时" }
   };
 
   // ---------------------------------------------------------------- 样式（Shadow DOM 隔离）
@@ -105,6 +107,7 @@
   .wb-menu-item.rent .mi-ico { background: #C2410C; }
   .wb-menu-item.realtime .mi-ico { background: #1D4ED8; }
   .wb-menu-item.quality .mi-ico { background: #0D9488; }
+  .wb-menu-item.todo .mi-ico { background: #B45309; }
   .wb-menu-item .mi-sub { display: block; font-size: 10px; font-weight: 400; color: #6B7280;
     margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
@@ -132,7 +135,7 @@
   .wb-head .wb-title { font-size: 15px; font-weight: 700; white-space: nowrap; }
   .wb-head .wb-sub { font-size: 11px; opacity: .78; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .wb-head .wb-spacer { flex: 1; }
-  .wb-tabs { display: inline-flex; gap: 4px; padding: 3px; border-radius: 8px;
+  .wb-tabs { display: inline-flex; flex-wrap: wrap; gap: 4px; padding: 3px; border-radius: 8px;
     background: rgba(255,255,255,.10); border: 1px solid rgba(255,255,255,.18); }
   .wb-tab { height: 26px; padding: 0 12px; border-radius: 6px; border: 1px solid transparent;
     background: transparent; color: rgba(255,255,255,.82); font-size: 12px; cursor: pointer;
@@ -191,6 +194,10 @@
   const ICON_SCH = `<svg class="wb-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
       <rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/>
       <path d="M7 14h3M7 17h3M14 14h3M14 17h3"/>
+    </svg>`;
+  const ICON_TODO = `<svg class="wb-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 8l1.8 1.8L13 7"/>
+      <path d="M8 14h8M8 17h5"/>
     </svg>`;
 
   // ---------------------------------------------------------------- 存储（每个入口各记各的位置）
@@ -262,6 +269,10 @@
         <span class="mi-ico">${ICON_RT}</span>
         <span>质量运营<span class="mi-sub">炸班次 / 坏单 · 日期矩阵</span></span>
       </button>
+      <button class="wb-menu-item todo" id="wbMenuTodo">
+        <span class="mi-ico">${ICON_TODO}</span>
+        <span>今日待办<span class="mi-sub">商站任务 · 已开始 · 今日预警</span></span>
+      </button>
     </div>
     <div class="wb-mask" id="wbMask">
       <div class="wb-panel" id="wbPanel">
@@ -277,6 +288,7 @@
             <button class="wb-tab" id="wbTabRent" title="切到物资租用（独立页面）">物资租用</button>
             <button class="wb-tab" id="wbTabRt" title="切到实时出勤监控（独立页面）">实时出勤</button>
             <button class="wb-tab" id="wbTabQl" title="切到质量运营（独立页面）">质量运营</button>
+            <button class="wb-tab" id="wbTabTodo" title="切到今日待办（独立页面）">今日待办</button>
           </div>
           <button class="wb-btn" id="wbReload" title="重新拉取当前看板的数据">↻ 刷新</button>
           <button class="wb-btn" id="wbFull" title="面板占满整个屏幕（默认全屏）">⛶ 窗口</button>
@@ -291,6 +303,7 @@
         <iframe class="wb-frame" id="wbFrameRent" title="风神物资租用" allow="clipboard-write *; fullscreen *" allowtransparency="false" hidden></iframe>
         <iframe class="wb-frame" id="wbFrameRt" title="风神实时出勤监控" allow="clipboard-write *; fullscreen *" allowtransparency="false" hidden></iframe>
         <iframe class="wb-frame" id="wbFrameQl" title="风神质量运营" allow="clipboard-write *; fullscreen *" allowtransparency="false" hidden></iframe>
+        <iframe class="wb-frame" id="wbFrameTodo" title="风神今日待办" allow="clipboard-write *; fullscreen *" allowtransparency="false" hidden></iframe>
         <div class="wb-frame-warn" id="wbFrameWarn" hidden>
           <div class="wb-warn-box">
             <strong>面板内容没能加载</strong>
@@ -311,9 +324,9 @@
   }
   const q = (id) => root.getElementById ? root.getElementById(id) : document.getElementById(id);
   const ball = q("wbBall"), tip = q("wbTip"), mask = q("wbMask"), menu = q("wbMenu");
-  const frames = { assess: q("wbFrame"), attendance: q("wbFrameAtt"), workforce: q("wbFrameWf"), schedule: q("wbFrameSch"), rent: q("wbFrameRent"), realtime: q("wbFrameRt"), quality: q("wbFrameQl") };
-  const tabs = { assess: q("wbTabAssess"), attendance: q("wbTabAtt"), workforce: q("wbTabWf"), schedule: q("wbTabSch"), rent: q("wbTabRent"), realtime: q("wbTabRt"), quality: q("wbTabQl") };
-  const MODES = ["assess", "attendance", "workforce", "schedule", "rent", "realtime", "quality"];
+  const frames = { assess: q("wbFrame"), attendance: q("wbFrameAtt"), workforce: q("wbFrameWf"), schedule: q("wbFrameSch"), rent: q("wbFrameRent"), realtime: q("wbFrameRt"), quality: q("wbFrameQl"), todo: q("wbFrameTodo") };
+  const tabs = { assess: q("wbTabAssess"), attendance: q("wbTabAtt"), workforce: q("wbTabWf"), schedule: q("wbTabSch"), rent: q("wbTabRent"), realtime: q("wbTabRt"), quality: q("wbTabQl"), todo: q("wbTabTodo") };
+  const MODES = ["assess", "attendance", "workforce", "schedule", "rent", "realtime", "quality", "todo"];
 
   // ---------------------------------------------------------------- 自动更新角标（挂在总按钮上）
   let updateState = null;
@@ -503,6 +516,7 @@
   q("wbMenuRent").addEventListener("click", () => { setMenu(false); setOpen(true, "rent"); });
   q("wbMenuRt").addEventListener("click", () => { setMenu(false); setOpen(true, "realtime"); });
   q("wbMenuQl").addEventListener("click", () => { setMenu(false); setOpen(true, "quality"); });
+  q("wbMenuTodo").addEventListener("click", () => { setMenu(false); setOpen(true, "todo"); });
   // 点页面其他地方 / 按 Esc：先收起菜单，再收起面板
   document.addEventListener("pointerdown", (e) => {
     if (!menuOpen) return;
@@ -521,6 +535,7 @@
   tabs.rent.addEventListener("click", () => setOpen(true, "rent"));
   tabs.realtime.addEventListener("click", () => setOpen(true, "realtime"));
   tabs.quality.addEventListener("click", () => setOpen(true, "quality"));
+  tabs.todo.addEventListener("click", () => setOpen(true, "todo"));
   q("wbReload").addEventListener("click", () => {
     frameReady.delete(mode);
     frames[mode].src = PAGES[mode] + "?_t=" + Date.now();

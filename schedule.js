@@ -542,7 +542,7 @@ function exportCsv() {
   a.href = URL.createObjectURL(blob);
   a.download = `风神排班_${d.date}_${d.view === "site" ? "站点" : "商圈片"}.csv`;
   document.body.appendChild(a); a.click(); a.remove();
-  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+  setTimeout(() => URL.revokeObjectURL(a.href), 300000);
   showNotice(`已导出 ${d.date} 排班 CSV（${d.groups.length + 1} 行 × ${head.length} 列）。`, "blue");
 }
 

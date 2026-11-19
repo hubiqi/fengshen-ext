@@ -76,7 +76,9 @@ button.date-quick.is-current .dq-dot { background: #7DD3FC; }
 .doc-note { font-size: 15px; color: #6B7280; text-align: center; margin-top: 10px; line-height: 1.5;
   padding: 0 24px; }
 
-.tbl-scroll { overflow-x: auto; }
+/* v3.57.36：横向滚到边界时不要继续把滚动传给外层（否则整个面板/页面会跟着左右晃） */
+.tbl-scroll { overflow-x: auto; overscroll-behavior-x: contain; }
+html, body { overscroll-behavior-x: none; }
 table.tbl { border-collapse: collapse; table-layout: fixed; margin: 0 auto;
   font-variant-numeric: tabular-nums; }
 table.tbl th, table.tbl td { border: 1px solid #000000; text-align: center;

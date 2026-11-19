@@ -100,6 +100,10 @@
     rules.push(`table.tbl.hr thead th::after { content:none !important;display:none !important; }`);
     // v3.19.1 起不再隐藏滚动列，无需再做 visibility 还原
     rules.push(`.wf-pop { display:none !important; }`);
+    // v3.57.9：导出图去掉底部「数据源：…」描述，口径说明保留
+    rules.push(`.src-note { display:none !important; }`);
+    // v3.57.10：实时出勤导出图不再带底部整段口径说明
+    rules.push(`.rt-note { display:none !important; }`);
     // v3.19.0：排班模块的「时段权重配置」弹窗也不能混进导出图
     rules.push(`.sch-weight-overlay { display:none !important; }`);
     // v3.28.0：实时出勤监控的表格外面包着 max-height:460px 的滚动区，导出必须放开，
@@ -139,6 +143,13 @@
     holder.style.cssText =
       `position:fixed;left:-100000px;top:0;width:${WIDTH}px;background:#FFFFFF;pointer-events:none;`;
     const clone = src.cloneNode(true);
+    // v3.57.79：导出图不带上下文字说明——只保留标题与数据表
+    const HIDE_IN_CAPTURE = [
+      ".doc-note", ".doc-foot", ".att-note", ".ql-foot", ".wf-note", ".hr-note",
+      ".wf-scale-note", ".wf-scale-sub", ".hr-analysis-note", ".mt-note", ".rent-note",
+      ".rt-note", ".sch-note", ".fr-note", ".rm-foot", ".src-note"
+    ].join(",");
+    for (const el of Array.from(clone.querySelectorAll(HIDE_IN_CAPTURE))) el.remove();
     // 独立入口（出勤达成 / 实时出勤）的根节点自带 1240px 外框，导出时左右留 20px 白边，
     // 用 border-box 保证内容区仍是 WIDTH，量高度与出图完全一致。
     const padX = rootId && rootId !== "sheet" ? 20 : 0;
@@ -238,7 +249,7 @@
     document.body.appendChild(a);
     a.click();
     a.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 30000);
+    setTimeout(() => URL.revokeObjectURL(url), 300000);
   }
 
   /**

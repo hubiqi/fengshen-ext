@@ -46,7 +46,7 @@
 <main class="sheet" id="sheet">
   <div class="doc-title">出勤达成 · 应排 / 实排 / 有效出勤</div>
   <div class="doc-sub" id="doc-sub">考核日期 —&nbsp;&nbsp;&nbsp;&nbsp;生成时间 —</div>
-  <div class="doc-note" id="doc-note">数据源：排班统计（应排人数 / 排班人数）+ 实时考勤（排班状态 / 时段有效在线 / 时段完单）；有效出勤按 KPI 时段标准双达标去重，全天按 6h / 18 单</div>
+  <div class="doc-note" id="doc-note"><span class="src-note">数据源：排班统计（应排人数 / 排班人数）+ 实时考勤（排班状态 / 时段有效在线 / 时段完单）；</span>有效出勤按 KPI 时段标准双达标去重，全天按 6h / 18 单</div>
 
   <div class="att-kpi" id="att-kpi"></div>
   <div class="att-note" id="att-note"></div>
@@ -97,6 +97,22 @@
     </div>
     <div class="fail-tip" id="fail-tip"></div>
     <div class="fail-body"><table class="fail-tbl" id="fail-tbl"></table></div>
+  </div>
+</div>
+
+<!-- 达标异常骑手弹窗（KPI 骑手日明细：全天出勤完成但骑手达标标准为 -） -->
+<div class="fail-modal" id="kpi-modal" hidden>
+  <div class="fail-mask" data-close></div>
+  <div class="fail-panel" role="dialog" aria-modal="true" aria-labelledby="kpi-title">
+    <div class="fail-head">
+      <div class="fail-head-text">
+        <div class="fail-title" id="kpi-title">达标异常骑手</div>
+        <div class="fail-sub" id="kpi-sub"></div>
+      </div>
+      <button class="fail-x" id="kpi-x" type="button" title="关闭（Esc）" aria-label="关闭">×</button>
+    </div>
+    <div class="fail-tip" id="kpi-tip"></div>
+    <div class="fail-body"><table class="fail-tbl" id="kpi-tbl"></table></div>
   </div>
 </div>
 

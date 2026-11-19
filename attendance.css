@@ -1,4 +1,5 @@
 /* 出勤达成（独立页面 v3.7.1）
+   v3.57.62：页面与表格铺满可用宽度，不再左右留白。
    基础排版复用 dashboard.css（工具条 / .sheet / table.tbl / 纯净模式），
    本文件只放「实排达成 / 应排达成」两张宽表、概览区与日期选择器的样式。
    配色对齐用户提供的截图：浅色表头、细灰线、百分比绿/橙/红、下方灰字分子分母。
@@ -51,7 +52,7 @@ button.date-active:hover { background: #24457c; }
 .att-switch button:hover:not(.on) { background: #F3F6FC; color: #1D4ED8; }
 .att-switch button.on { background: #2F5597; border-color: #2F5597; color: #FFFFFF; font-weight: 600; }
 .att-switch button:focus-visible { outline: 2px solid #93C5FD; outline-offset: 2px; }
-table.tbl.att { width: 1218px; min-width: 1218px; border: 1px solid #E5E7EB; }
+table.tbl.att { width: 100%; min-width: 1218px; border: 1px solid #E5E7EB; }
 table.tbl.att th, table.tbl.att td { border: 1px solid #E5E7EB; padding: 4px 2px; }
 table.tbl.att thead th { height: 40px; background: #F2F5FA; color: #374151;
   font-size: 14px; font-weight: 700; }
@@ -196,3 +197,18 @@ table.fail-tbl tr.off td { background: #FFF7F7; }
 table.fail-tbl tr.off td.why { color: #B91C1C; }
 table.fail-tbl td.fail-empty { padding: 26px 8px; text-align: center; color: #9CA3AF; }
 body.fail-open { overflow: hidden; }
+
+/* 达标异常骑手（KPI 骑手日明细） */
+.att-kpi .att-link { color: #1D4ED8; text-decoration: underline; cursor: pointer; font-weight: 800; }
+.att-kpi .att-link:hover { color: #1E40AF; }
+.att-kpi .att-link.is-err { color: #B91C1C; }
+#kpi-tbl td.kpi-gear-bad { color: #B91C1C; font-weight: 700; }
+
+/* 达标异常列（KPI 骑手日明细） */
+th.att-kpi-col { text-align: center; }
+td.att-kpi-cell { text-align: center; font-variant-numeric: tabular-nums; color: #94A3B8; }
+td.att-kpi-cell.has-kpi { color: #B91C1C; font-weight: 800; text-decoration: underline; cursor: pointer; }
+td.att-kpi-cell.has-kpi:hover { color: #7F1D1D; }
+
+/* v3.57.62：出勤达成页面铺满面板宽度（原来 .sheet 固定 1240，两边大片空白） */
+body.att-page .sheet { width: auto; max-width: none; margin: 0; padding: 20px 18px 30px; }

@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>今日待办 · 商站任务 + 新骑手培训</title>
+<link rel="stylesheet" href="dashboard.css">
+<link rel="stylesheet" href="todo.css">
+</head>
+<body class="td-page">
+
+<header class="toolbar" id="toolbar">
+  <div class="tb-left">
+    <strong>今日待办</strong>
+    <span class="tb-ver" id="tb-ver">v—</span>
+    <span class="td-state" id="td-state">正在读取商站任务…</span>
+  </div>
+  <div class="tb-right">
+    <button id="btn-train-refresh" class="ghost" title="立即重新读取新骑手培训待办（近 N 天到期、需培训且未完成）">刷新培训</button>
+    <button id="btn-warn-cfg" class="ghost" title="按任务分类设置预警提前量（0 ~ 不限），并可改培训提前天数">预警设置 <b id="warn-summary">0天</b></button>
+    <button id="btn-refresh" class="primary" title="刷新全部数据：商站任务 + 新骑手培训 + 台账明细">立即刷新</button>
+  </div>
+</header>
+
+<div class="notice" id="notice" hidden></div>
+
+<main class="td-wrap" id="td-wrap">
+  <div class="td-kpis" id="td-kpis"></div>
+  <div class="td-kpis td-kpis-cats" id="td-kpis-cats"></div>
+
+  <div class="td-toolbar">
+    <div class="td-filters" role="group" aria-label="任务筛选">
+      <button class="td-filter" data-filter="all">全部</button>
+      <button class="td-filter" data-filter="training">新骑手培训</button>
+      <button class="td-filter" data-filter="ledger">台账待审核</button>
+      <button class="td-filter" data-filter="resign">离职待审核</button>
+      <button class="td-filter active" data-filter="warn">任务预警</button>
+      <button class="td-filter" data-filter="today">今日到期</button>
+      <button class="td-filter" data-filter="overdue">已超时</button>
+    </div>
+    <input id="td-search" class="td-search" type="search" placeholder="搜索任务名称 / 对象 / 执行者 / 分类" autocomplete="off">
+    <span class="td-count" id="td-count"></span>
+  </div>
+
+  <section class="td-train" id="td-train" hidden>
+    <header class="td-train-head">
+      <strong>新骑手培训 · 三级教育卡</strong>
+      <span class="td-train-sub" id="td-train-sub"></span>
+    </header>
+    <div class="td-train-grid" id="td-train-grid"></div>
+  </section>
+
+  <section class="td-ledger" id="td-ledger" hidden>
+    <header class="td-train-head">
+      <strong>台账待审核</strong>
+      <span class="td-train-sub" id="td-ledger-sub"></span>
+      <button id="btn-ledger-refresh" class="ghost td-ledger-refresh" title="重新读取台账明细">刷新台账</button>
+    </header>
+    <div class="td-ledger-list" id="td-ledger-list"></div>
+  </section>
+
+  <section class="td-ledger" id="td-resign" hidden>
+    <header class="td-train-head">
+      <strong>离职待审核</strong>
+      <span class="td-train-sub" id="td-resign-sub"></span>
+      <button id="btn-resign-refresh" class="ghost td-ledger-refresh" title="重新读取离职申请">刷新</button>
+      <button id="btn-resign-open" class="ghost td-ledger-refresh" title="在新标签打开离职管理页">去处理</button>
+    </header>
+    <div class="td-ledger-list" id="td-resign-list"></div>
+  </section>
+
+  <div class="td-table-wrap" id="td-table-wrap">
+    <table class="tbl td-table" id="td-table"></table>
+  </div>
+
+  <div class="doc-foot small" id="td-foot">
+    商站任务：任务列表 <code>listByPage</code>，只取状态 = 已开始；「任务预警」= 有效期距今天数 ≤ 该分类提前量（0 = 只提醒今天到期 / 已超时，「不限」= 全部提醒）。<br>
+    新骑手培训：FBI 报表 <code>新骑手数据培训数据</code>，取需要参加培训 = 是、有效完成培训 = 未完成、距离截止天数 ≤ N（默认 5 天）的骑手，并匹配该骑手的「三级教育卡」台账状态。<br>
+    离职待审核：风神骑手离职管理（离职协议审核状态 = 待审核 / 撤销待审核）；点「处理」直接在弹层里审核离职日期或处理撤销申请。<br>
+    台账待审核：台账制度管理 → 台账明细，取上传时间近 30 天（与页面默认一致）且未检核的台账；点「审核」可直接看附件并检核通过 / 不通过，传错的可以「作废」。<br>
+    两块数据每 5 分钟自动刷新；预警设置与培训天数只保存在本机。
+  </div>
+</main>
+
+<!-- 预警时间分类设置 -->
+<div class="td-cfg-mask" id="td-cfg-mask" hidden>
+  <div class="td-cfg" role="dialog" aria-modal="true" aria-label="预警时间分类设置">
+    <div class="td-cfg-head">
+      <strong>今日预警 · 分类提前量</strong>
+      <button id="td-cfg-close" class="ghost" title="关闭（Esc）">×</button>
+    </div>
+    <div class="td-cfg-body">
+      <p class="td-cfg-tip">上方是各待办分类的预警口径：培训看「近 N 天到期」、台账看「近 N 天上传未审核」、离职看「审批剩余 ≤ N 小时」。<br>
+        下方是商站任务的分类提前量：<b>0</b> = 只提醒今天到期 / 已超时；勾选<b>不限</b> = 该分类所有已开始任务都提醒。</p>
+      <div id="td-cfg-rows"></div>
+    </div>
+    <div class="td-cfg-acts">
+      <button id="td-cfg-reset" class="ghost">恢复默认</button>
+      <button id="td-cfg-save" class="primary">保存并重算</button>
+    </div>
+  </div>
+</div>
+
+<!-- 离职申请处理 -->
+<div class="td-lg-mask" id="td-rg-mask" hidden>
+  <div class="td-lg" role="dialog" aria-modal="true" aria-label="离职申请处理">
+    <div class="td-lg-head">
+      <strong id="td-rg-title">离职申请处理</strong>
+      <button id="td-rg-close" class="ghost" title="关闭（Esc）">×</button>
+    </div>
+    <div class="td-lg-body" id="td-rg-body"></div>
+    <div class="td-lg-acts" id="td-rg-acts"></div>
+  </div>
+</div>
+
+<!-- 台账审核 -->
+<div class="td-lg-mask" id="td-lg-mask" hidden>
+  <div class="td-lg" role="dialog" aria-modal="true" aria-label="台账审核">
+    <div class="td-lg-head">
+      <strong id="td-lg-title">台账审核</strong>
+      <button id="td-lg-close" class="ghost" title="关闭（Esc）">×</button>
+    </div>
+    <div class="td-lg-body" id="td-lg-body"></div>
+    <div class="td-lg-acts">
+      <input id="td-lg-reason" class="td-lg-reason" type="text" placeholder="不通过原因（点「不通过」后填写）" hidden>
+      <button id="td-lg-void" class="ghost danger" title="作废这条台账（不可恢复）">作废</button>
+      <button id="td-lg-reject" class="ghost">不通过</button>
+      <button id="td-lg-pass" class="primary">通过</button>
+    </div>
+  </div>
+</div>
+
+<script src="todo.js"></script>
+</body>
+</html>

@@ -59,7 +59,7 @@
 .wf-note b { color: #1F2937; }
 
 /* ---------------------------------------------------------------- 明细表 */
-.tbl-scroll.wf-scroll { overflow: auto; margin-top: 18px; max-height: 72vh; }
+.tbl-scroll.wf-scroll { overflow: auto; overscroll-behavior: contain; margin-top: 18px; max-height: 72vh; }
 table.tbl.wf { table-layout: auto; width: max-content; min-width: 1240px;
   margin: 0 auto; font-size: 11.5px; }
 table.tbl.wf thead th { height: 42px; font-size: 11.5px; line-height: 1.35;
@@ -194,7 +194,7 @@ body.clean .wf-pop { display: none !important; }
   padding: 4px 9px; border: 1px solid #C7D2E5; border-radius: 5px; font-size: 12px; }
 .wf-scale-first .sfd-wrap { max-height: 430px; overflow: auto; margin-top: 9px;
   border: 1px solid #E5E7EB; border-radius: 5px; }
-.wf-scale-first table.sfd-table { width: 100%; border-collapse: collapse; font-size: 11.5px; }
+.wf-scale-first table.sfd-table { width: 100%; table-layout: auto; border-collapse: collapse; font-size: 11.5px; }
 .wf-scale-first table.sfd-table th,
 .wf-scale-first table.sfd-table td { border-bottom: 1px solid #E5E7EB;
   padding: 5px 7px; text-align: center; white-space: nowrap; }
@@ -334,7 +334,7 @@ table.tbl.hr tr:nth-child(even) td.h-num.h-day { background: #EFF5FF; }
 .hr-analysis-head h3 { margin: 0; font-size: 14px; color: #1F2937; letter-spacing: .2px; }
 .hr-analysis-head h3::before { content: "▍"; color: #2F5597; margin-right: 2px; }
 .hr-analysis-tools .ghost { height: 26px; font-size: 11.5px; padding: 0 10px; }
-.tbl-scroll.hr-analysis-scroll { overflow: auto; max-height: 46vh;
+.tbl-scroll.hr-analysis-scroll { overflow: auto; overscroll-behavior: contain; max-height: 46vh;
   border: 1px solid #DCE6F5; border-radius: 6px; background: #FFF; }
 table.tbl.hr-analysis { table-layout: auto; width: max-content; min-width: 100%;
   margin: 0 auto; font-size: 11.5px; }
@@ -359,7 +359,7 @@ table.tbl.hr td.h-risk { min-width: 108px; font-size: 11px; }
 table.tbl.hr i.mk.warn { color: #B45309; }
 table.tbl.hr i.mk.risk { color: #B91C1C; }
 
-.tbl-scroll.hr-scroll { overflow: auto; margin-top: 18px; max-height: 72vh; }
+.tbl-scroll.hr-scroll { overflow: auto; overscroll-behavior: contain; margin-top: 18px; max-height: 72vh; }
 table.tbl.hr { table-layout: auto; width: max-content; min-width: 1240px;
   margin: 0 auto; font-size: 11.5px; }
 table.tbl.hr thead th { height: 44px; font-size: 11.5px; line-height: 1.35; padding: 3px 7px;
@@ -438,3 +438,27 @@ table.tbl.hr thead th.fz-edge.filtered {
   border: 1px solid #C7D2E5; border-radius: 5px; font-size: 12px; text-align: center; }
 .hr-target-pop .hrt-row .ss-hint { flex: 1 1 100%; font-size: 11px; color: #6B7280;
   line-height: 1.6; }
+
+/* v3.57.12：规模汇总「规模目标 Wxx」表头可直接改标题 */
+table.tbl.wf-scale-table thead th[data-scale-head="target"] { cursor: text; }
+table.tbl.wf-scale-table thead th[data-scale-head="target"]:hover { background: #FFF7DF; color: #1F2937; }
+table.tbl.wf-scale-table thead th[data-scale-head="target"]:focus {
+  outline: 2px solid #3B82F6; outline-offset: -2px; background: #FFFFFF;
+  color: #1F2937; caret-color: #1F2937; }
+
+/* v3.57.36：面板里横向滑到边界时，不要带着整页 / 整个面板一起左右移动 */
+html, body.wf-page { overflow-x: clip; overscroll-behavior-x: none; }
+.tbl-scroll.wf-scroll, .tbl-scroll.hr-scroll, .tbl-scroll.hr-analysis-scroll {
+  overscroll-behavior-x: contain;
+}
+
+/* 流失列：有数字时标红提示 */
+table.tbl.wf td.cell-lost { color: #B91C1C; font-weight: 800; }
+
+/* 流失骑手明细：流失日前 7 天完单 */
+td.lost-series { white-space: nowrap; }
+td.lost-series .lost-cell { display: inline-flex; flex-direction: column; align-items: center;
+  gap: 1px; margin-right: 6px; font-size: 10px; color: #6B7280; }
+td.lost-series .lost-cell b { font-size: 12px; color: #111827; font-variant-numeric: tabular-nums; }
+td.lost-series .lost-cell.is-zero b { color: #CBD5E1; font-weight: 400; }
+td.sfd-name em { display: block; font-style: normal; font-size: 10.5px; color: #9CA3AF; }

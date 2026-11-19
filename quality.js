@@ -57,28 +57,33 @@ const API_ATT_LIVE = XT + "xtop.fs.special.realtimeattendance.exportAttendance/1
 const API_TEAMS = XT + "xtop.lpd.intelligentConfig.getTeamsAll/1.0";
 const API_KPI_DETAIL = XT + "xtop.performance.fs.opp.perfDetail.queryDetailList/1.0";
 const API_VIOLATION = XT + "xtop.lpd.quality.control.violation.violationOrderAeolusCenterApi.queryList/1.0";
+const API_ORDER_DETAIL = XT + "xtop.lpd.matrix.intervention.shippingOrderQuery.getOrderDetail/1.0";
+const API_ORDER_ABNORMAL = XT + "xtop.lpd.cs.delivery.abnormality.query.queryorderabnormalityinfo/1.0";
 
 const ATT_SEG_DAYS = 7;        // 出勤明细接口硬限制：单次最多导出 7 天
 const KPI_PAGE_SIZE = 100;     // 实测 pageSize > 100 接口返回空数据
 const KPI_MAX_PAGES = 10;      // 每类问题订单最多 10 页 = 1000 单
 const VIOL_SEG_DAYS = 2;       // 违规处罚接口硬限制：单次查询 ≤ 2 天
 const VIOL_BATCH = 50;         // 违规运单号逗号拼接批量回查的批次大小
-const VIOL_MAX_PAGES = 4;      // 每个 2 天段最多翻 4 页
+const VIOL_MAX_PAGES = 6;      // 每个 2 天段最多翻 6 页
 const MONTHS_BACK = 11;        // 当前月 + 往前 11 个月
 const LS_MONTH = "wb_ql_month";
+const LS_RANGE = "wb_ql_range";
 
-// 坏单五列（与运力模块 KPI_COLS 同一套；索赔单排除提前点索赔）
+// v3.57.17：旧 4 个 Radio 筛选已停用 —— 坏单统一走「本月违规处罚 → 去申诉成功 / 超时
+// → 运单号批量回查考核明细」。坏单 6 个标签与运力模块 KPI_COLS 同一套。
 const KPI_FILTERS = [
   { is_lgt_duty_incompleted_order: "1" },
   { is_early_delivery_complain_order: "1" },
   { is_early_delivery_negative_rating_order: "1" },
   { is_early_delivery_claim_order: "1" }
 ];
-const KPI_COLS = ["是否物流责取消单", "是否投诉单", "是否差评单", "是否提前点送达不满意单", "是否索赔单"];
+const KPI_COLS = ["是否物流责取消单", "是否投诉单", "是否差评单", "是否提前点送达不满意单", "是否索赔单", "是否高笔单"];
+const KPI_HIGH_TAG = "高笔单未完成单";
 const BAD_COLS = [
-  ["lgt", "物流责"], ["complain", "投诉"], ["negative", "差评"], ["early", "提前点"], ["claim", "索赔"]
+  ["lgt", "物流责"], ["complain", "投诉"], ["negative", "差评"], ["early", "提前点"], ["claim", "索赔"], ["high", "高笔单未完成单"]
 ];
-const VIOL_CAT_BY_TAG = { lgt: "CANCEL", complain: "COMPLAIN", negative: "BAD_REVIEW", claim: "CLAIM", early: "COMPLAIN" };
+const VIOL_CAT_BY_TAG = { lgt: "CANCEL", complain: "COMPLAIN", negative: "BAD_REVIEW", claim: "CLAIM", early: "COMPLAIN", high: "CANCEL" };
 
 // 站点 → 商圈片（与考核看板 / 运力模块 / 排班 / 实时出勤同一套映射；未映射站点自成一组）
 const SITE_TO_AREA = {
@@ -136,7 +141,7 @@ function monthBounds(month) {
   const lastDay = new Date(y, m, 0).getDate();
   const maxDay = month === curMonth() ? Math.min(lastDay, new Date().getDate()) : lastDay;
   return {
-    y, m, maxDay,
+    y, m, lastDay, maxDay,
     start: new Date(y, m - 1, 1, 0, 0, 0).getTime(),
     end: new Date(y, m - 1, maxDay, 23, 59, 59).getTime()
   };
@@ -203,15 +208,48 @@ function applyT0Verdict(recs, now) {
 /** v3.53.0：从出勤记录里剥掉「当天 T0」的历史行，用于① 读取共享缓存时去重
  *  ② 写回共享缓存时保证缓存只含 T+1 结算明细。T0 实时快照另存 state.t0Raw / state.recs，
  *  按出勤达成口径判定后参与矩阵，但绝不写入缓存（避免未结算数据污染其它模块）。 */
-function settledRecs(recs, month) {
-  const m = month || state.month;
-  if (m !== curMonth()) return recs || [];
+function settledRecs(recs) {
+  const start = state.start, end = state.end;
   const t = todayYmd();
-  return (recs || []).filter((r) => r.day !== t);
+  return (recs || []).filter((r) => {
+    if (!r.day) return false;
+    if (start && r.day < start) return false;
+    if (end && r.day > end) return false;
+    return r.day !== t;              // T0 由实时考勤快照单独提供
+  });
 }
 /** v3.53.0：T0 参考出勤达成口径恢复显示 —— 两个视图的列范围都是本月 1 ~ 今天。
  *  （保留函数供标题 / 渲染统一调用，兼容历史月份。） */
 function shiftDayMax(month, b) { return b.maxDay; }
+function ymdAdd(s, n) {
+  const d = new Date(String(s || "") + "T00:00:00");
+  if (isNaN(d.getTime())) return "";
+  d.setDate(d.getDate() + n);
+  return `${d.getFullYear()}-${padDay(d.getMonth() + 1)}-${padDay(d.getDate())}`;
+}
+/** 自定义区间：返回 [YYYY-MM-DD, ...]（最多 93 天，防手滑选太宽）。 */
+function rangeDayList(start, end) {
+  const out = [];
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(start || "") || !/^\d{4}-\d{2}-\d{2}$/.test(end || "")) return out;
+  let cur = start;
+  while (cur && cur <= end && out.length < 93) { out.push(cur); cur = ymdAdd(cur, 1); }
+  return out;
+}
+function rangeMonthList(start, end) {
+  const out = [];
+  for (const d of rangeDayList(start, end)) {
+    const m = d.slice(0, 7);
+    if (!out.includes(m)) out.push(m);
+  }
+  return out;
+}
+/** 当前选择是否正好是某个整月（用于复用运力模块的整月缓存）。 */
+function fullMonthOf(start, end) {
+  if (!start || !end || start.slice(0, 7) !== end.slice(0, 7)) return "";
+  const m = start.slice(0, 7);
+  const b = monthBounds(m);
+  return start === `${m}-01` && end === `${m}-${padDay(b.lastDay)}` ? m : "";
+}
 function monthSegments(month) {
   const b = monthBounds(month);
   const out = [];
@@ -222,7 +260,7 @@ function monthSegments(month) {
 }
 
 // ---------------------------------------------------------------- 网络层（与运力模块同款）
-const SHARE_LS = "wb_wf_raw_v4_";     // 与运力模块同源共享的整月原始明细缓存（v4 起含索赔与违规原因）
+const SHARE_LS = "wb_wf_raw_v6_";     // 与运力模块同源共享的整月原始明细缓存（v6 起高笔单与物流责双标签并存）
 const ALLDAY_LS = "wb_ql_allday_v1";            // v3.48.0：全天班次达标标准（本机记忆、可编辑）
 const ALLDAY_DEFAULT = { orders: 18, hours: 6 };// 默认：完单量 ≥ 18 单 且 有效在线时长 ≥ 6 小时
 function loadAllDayCfg() {
@@ -271,7 +309,7 @@ const state = {
   // 独立标签页默认直连。任一通道失败自动切另一条再试一次。
   via: (typeof window !== "undefined" && window.top !== window.self) ? "bridge" : "direct",
   gen: 0, loading: false, force: false, fromShared: false,
-  month: curMonth(), dim: "agency", scopeKey: "", view: "shift",
+  month: curMonth(), start: "", end: "", dim: "agency", scopeKey: "", view: "shift",
   teams: [], teamErr: "",
   recs: [], attErr: "",
   orders: [], kpiErr: "",
@@ -286,7 +324,7 @@ const state = {
 function readShared(month) {
   try {
     const raw = JSON.parse(localStorage.getItem(SHARE_LS + month) || "null");
-    if (!raw || raw.v !== 4 || raw.month !== month) return null;
+    if (!raw || raw.v !== 6 || raw.month !== month) return null;
     if (raw.complete === false) return null;      // 半份数据不复用
     if (!Array.isArray(raw.recs) || !Array.isArray(raw.orders)) return null;
     if (!raw.recs.length && !raw.orders.length) return null;
@@ -297,7 +335,7 @@ function readShared(month) {
 function writeShared(month, teams, recs, orders) {
   try {
     localStorage.setItem(SHARE_LS + month, JSON.stringify({
-      v: 4, month, ts: Date.now(),
+      v: 6, month, ts: Date.now(),
       teams: (teams || []).map((t) => ({ id: String(t.id), name: String(t.name || "") })),
       recs: recs || [], orders: orders || []
     }));
@@ -435,7 +473,8 @@ async function loadTeams() {
   }));
 }
 async function loadSheets(month, teamIds) {
-  const segs = monthSegments(month);
+  // 只取与所选区间有交集的段，近 7 天不必拉整月
+  const segs = monthSegments(month).filter(([a, b]) => b >= state.start && a <= state.end);
   const sheets = [];
   for (let i = 0; i < segs.length; i++) {
     const [s, e] = segs[i];
@@ -532,7 +571,7 @@ async function loadLiveToday(teamIds, today) {
 /** 解析一页考核运单明细（带日期），按运单ID 去重合并进 seen（同单标记取并集）。 */
 /** 违规处罚 / 申诉明细 item → 仅解析元信息（v3.49.0）。
  *  用户口径：申诉明细只提供运单号用于回查「匹配」考核运单明细，坏单标签一律以考核明细
- *  的 5 个「是否XX单」列为准；违规分类（COMPLAIN / BAD_REVIEW）不再产生任何坏单标签。
+ *  的 6 个「是否XX单」列为准；违规分类（COMPLAIN / BAD_REVIEW）不再产生任何坏单标签。
  *  violationTime「2026-11-12T22:46:16」/ knightInfo「ID-姓名」/ teamInfo「ID-站点名」
  *  仅用于补全考核明细行缺失的日期 / 骑手 / 站点。 */
 function violationMeta(x) {
@@ -549,6 +588,7 @@ function violationMeta(x) {
     category: String((x && x.violationCategory) || "").toUpperCase(),
     vtype: num(x && x.violationType),
     status: num(x && x.violationStatus),
+    appeal: num(x && x.appealStatus),
     reason: String((x && x.violationReason) || "").trim()
   };
 }
@@ -596,7 +636,7 @@ function applyViolationMeta(seen) {
   return { filled };
 }
 /** 坏单标签唯一来源 = 考核运单明细 5 列；全「否」的回查命中行不算坏单。 */
-function hasKpiTag(o) { return !!(o && (o.lgt || o.complain || o.negative || o.early || o.claim)); }
+function hasKpiTag(o) { return !!(o && (o.lgt || o.complain || o.negative || o.early || o.claim || o.high)); }
 function keepKpiTagged(seen) {
   let dropped = 0;
   for (const [tid, o] of seen) {
@@ -626,21 +666,25 @@ function parseBadRows(j, seen) {
       || (iCreate >= 0 ? val(iCreate) : "").replace(/\D/g, "").slice(0, 8);
     const day = /^\d{8}$/.test(d8) ? `${d8.slice(0, 4)}-${d8.slice(4, 6)}-${d8.slice(6, 8)}` : "";
     const early = val(iF[3]) === "是" ? 1 : 0;
+    const lgtRaw = val(iF[0]) === "是";
+    const high = lgtRaw && val(iF[5]) === "是" ? 1 : 0;
     const rec = {
       tid, day,
       rid: val(iR), rname: iName >= 0 ? val(iName) : "",
       teamId: iS >= 0 ? normId(val(iS)) : "",
       siteName: iN >= 0 ? val(iN) : "",
-      lgt: val(iF[0]) === "是" ? 1 : 0,
+      // 高笔单未完成单：高笔单 + 物流责取消；两个标签同时保留（物流责 + 高笔单未完成单）
+      lgt: lgtRaw ? 1 : 0,
       complain: val(iF[1]) === "是" ? 1 : 0,
       negative: val(iF[2]) === "是" ? 1 : 0,
       early,
       // 索赔单全量，排除提前点索赔（已计提前点，不重复）
-      claim: val(iF[4]) === "是" && !early ? 1 : 0
+      claim: val(iF[4]) === "是" && !early ? 1 : 0,
+      high
     };
     const prev = seen.get(tid);
     if (prev) {
-      for (const k of ["lgt", "complain", "negative", "early", "claim"]) prev[k] = Math.max(prev[k], rec[k]);
+      for (const k of ["lgt", "complain", "negative", "early", "claim", "high"]) prev[k] = Math.max(prev[k], rec[k]);
       if (!prev.day && rec.day) prev.day = rec.day;
       if (!prev.rname && rec.rname) prev.rname = rec.rname;
       if (!prev.siteName && rec.siteName) prev.siteName = rec.siteName;
@@ -651,13 +695,17 @@ function parseBadRows(j, seen) {
   }
   return { rows: rows.length };
 }
-/** 违规处罚列表（申诉明细）：按 2 天分段拉整月，返回需要回查考核明细的运单号数组。
- *  v3.57.8：不再限制「成立」状态 —— 拉投诉 / 差评 / 索赔 / 物流责分类用于补「违规原因」；只有差评 / 投诉 / 索赔
- *  三类运单号参与回查（物流责已有专用筛选，OVERTIME 不参与坏单）。
+/** 违规处罚列表（申诉明细）：按 2 天分段拉整月。
+ *  v3.57.17：新口径 —— 先取本月违规处罚全量，删掉「申诉成功」(appealStatus=30)
+ *  和「违规分类 = 超时」(OVERTIME)，剩下的运单号批量回查考核明细确认坏单标签。
  *  接口对连发敏感（实测连发 6 段即触发「请求太频繁」），段间加 400ms 间隔 + 限频退避重试。 */
-const VIOL_SUPPLEMENT_CATS = new Set(["BAD_REVIEW", "COMPLAIN", "CLAIM"]);
 async function loadViolationTrackingIds(b) {
   const tids = new Set();
+  const claimTids = new Set();
+  state.violClaimCount = 0;
+  state.violTotal = 0;
+  state.violAppealPass = 0;
+  state.violOvertime = 0;
   state.violMap = new Map();
   for (let d = 1; d <= b.maxDay; d += VIOL_SEG_DAYS) {
     const segEnd = Math.min(d + VIOL_SEG_DAYS - 1, b.maxDay);
@@ -667,17 +715,19 @@ async function loadViolationTrackingIds(b) {
       const j = await requestRL(API_VIOLATION, "POST", {
         params: { request: {
           violationStartTime: start, violationEndTime: end,
-          // 只要与坏单相关的分类；OVERTIME 占九成且不参与坏单
-          violationCategories: ["BAD_REVIEW", "COMPLAIN", "CLAIM", "CANCEL"],
           pageNo: p, pageSize: 500
         } }
       });
       const d0 = (j && j.result && j.result.data) || {};
       const list = Array.isArray(d0.violationEventList) ? d0.violationEventList : [];
       for (const x of list) {
+        state.violTotal += 1;
         const v = violationMeta(x);
         if (!v) continue;
-        if (VIOL_SUPPLEMENT_CATS.has(v.category)) tids.add(v.tid);
+        if (v.appeal === 30) { state.violAppealPass += 1; continue; }   // 申诉成功
+        if (v.category === "OVERTIME") { state.violOvertime += 1; continue; } // 超时
+        tids.add(v.tid);
+        if (v.category === "CLAIM") claimTids.add(v.tid);
         const prev = state.violMap.get(v.tid);
         if (prev) {
           if (!prev.day && v.day) prev.day = v.day;
@@ -696,30 +746,16 @@ async function loadViolationTrackingIds(b) {
     setProgress(58 + Math.round((d / b.maxDay) * 22), `违规处罚 ${monthStr(new Date(b.y, b.m - 1, d))}-${padDay(d)} 段完成`);
     if (d + VIOL_SEG_DAYS <= b.maxDay) await sleep(400);   // 段间限速，避免触发「请求太频繁」
   }
+  state.violClaimCount = claimTids.size;
   return [...tids];
 }
 async function loadBadOrders(month, onStep) {
   const b = monthBounds(month);
   const seen = new Map();
   state.violMap = new Map();
-  for (const filter of KPI_FILTERS) {
-    for (let p = 1; p <= KPI_MAX_PAGES; p++) {
-      const j = await requestRL(API_KPI_DETAIL, "POST", {
-        params: { request: {
-          queryParam: Object.assign({ ds: [b.start, b.end] }, filter),
-          planType: "UPLUS_AGENCY", tabCode: "TRACK_UB",
-          pageIndex: p, pageSize: KPI_PAGE_SIZE
-        } }
-      });
-      const { rows } = parseBadRows(j, seen);
-      const d = (j && j.result && j.result.data) || {};
-      const total = num(d.total);
-      if (rows < KPI_PAGE_SIZE || (total && p * KPI_PAGE_SIZE >= total)) break;
-    }
-    onStep && onStep();
-    await sleep(250);                  // 每类筛选之间稍作间隔，降低限频概率
-  }
-  setProgress(55, "坏单：申诉明细拉取中（投诉 / 差评 / 索赔 / 物流责）…");
+  // v3.57.17：坏单唯一入口 = 本月违规处罚（去申诉成功 / 去超时）→ 考核运单确认，
+  // 不再额外跑 4 个 Radio 筛选，避免把已申诉成功或超时单混进来。
+  setProgress(55, "坏单：本月违规处罚拉取中（剔除申诉成功 / 超时）…");
   // 与运力模块同款补全：4 个 Radio 筛选漏普通差评 / 投诉 / 索赔，用申诉明细运单号并集补齐
   try {
     const tids = await loadViolationTrackingIds(b);
@@ -727,7 +763,8 @@ async function loadBadOrders(month, onStep) {
       const batch = tids.slice(i, i + VIOL_BATCH);
       const j = await requestRL(API_KPI_DETAIL, "POST", {
         params: { request: {
-          queryParam: { ds: [b.start, b.end], trackingId: batch.join(",") },
+          // v3.57.16：按运单号回查不带 ds —— 索赔 / 投诉可能跨月，带本月区间会把旧运单漏掉
+          queryParam: { trackingId: batch.join(",") },
           planType: "UPLUS_AGENCY", tabCode: "TRACK_UB",
           pageIndex: 1, pageSize: KPI_PAGE_SIZE
         } }
@@ -739,7 +776,10 @@ async function loadBadOrders(month, onStep) {
   } catch (e) {
     console.warn("[viol] 坏单补全失败（不影响 Radio 筛选结果）:", e && e.message);
   }
-  // v3.49.0：坏单数量一律以考核运单明细 5 个标签列为准。
+  // v3.57.16：索赔单只认考核运单明细「是否索赔单 = 是」的确认结果，未确认的不展示
+  state.claimConfirmed = [...seen.values()].filter((o) => o.claim).length;
+  setProgress(86, `索赔单：申诉明细 ${int(state.violClaimCount)} 单 → 考核运单确认 ${int(state.claimConfirmed)} 单（未确认不显示）`);
+  // v3.49.0：坏单数量一律以考核运单明细 6 个标签列为准。
   // 申诉 / 违规明细只提供运单号用于回查匹配；命中但 4 列全「否」的单不计坏单
   // （v3.47.0 曾把违规分类当独立标签，导致 149 个成立单被计入、坏单虚高）。
   const vm = applyViolationMeta(seen);
@@ -764,7 +804,8 @@ function refreshT0() {
  *  快照只在内存里用，绝不写进同源共享缓存（缓存只存 T+1 结算的历史明细）。 */
 async function loadT0(teamIds, gen) {
   state.t0Raw = []; state.t0Info = null; state.t0Err = "";
-  if (state.month !== curMonth() || !teamIds || !teamIds.length) return;
+  const t0 = todayYmd();
+  if (!(t0 >= state.start && t0 <= state.end) || !teamIds || !teamIds.length) return;
   try {
     const live = await loadLiveToday(teamIds, todayYmd());
     if (gen !== state.gen) return;
@@ -777,8 +818,9 @@ async function loadT0(teamIds, gen) {
   }
 }
 function toggleT0AllDay() {
-  if (state.month !== curMonth()) {
-    showNotice("「T0 全天」只对当月今天生效；切回本月再调整。", "blue");
+  const t0 = todayYmd();
+  if (!(t0 >= state.start && t0 <= state.end)) {
+    showNotice("「T0 全天」只对当前区间包含今天时生效；把区间调到今天再调整。", "blue");
     return;
   }
   state.t0AllDay = !state.t0AllDay;
@@ -805,10 +847,12 @@ async function loadAll(force) {
 
   // v3.46.0：运力模块已把整月原始明细写进同源缓存 —— 质量运营直接复用，零重复请求。
   // 「立即刷新」= force，跳过缓存重新拉一遍。
-  const shared = state.force ? null : readShared(state.month);
+  const months = rangeMonthList(state.start, state.end);
+  const fullMonth = fullMonthOf(state.start, state.end);
+  const shared = (!state.force && fullMonth) ? readShared(fullMonth) : null;
   if (shared) {
     state.teams = shared.teams || [];
-    state.recs = settledRecs(shared.recs || []);
+    state.recs = settledRecs(shared.recs || [], fullMonth);
     state.orders = (shared.orders || []).filter((o) => o.day && hasKpiTag(o));
     state.fromShared = true;
     if (!state.teams.length) { try { state.teams = await loadTeams(); } catch (e) { /* 站点名映射降级 */ } }
@@ -818,7 +862,7 @@ async function loadAll(force) {
     setProgress(null);
     renderAll();
     const at = new Date(shared.ts).toTimeString().slice(0, 5);
-    showNotice(`已复用运力模块 ${state.month} 的整月明细（${at} 取数）：出勤 ${state.recs.length} 行 / 坏单 ${state.orders.length} 单；当天 T0 按出勤达成口径单独取数。需要最新数据点「立即刷新」强制重拉。`, "blue");
+    showNotice(`已复用运力模块 ${fullMonth} 的整月明细（${at} 取数）：出勤 ${state.recs.length} 行 / 坏单 ${state.orders.length} 单；当天 T0 按出勤达成口径单独取数。需要最新数据点「立即刷新」强制重拉。`, "blue");
     setStatus(`复用运力模块 · ${at}`);
     $("btn-refresh").disabled = false;
     state.loading = false;
@@ -843,8 +887,12 @@ async function loadAll(force) {
   }
   const teamIds = state.teams.map((t) => t.id);
   try {
-    const sheets = await loadSheets(state.month, teamIds);
-    if (gen !== state.gen) { state.loading = false; return; }
+    const sheets = [];
+    for (const m of months) {
+      const part = await loadSheets(m, teamIds);
+      if (gen !== state.gen) { state.loading = false; return; }
+      sheets.push(...part);
+    }
     state.recs = settledRecs(parseAttSheets(sheets));
   } catch (e) {
     state.attErr = String((e && e.message) || e);
@@ -852,7 +900,14 @@ async function loadAll(force) {
   }
   setProgress(55, "坏单明细拉取中…");
   try {
-    state.orders = (await loadBadOrders(state.month)).filter((o) => o.day && hasKpiTag(o));
+    const seenOrder = new Map();
+    for (const m of months) {
+      const part = await loadBadOrders(m);
+      if (gen !== state.gen) { state.loading = false; return; }
+      for (const o of part) if (o.tid && !seenOrder.has(o.tid)) seenOrder.set(o.tid, o);
+    }
+    state.orders = [...seenOrder.values()].filter((o) => o.day && hasKpiTag(o)
+      && o.day >= state.start && o.day <= state.end);
   } catch (e) {
     state.kpiErr = String((e && e.message) || e);
     state.orders = [];
@@ -866,7 +921,7 @@ async function loadAll(force) {
   setProgress(100, "");
   setProgress(null);
   // 共享缓存只写 T+1 结算的历史明细，T0 快照绝不入缓存
-  writeShared(state.month, state.teams, settledRecs(state.recs), state.orders);
+  if (fullMonth) writeShared(fullMonth, state.teams, settledRecs(state.recs), state.orders);
   renderAll();
   const errs = [state.teamErr && "站点列表", state.attErr && "出勤明细", state.kpiErr && "坏单明细"].filter(Boolean);
   if (errs.length) showNotice("部分数据源未取到：" + errs.join("、") + "，对应行列显示「—」，可点「立即刷新」重试。");
@@ -916,7 +971,7 @@ function entityRows() {
   // 旧版取「炸班 ∪ 坏单」并集，导致坏单视图里出现大量整行空白、本月合计为「—」的
   // 骑手（整月累积有过一次炸班的人本就很多），看起来完全像没有过滤。
   // 汇总口径与矩阵行末「本月合计」完全一致：炸班 = recOk()===0 的班次数（全天走自定义标准），
-  // 坏单 = 5 个标签数之和（一个订单命中多个标签各计一次）。
+  // 坏单 = 6 个标签数之和（一个订单命中多个标签各计一次）。
   const infos = riderInfoMap();
   const shiftTotal = new Map(), badTotal = new Map();
   const inc = (m, rid, n) => { const k = normId(rid); if (k) m.set(k, (m.get(k) || 0) + n); };
@@ -1022,7 +1077,7 @@ function badMatrix() {
     let m = cells.get(ek);
     if (!m) cells.set(ek, m = new Map());
     let c = m.get(o.day);
-    if (!c) m.set(o.day, c = { lgt: 0, complain: 0, negative: 0, early: 0, claim: 0, list: [] });
+    if (!c) m.set(o.day, c = { lgt: 0, complain: 0, negative: 0, early: 0, claim: 0, high: 0, list: [] });
     for (const [k] of BAD_COLS) if (o[k]) c[k]++;
     c.list.push(o);
   }
@@ -1052,34 +1107,34 @@ function badCellHtml(c) {
   return html;
 }
 /** v3.52.0：标题里显示骑手维度的过滤统计，让「只显示问题骑手」可见可核对。 */
-function titleHtml(month, b) {
+function titleHtml(days) {
   const viewName = state.view === "shift" ? "炸班次" : "坏单";
   const dimName = { agency: "整商", area: "商圈片", site: "站点", rider: "骑手" }[state.dim];
   const rs = state.dim === "rider" ? state.riderStats : null;
-  const lastDay = shiftDayMax(month, b);
+  const span = `${state.start} ~ ${state.end}`;
+  const t0in = todayYmd() >= state.start && todayYmd() <= state.end;
   return `${esc(viewName)}矩阵 · <b>${esc(dimName)}</b>` +
-    ` <span class="ql-sub">${esc(month)}（1 ~ ${lastDay} 日）· ${esc(dimName)}维度` +
+    ` <span class="ql-sub">${esc(span)}（${int(days.length)} 天）· ${esc(dimName)}维度` +
     ` · 出勤明细 ${state.recs.length} 行 · 坏单 ${state.orders.length} 单` +
     (state.view === "shift" ? ` · 全天标准 ${esc(allDayLabel())}` : "") +
-    (state.month === curMonth() && state.t0Info && state.view === "shift"
+    (t0in && state.t0Info && state.view === "shift"
       ? ` · <b class="ql-stat">T0 已结束 ${state.t0Info.ended} 班 / 进行中 ${state.t0Info.ongoing} 班 · 全天${state.t0Info.allDay ? "开" : "关"}</b>` : "") +
     (rs ? ` · <b class="ql-stat">骑手共 ${rs.total} 名 / 只显示 ${rs.shown} 名问题骑手 / 隐藏 ${rs.hidden} 名</b>` : "") +
     ` · ${state.fromShared ? "运力模块缓存" : "独立取数"}</span>`;
 }
 function renderAll() {
-  const month = state.month;
-  const b = monthBounds(month);
+  const days = rangeDayList(state.start, state.end);
   // 提前算骑手行，让标题能显示过滤统计（renderMatrixTable 复用同一份，不重复聚合）
   const preRows = state.dim === "rider" ? entityRows() : null;
-  $("ql-title").innerHTML = titleHtml(month, b);
+  $("ql-title").innerHTML = titleHtml(days);
   const wrap = $("matrix-wrap");
   if (!state.recs.length && !state.orders.length) {
-    wrap.innerHTML = `<div class="ql-pop-empty">${esc(state.attErr || state.kpiErr || state.teamErr || "本月暂无数据")}</div>`;
+    wrap.innerHTML = `<div class="ql-pop-empty">${esc(state.attErr || state.kpiErr || state.teamErr || "所选区间暂无数据")}</div>`;
     renderFoot();
     return;
   }
-  renderMatrixTable(wrap, month, b, preRows);
-  if (state.dim === "rider") $("ql-title").innerHTML = titleHtml(month, b);  // 二次过滤后刷新统计
+  renderMatrixTable(wrap, days, preRows);
+  if (state.dim === "rider") $("ql-title").innerHTML = titleHtml(days);  // 二次过滤后刷新统计
   renderFoot();
 }
 /** 单元格的汇总数量：炸班次 = 炸掉的班次数；坏单 = 各类型标签数之和。 */
@@ -1091,51 +1146,50 @@ function cellCount(c, isShift) {
 /** 行主体随维度变化的日期矩阵：行 = 行实体（首列冻结），列 = 本月日期 + 本月合计；
  *  表尾再加一行「合计」（每个日期的全维度汇总）。 */
 let lastRows = [];          // 供点击弹层按行键查行名
-function renderMatrixTable(wrap, month, b, preRows) {
+function renderMatrixTable(wrap, days, preRows) {
   const rows = preRows || entityRows();
   lastRows = rows;
   const mat = state.view === "shift" ? shiftMatrix() : badMatrix();
   const isShift = state.view === "shift";
   const emptyHtml = state.dim === "rider"
-    ? `<div class="ql-pop-empty">本月没有${isShift ? "炸班" : "坏单"}的骑手</div>`
-    : '<div class="ql-pop-empty">本月暂无数据</div>';
+    ? `<div class="ql-pop-empty">所选区间没有${isShift ? "炸班" : "坏单"}的骑手</div>`
+    : '<div class="ql-pop-empty">所选区间暂无数据</div>';
   if (!rows.length) { wrap.innerHTML = emptyHtml; return; }
-  const maxDay = isShift ? shiftDayMax(month, b) : b.maxDay;
-  if (!maxDay) {
-    wrap.innerHTML = '<div class="ql-pop-empty">本月还没有 T+1 结算的日期，明天再来看炸班次</div>';
+  if (!days.length) {
+    wrap.innerHTML = '<div class="ql-pop-empty">请选择有效的日期范围</div>';
     return;
   }
-  const mn = Number(month.slice(5, 7));
   const headLabel = { agency: "整商", area: "商圈片", site: "站点", rider: "骑手姓名" }[state.dim];
   const sumName = isShift ? "炸班合计" : "坏单合计";
   let html = `<table class="ql-tbl"><thead><tr><th class="lft ql-rider">${esc(headLabel)}</th>`;
-  for (let d = 1; d <= maxDay; d++) html += `<th title="${esc(month)}-${padDay(d)}">${mn}月${d}日</th>`;
-  html += `<th class="ql-sum-col" title="该行本月汇总数量">${esc(sumName)}</th></tr></thead><tbody>`;
-  const dayTotals = new Array(maxDay + 1).fill(0);
+  for (const ymd of days) {
+    const mm = Number(ymd.slice(5, 7)), dd = Number(ymd.slice(8, 10));
+    html += `<th title="${esc(ymd)}">${mm}月${dd}日</th>`;
+  }
+  html += `<th class="ql-sum-col" title="该行区间汇总数量">${esc(sumName)}</th></tr></thead><tbody>`;
+  const dayTotals = new Array(days.length).fill(0);
   let grand = 0, renderedRows = 0;
   for (const rd of rows) {
     const m = mat.get(rd.key);
     let cells = "", rowSum = 0;
-    const perDay = new Array(maxDay + 1).fill(0);
-    for (let d = 1; d <= maxDay; d++) {
-      const ymd = `${month}-${padDay(d)}`;
+    const perDay = new Array(days.length).fill(0);
+    days.forEach((ymd, di) => {
       const c = m && m.get(ymd);
       const body = isShift ? shiftCellHtml(c) : badCellHtml(c);
       const n = cellCount(c, isShift);
-      rowSum += n; perDay[d] = n;
+      rowSum += n; perDay[di] = n;
       const has = isShift ? (c && (c.fails.size || c.unk)) : (c && c.list.length);
       cells += `<td class="ql-cell${has ? " clickable" : ""}"${has ? ` data-key="${esc(rd.key)}" data-day="${ymd}" title="点击看 ${esc(rd.name)} ${ymd} 的${isShift ? "班次" : "坏单"}明细"` : ""}>${body}</td>`;
-    }
-    // v3.52.0 渲染层双保险：骑手维度整月合计为 0 的行一律不渲染，
-    // 保证矩阵里出现的每一行在当前视图都确实有问题（无空白占位行）。
+    });
+    // v3.52.0 渲染层双保险：骑手维度区间合计为 0 的行一律不渲染
     if (state.dim === "rider" && rowSum === 0) continue;
     renderedRows++;
-    for (let d = 1; d <= maxDay; d++) dayTotals[d] += perDay[d];
+    for (let di = 0; di < days.length; di++) dayTotals[di] += perDay[di];
     grand += rowSum;
     html += `<th class="lft ql-rider"><span class="qr-name">${esc(rd.name)}</span>` +
       `<span class="qr-sub">${esc(rd.sub || "")}</span></th>`;
     html += cells;
-    html += `<td class="ql-cell ql-sum${rowSum ? " clickable" : ""}"${rowSum ? ` data-key="${esc(rd.key)}" data-day="" title="点击查看 ${esc(rd.name)} 整月明细"` : ""}>` +
+    html += `<td class="ql-cell ql-sum${rowSum ? " clickable" : ""}"${rowSum ? ` data-key="${esc(rd.key)}" data-day="" title="点击查看 ${esc(rd.name)} 区间明细"` : ""}>` +
       `<span class="qs">${rowSum || "—"}</span></td>`;
     html += "</tr>";
   }
@@ -1143,7 +1197,7 @@ function renderMatrixTable(wrap, month, b, preRows) {
   // 表尾合计行：每日期的全维度汇总 + 总计
   html += `<tr class="ql-total-row"><th class="lft ql-rider"><span class="qr-name">合计</span>` +
     `<span class="qr-sub">${esc(isShift ? "炸班次数" : "坏单标签数")}</span></th>`;
-  for (let d = 1; d <= maxDay; d++) html += `<td class="ql-cell"><span class="qs">${dayTotals[d] || "—"}</span></td>`;
+  for (let di = 0; di < days.length; di++) html += `<td class="ql-cell"><span class="qs">${dayTotals[di] || "—"}</span></td>`;
   html += `<td class="ql-cell ql-sum ql-grand"><span class="qs">${grand || "—"}</span></td></tr>`;
   html += "</tbody></table>";
   wrap.innerHTML = html;
@@ -1173,13 +1227,15 @@ function renderFoot() {
     `<b>「全天」单独定义、不采信系统「是否达成」标记</b>：完单量 ≥ ${state.allDay.orders} 单 <b>且</b> 有效在线时长 ≥ ${state.allDay.hours} 小时才算达标，否则计为炸班 —— 工具条「全天标准 <b>${esc(allDayLabel())}</b>」可编辑、本机记忆，改完立即重算；其余班次仍按系统标记。` +
     "空白 = 全部达成或无排班；历史明细缺达成标记、T0 未结束 / 数据未出时显示琥珀「统计中」（不算炸班）；" +
     "点击单元格看该行当天的排班班次明细（骑手 / 班次 / 完单量 / 有效在线）。<br>" +
-    "坏单 = KPI 考核运单明细 5 类问题订单（物流责 / 投诉 / 差评 / 提前点 / 非提前点索赔），另用申诉 / 违规明细（投诉 / 差评 / 索赔 / 物流责分类）" +
-    "的运单号去重后逗号拼接<b>回查匹配</b>考核运单明细，两路按运单去重；" +
-    "<b>坏单标签与数量一律以考核运单明细的 5 个「是否XX单」列为准</b> —— 申诉明细的违规分类本身不算标签，" +
-    "回查命中但 5 列全「否」的单不计入坏单（避免虚高）；一个订单命中多个标签时每个标签单独计算。与运力模块同口径；" +
-    "点开明细的「违规原因」取申诉明细的 <code>violationReason</code>；索赔只算非提前点索赔。" +
+    "坏单 = <b>本月违规处罚 → 剔除申诉成功 / 超时 → 运单号批量回查考核运单明细</b>，读 6 个「是否XX单」列（物流责 / 投诉 / 差评 / 提前点 / 非提前点索赔 / 高笔单未完成单）；" +
+    "高笔单只有同时命中物流责取消单才算坏单；同时命中时两个标签都保留：物流责 + 高笔单未完成单；" +
+    "<b>坏单标签与数量一律以考核运单明细的 6 个「是否XX单」列为准</b> —— 申诉明细的违规分类本身不算标签，" +
+    "回查命中但 6 列全「否」的单不计入坏单（避免虚高）；一个订单命中多个标签时每个标签单独计算。与运力模块同口径；" +
+    "点开明细的「违规原因」取申诉明细的 <code>violationReason</code>；索赔只算非提前点索赔，且必须经考核运单明细「是否索赔单 = 是」确认后才展示。" +
+    (state.violTotal ? `（本月违规处罚 ${int(state.violTotal)} 单：剔除申诉成功 ${int(state.violAppealPass || 0)} / 超时 ${int(state.violOvertime || 0)} → 回查 ${int((state.violMap || new Map()).size)} 单 → 坏单 ${int(state.orders.length)} 单）` : "") +
+    (state.violClaimCount ? `（其中索赔：申诉明细 ${int(state.violClaimCount)} 单 → 考核运单确认 ${int(state.claimConfirmed || 0)} 单，未确认不显示）` : "") +
     "红字「类型*N」 = 当天各类型坏单数，点击单元格看运单明细。" +
-    "右侧「本月合计」= 该行整月汇总数量（点击看整月明细），表尾「合计」= 每个日期的全维度汇总；" +
+    "右侧「本月合计」= 该行整月汇总数量（点击看整月明细），表尾「合计」= 每个日期的全维度汇总；坏单视图在合计行下方另列「坏单标签汇总」（各标签总数 + 去重单数）；" +
     "数据优先复用运力模块已取到的整月明细（同源缓存，零重复请求），点「立即刷新」强制重拉；" +
     "缓存只含 T+1 历史明细；T0 实时快照只存内存、绝不写入缓存。" +
     (isCur ? "今天（T0）按出勤达成口径显示已结束班次的炸班，次日 T+1 结算后由历史明细覆盖。" : "");
@@ -1275,7 +1331,9 @@ function badPop(month, key, day) {
   html += '<th class="lft">类型</th><th class="lft">违规原因</th></tr></thead><tbody>';
   for (const o of list) {
     const chips = BAD_COLS.filter(([k]) => o[k]).map(([, n]) => `<span class="mk tp">${esc(n)}</span>`).join(" ");
-    html += `<tr><td>${esc(o.day)}</td><td class="lft">${esc(o.tid)}</td>`;
+    html += `<tr><td>${esc(o.day)}</td><td class="lft">` +
+      `<button type="button" class="ql-order-link" data-order-tid="${esc(o.tid)}" ` +
+      `data-order-team="${esc(o.teamId || "")}" title="点击查看运单详情">${esc(o.tid)}</button></td>`;
     if (showRider) html += `<td>${esc(o.rname || o.rid || "—")}</td><td>${esc(o.siteName || areaOf(o.teamId, o.siteName))}</td>`;
     html += `<td class="lft">${chips || "—"}</td>`;
     html += `<td class="lft ql-reason">${esc(o.reason || "—")}</td></tr>`;
@@ -1283,9 +1341,343 @@ function badPop(month, key, day) {
   html += "</tbody></table>";
   const tags = list.reduce((n, o) => n + BAD_COLS.filter(([k]) => o[k]).length, 0);
   openPop(`${name} · ${day || "整月"} 坏单明细 · ${list.length} 单 / ${tags} 个标签`, html +
-    '<div class="ql-pop-note">注：一个订单命中多个标签时，每个标签各单独计算一次；索赔只算非提前点索赔，违规原因取申诉明细。</div>');
+    '<div class="ql-pop-note">注：一个订单命中多个标签时，每个标签各单独计算一次；索赔只算非提前点索赔，违规原因取申诉明细；<b>点击运单号可在插件内查看运单详情</b>（订单 / 骑手 / 时间轴 / 照片）。</div>');
 }
 function badName(k) { const f = BAD_COLS.find(([key]) => key === k); return f ? f[1] : k; }
+
+// ---------------------------------------------------------------- v3.57.20 运单详情
+const ORDER_STATE_TEXT = { 10: "待指派", 20: "待到店", 80: "待取货", 30: "待送达", 40: "已完成", 90: "已取消" };
+/** 运单接口的时间是毫秒时间戳；秒级 / 字符串也兼容。 */
+function orderTime(v) {
+  if (v == null || v === "" || v === "0" || v === 0) return "—";
+  let n = Number(v);
+  if (!Number.isFinite(n)) {
+    const d = new Date(v);
+    n = d.getTime();
+    if (!Number.isFinite(n)) return String(v);
+  }
+  if (n < 1e12) n *= 1000;
+  const d = new Date(n);
+  if (isNaN(d.getTime())) return String(v);
+  const p = (x) => String(x).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} `
+    + `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+function orderStateHtml(s) {
+  const n = num(s);
+  const text = ORDER_STATE_TEXT[n] || (s == null || s === "" ? "—" : String(s));
+  const cls = n === 40 ? " ok" : (n === 90 ? " cancel" : "");
+  return `<span class="ql-order-status${cls}">${esc(text)}</span>`;
+}
+function orderRow(k, v, wide) {
+  return `<div class="${wide ? "wide" : ""}"><span class="k">${esc(k)}：</span>${v == null || v === "" ? "—" : v}</div>`;
+}
+function orderPayText(v) {
+  const n = num(v);
+  if (n === 1) return "在线支付";
+  if (n === 2) return "在线结算";
+  if (n === 3) return "货到付款";
+  return v == null || v === "" ? "—" : String(v);
+}
+function orderDur(ms) {
+  if (!Number.isFinite(ms) || ms <= 0) return "";
+  const m = Math.floor(ms / 60000), sec = Math.floor(ms % 60000 / 1000);
+  if (m <= 0) return `${sec}秒`;
+  if (m < 60) return `${m}分${sec ? sec + "秒" : ""}`;
+  return `${Math.floor(m / 60)}小时${m % 60 ? (m % 60) + "分" : ""}`;
+}
+/** 从任意结构里捞 URL：报备接口的图片 / 视频 / 录音字段结构不完全固定。 */
+function mediaUrls(v) {
+  const out = [];
+  const walk = (x) => {
+    if (!x) return;
+    if (typeof x === "string") {
+      if (/^https?:\/\//i.test(x.trim())) out.push(x.trim());
+      return;
+    }
+    if (Array.isArray(x)) { x.forEach(walk); return; }
+    if (typeof x === "object") for (const val of Object.values(x)) walk(val);
+  };
+  walk(v);
+  return [...new Set(out)];
+}
+function mediaKind(url, hint) {
+  if (hint) return hint;
+  const s = String(url).toLowerCase().split("?")[0];
+  if (/\.(mp4|mov|m3u8|avi|webm|flv)$/.test(s)) return "video";
+  if (/\.(mp3|m4a|wav|aac|amr|ogg)$/.test(s)) return "audio";
+  if (/\.(jpg|jpeg|png|gif|webp|bmp)$/.test(s)) return "image";
+  return "image";
+}
+function mediaThumb(url, kind, label) {
+  const k = mediaKind(url, kind);
+  const u = esc(url);
+  if (k === "video") {
+    return `<button type="button" class="ql-media-thumb video" data-media-url="${u}" data-media-kind="video" title="点击播放视频">` +
+      `<span class="ico">▶</span><em>${esc(label || "视频")}</em></button>`;
+  }
+  if (k === "audio") {
+    return `<button type="button" class="ql-media-thumb audio" data-media-url="${u}" data-media-kind="audio" title="点击播放录音">` +
+      `<span class="ico">🎧</span><em>${esc(label || "录音")}</em></button>`;
+  }
+  return `<button type="button" class="ql-media-thumb" data-media-url="${u}" data-media-kind="image" title="点击查看大图">` +
+    `<img src="${u}" loading="lazy" alt="" onerror="this.parentNode.style.display='none'"></button>`;
+}
+function abnormalCardHtml(x) {
+  if (!x || typeof x !== "object") return "";
+  const proof = x.proofsShow || {};
+  const texts = Array.isArray(proof.textProofsList) ? proof.textProofsList : [];
+  const pics = mediaUrls(proof.picProofsList);
+  const videos = mediaUrls(proof.videoProofsList);
+  const records = mediaUrls(proof.recordingDTOList);
+  const process = (x.process && Array.isArray(x.process.timelines)) ? x.process.timelines : [];
+  const rights = x.rights || {};
+  const judge = x.judgmentResponsibility || {};
+  const status = str(x.statusDesc || x.statusName || "");
+  const bad = /不通过|驳回|成立|失败/.test(str(x.judgmentResponsibility && x.judgmentResponsibility.judgmentResponsibility) + status);
+  const textHtml = texts.length ? `<div class="ql-abn-sub">` + texts.map((t) =>
+    `<div><b>${esc(t.title || "证明")}</b>：${esc(t.content || "—")}</div>`).join("") + "</div>" : "";
+  const media = pics.length || videos.length || records.length
+    ? `<div class="ql-abn-proofs">` +
+      pics.map((u) => mediaThumb(u, "image", "图片")).join("") +
+      videos.map((u) => mediaThumb(u, "video", "视频")).join("") +
+      records.map((u) => mediaThumb(u, "audio", "录音")).join("") + "</div>"
+    : "";
+  const procHtml = process.length ? `<ul class="ql-abn-process">` + process.slice().sort((a, b) =>
+    num(a.sequence) - num(b.sequence)).map((p) =>
+    `<li><time>${esc(orderTime(p.occurAt))}</time>` +
+    `<b>${esc(p.title || "—")}</b>` +
+    (p.operator ? ` <span>${esc(p.operator)}</span>` : "") +
+    (p.content ? `：${esc(p.content)}` : "") + "</li>").join("") + "</ul>" : "";
+  const rightBits = [
+    rights.free ? `免罚：${rights.free}` : "",
+    rights.reduce ? `减罚：${rights.reduce}` : "",
+    rights.compensation ? `补偿：${rights.compensation}` : "",
+    rights.duty ? `责任：${rights.duty}` : "",
+    rights.right ? `权益：${rights.right}` : ""
+  ].filter(Boolean);
+  const judgeBits = [
+    judge.falseReportJudgment ? `虚假报备：${judge.falseReportJudgment}` : "",
+    judge.judgmentResponsibility ? `判责：${judge.judgmentResponsibility}` : "",
+    judge.punishResult && judge.punishResult !== "-" ? `处罚：${judge.punishResult}` : ""
+  ].filter(Boolean);
+  const rightsHtml = rightBits.length || judgeBits.length
+    ? `<div class="ql-abn-rights">${[...rightBits, ...judgeBits].map(esc).join("　·　")}</div>` : "";
+  return `<div class="ql-abn-card">` +
+    `<div class="ql-abn-head"><b>${esc(x.eventSubName || x.eventName || "异常报备")}</b>` +
+    (status ? `<span class="ql-abn-badge${bad ? " bad" : ""}">${esc(status)}</span>` : "") +
+    `<span>${esc(orderTime(x.createdAt || x.createTime))}</span>` +
+    `<span>${esc(x.reportSource || "—")}${x.reporterName || x.knightName ? " · " + esc(x.reporterName || x.knightName) : ""}</span>` +
+    (x.carrierName ? `<span>${esc(x.carrierName)}</span>` : "") + "</div>" +
+    textHtml + media + procHtml + rightsHtml + "</div>";
+}
+function renderAbnormal(detailList, fallbackList) {
+  const list = Array.isArray(detailList) ? detailList : (detailList && Array.isArray(detailList.list) ? detailList.list : []);
+  if (list.length) return list.map(abnormalCardHtml).join("");
+  const fb = Array.isArray(fallbackList) ? fallbackList : [];
+  if (!fb.length) return '<div class="ql-order-tip">无异常报备</div>';
+  const adjMap = { MERCHANT_DELAYED: "商户出餐慢", MERCHANT_NO_MEAL: "商户无餐", TRAFFIC_JAM: "交通拥堵",
+    WEATHER: "天气原因", ELEVATOR: "电梯故障", CONTACT_CUSTOMER: "联系不上顾客",
+    CONTACT_MERCHANT: "联系不上商户", LOSE_CONTACT_WITH_CUSTOMER: "联系不上顾客", OTHER: "其他" };
+  return `<ul class="ql-order-timeline">` + fb.map((e) => {
+    const nm = e.feedbackDesc || e.eventSubName || e.eventName || e.reason || "异常报备";
+    const adj = adjMap[e.adjustType] || e.adjustType || "";
+    const st = e.statusDesc || e.statusName || e.statusText || "";
+    return `<li><time>${esc(orderTime(e.createdAt || e.createTime || e.reportTime))}</time>` +
+      `<span class="bad">${esc(nm)}</span>` +
+      (adj && adj !== nm ? ` <span style="color:#6B7280">（${esc(adj)}）</span>` : "") +
+      (st ? ` <span style="color:#B45309">${esc(st)}</span>` : "") + "</li>";
+  }).join("") + "</ul>";
+}
+function openMedia(url, kind, caption) {
+  const mask = $("ql-media-mask"), body = $("ql-media-body"), cap = $("ql-media-cap");
+  if (!mask || !body) return;
+  const k = mediaKind(url, kind);
+  const u = esc(String(url));
+  if (k === "video") body.innerHTML = `<video src="${u}" controls autoplay playsinline preload="metadata"></video>`;
+  else if (k === "audio") body.innerHTML = `<audio src="${u}" controls autoplay preload="metadata"></audio>`;
+  else if (k === "image") body.innerHTML = `<img src="${u}" alt="">`;
+  else body.innerHTML = `<iframe src="${u}" title="附件"></iframe>`;
+  if (cap) cap.textContent = caption || (k === "video" ? "视频" : k === "audio" ? "录音" : "图片");
+  mask.hidden = false;
+}
+function closeMedia() { const mask = $("ql-media-mask"); if (mask) mask.hidden = true; }
+function orderDetailHtml(d, tid, abnormalData) {
+  if (!d || typeof d !== "object") return '<div class="ql-order-error">没有取到运单详情</div>';
+  const ev = (Array.isArray(d.eventList) ? d.eventList : (Array.isArray(d.displayEventList) ? d.displayEventList : []))
+    .slice().sort((a, b) => num(a.eventTime) - num(b.eventTime));
+  const findEv = (...names) => ev.find((e) => names.some((n) => String(e.eventName || "").includes(n)));
+  const assignEv = findEv("分配", "接单");
+  const arriveEv = findEv("到店");
+  const fetchEv = findEv("取餐", "取货");
+  const deliverEv = findEv("送达", "配送完成", "配送成功");
+  const badEv = findEv("配送失败", "异常", "取消", "超时");
+  const stateN = num(d.state);
+  const isBad = stateN === 90 || !!badEv;
+  const stateText = (stateN === 90 && badEv && /失败/.test(String(badEv.eventName || "")))
+    ? "配送失败" : (ORDER_STATE_TEXT[stateN] || (d.state == null ? "—" : String(d.state)));
+  const tags = (Array.isArray(d.orderTagList) ? d.orderTagList : [])
+    .map((t) => str(t && (t.displayName || t.tagName))).filter(Boolean);
+  const tagHtml = tags.length ? `<span class="ql-otags">` + tags.map((t) =>
+    `<span class="ql-otag${/异常|报备|失败|申诉/.test(t) ? " warn" : ""}">${esc(t)}</span>`).join("") + "</span>" : "";
+  const expect = num(d.customerExpectDeliveryAt);
+  const deliverAt = num(d.driverExamDeliveryAt) || num(deliverEv && deliverEv.eventTime) || num(badEv && badEv.eventTime);
+  const assignAt = num(assignEv && assignEv.eventTime);
+  const lateMin = expect && deliverAt ? Math.round((deliverAt - expect) / 60000) : null;
+  const rideMin = assignAt && deliverAt ? Math.round((deliverAt - assignAt) / 60000) : null;
+  const lateText = lateMin == null ? "—" : (lateMin >= 0 ? `超 ${lateMin} 分钟` : `提前 ${Math.abs(lateMin)} 分钟`);
+  const rideText = rideMin == null ? "—" : `${rideMin} 分钟`;
+  const steps = [{ label: "骑手接单", event: assignEv }, { label: "到店", event: arriveEv }];
+  if (badEv) steps.push({ label: "异常", event: badEv, bad: true });
+  steps.push({ label: "取餐", event: fetchEv }, { label: "送达", event: deliverEv });
+  let prevAt = null;
+  const stepHtml = steps.map((st) => {
+    const at = st.event ? num(st.event.eventTime) : 0;
+    const du = at && prevAt ? orderDur(at - prevAt) : "";
+    if (at) prevAt = at;
+    const cls = st.bad ? " bad" : (at ? " done" : "");
+    const mark = st.bad ? "!" : (at ? "✓" : "");
+    return `<div class="ql-ostep${cls}"><div class="dot">${mark}</div>` +
+      `<div class="nm">${esc(st.label)}</div>` +
+      `<div class="tm">${at ? esc(orderTime(at)) : "—"}</div>` +
+      `<div class="du">${esc(du)}</div></div>`;
+  }).join("");
+  const items = Array.isArray(d.itemList) ? d.itemList : [];
+  const itemHtml = items.length ? `<table class="ql-order-items"><thead><tr><th>商品</th><th class="n">数量</th><th class="n">重量</th><th class="n">单价</th></tr></thead><tbody>` +
+    items.map((it) => `<tr><td>${esc(it.name || "—")}</td><td class="n">×${int(it.quantity || 1)}</td>` +
+      `<td class="n">${esc(it.weight == null ? "" : String(it.weight) + "g")}</td>` +
+      `<td class="n">¥${num(it.price).toFixed(2)}</td></tr>`).join("") + "</tbody></table>" :
+    '<div class="ql-order-tip">暂无商品明细</div>';
+  const abnormal = renderAbnormal(abnormalData, d.reportAbnormalEventList);
+  const photoGroups = [];
+  const op = d.orderPhotos || {};
+  const photoMap = [
+    ["到店照片", op.arrivalNormalList], ["到店异常", op.arrivalIllegalList],
+    ["取货照片", op.fetchNormalList], ["取货异常", op.fetchIllegalList],
+    ["送达照片", op.completePhotos], ["送达异常", op.completeIllegalList],
+    ["其他照片", op.txdPhotos]
+  ];
+  for (const [label, urls] of photoMap) {
+    if (Array.isArray(urls) && urls.length) photoGroups.push([label, [...new Set(urls.filter(Boolean))]]);
+  }
+  if (!photoGroups.length && Array.isArray(d.photoList)) {
+    const urls = [...new Set(d.photoList.filter(Boolean))];
+    if (urls.length) photoGroups.push(["", urls]);
+  }
+  const photos = photoGroups.length ? photoGroups.map(([label, urls]) =>
+    (label ? `<div class="ql-order-tip">${esc(label)}</div>` : "") +
+    `<div class="ql-order-photos">` + urls.slice(0, 12).map((u) => {
+      const url = String(u);
+      return mediaThumb(url, "image", "照片");
+    }).join("") + "</div>").join("") : '<div class="ql-order-tip">暂无照片</div>';
+  const eventsFull = ev.length ? `<details class="ql-order-events"><summary>完整事件 ${ev.length} 条</summary>` +
+    `<ul class="ql-order-timeline">` + ev.map((e) => {
+      const nm = str(e.eventName || e.name);
+      return `<li><time>${esc(orderTime(e.eventTime))}</time>` +
+        `<span class="${/失败|取消|异常|超时|申诉/.test(nm) ? "bad" : ""}">${esc(nm || "—")}</span>` +
+        (e.eventDetail ? ` <span style="color:#94A3B8">${esc(e.eventDetail)}</span>` : "") + "</li>";
+    }).join("") + "</ul></details>" : "";
+  return `
+    <div class="ql-order-statusbar${isBad ? " bad" : ""}">
+      <div class="top">
+        <span class="ql-ostatus-big">${esc(stateText)}</span>
+        ${tagHtml}
+      </div>
+      <div class="ql-ometa">
+        <span>距平台期望 <b>${esc(lateText)}</b></span><span class="sep">|</span>
+        <span>距骑手时间 <b>${esc(rideText)}</b></span><span class="sep">|</span>
+        <span>配送骑手：${esc(d.carrierDriverName || "—")} ${esc(d.carrierDriverPhone || "")}</span><span class="sep">|</span>
+        <span>运单号：${esc(tid || d.trackingId || "—")}</span>
+        <button type="button" class="ql-copy" data-copy="${esc(tid || d.trackingId || "")}">复制</button>
+      </div>
+    </div>
+    <div class="ql-order-steps">${stepHtml}</div>
+    <div class="ql-order-cols">
+      <div>
+        <div class="ql-order-sec"><h4>取餐信息</h4><div class="ql-order-grid">
+          ${orderRow("商家名称", esc(d.merchantName || "—"), true)}
+          ${orderRow("取餐地址", esc(d.merchantAddress || "—"), true)}
+          ${orderRow("联系电话", esc(d.merchantPhone || "—"))}
+          ${orderRow("商家结算", esc(orderPayText(d.merchantPaymentType)))}
+          ${orderRow("预计出餐", esc(orderTime(d.predictCookingTime || d.predictCookingAt)))}
+          ${orderRow("配送距离", d.merchantConsumerDistance ? `${esc(d.merchantConsumerDistance)} km` : "—")}
+        </div></div>
+        <div class="ql-order-sec"><h4>送餐信息</h4><div class="ql-order-grid">
+          ${orderRow("顾客姓名", esc(d.customerName || "—"), true)}
+          ${orderRow("顾客地址", esc(d.customerAddress || "—"), true)}
+          ${orderRow("联系电话", esc(d.customerPhone || "—"))}
+          ${orderRow("用户支付", esc(orderPayText(d.customerPaymentType)))}
+          ${orderRow("平台期望送达", esc(orderTime(d.customerExpectDeliveryAt)))}
+          ${orderRow("骑手送达时间", esc(orderTime(d.driverExamDeliveryAt || (deliverEv && deliverEv.eventTime))))}
+        </div></div>
+        <div class="ql-order-sec"><h4>订单信息</h4><div class="ql-order-grid">
+          ${orderRow("订单来源", esc(d.source || "—"))}
+          ${orderRow("订单号", `${esc(d.platformTrackingId || "—")} <button type="button" class="ql-copy" data-copy="${esc(d.platformTrackingId || "")}">复制</button>`, true)}
+          ${orderRow("下单时间", esc(orderTime(d.platformCreatedTime)))}
+          ${orderRow("订单金额", `¥${num(d.totalAmount || d.payAmount).toFixed(2)}`)}
+          ${orderRow("实付金额", `¥${num(d.payAmount).toFixed(2)}`)}
+          ${orderRow("商品件数", `${int(d.shopCount)} 件`)}
+          ${orderRow("订单备注", esc(d.customerRemark || "无"), true)}
+        </div></div>
+      </div>
+      <div>
+        <div class="ql-order-sec"><h4>商品信息</h4>${itemHtml}
+          <div class="ql-order-total">合计 <b>${int(d.shopCount)} 件</b><span>实付 <b>¥${num(d.payAmount).toFixed(2)}</b></span></div>
+        </div>
+        <div class="ql-order-sec"><h4>异常报备</h4>${abnormal}</div>
+        <div class="ql-order-sec"><h4>到取送照片</h4>${photos}</div>
+      </div>
+    </div>
+    <div class="ql-order-sec"><h4>配送时效</h4>${eventsFull || '<div class="ql-order-tip">暂无事件</div>'}</div>`;
+}
+async function openOrderDetail(tid, teamId) {
+  const id = str(tid);
+  if (!id) return;
+  const mask = $("ql-order-mask"), body = $("ql-order-body"), title = $("ql-order-title");
+  if (!mask || !body) return;
+  const team = str(teamId) || str((state.orders.find((o) => o.tid === id) || {}).teamId)
+    || str((state.teams[0] || {}).id);
+  if (title) title.textContent = `运单详情 · ${id}`;
+  body.innerHTML = '<div class="ql-order-loading">正在获取运单详情…</div>';
+  mask.hidden = false;
+  if (!team) {
+    body.innerHTML = '<div class="ql-order-error">缺少站点ID，无法查询运单详情。<br>可回到列表后点「立即刷新」再试。</div>';
+    return;
+  }
+  try {
+    const teamNum = Number(team) || team;
+    const j = await request(API_ORDER_DETAIL, "POST", {
+      metas: { teamid: teamNum },
+      params: { teamId: teamNum, trackingId: id }
+    });
+    const d = (j && j.result && j.result.data) || null;
+    if (!d) {
+      const msg = (j && j.result && (j.result.msg || j.result.message)) || "接口没有返回运单详情";
+      body.innerHTML = `<div class="ql-order-error">获取运单详情失败：${esc(msg)}</div>`;
+      return;
+    }
+    // v3.57.22：报备单再拉一次报备详情（证明 / 图片 / 视频 / 录音 / 处理流程）
+    let abnormalData = [];
+    const hasReport = (Array.isArray(d.reportAbnormalEventList) && d.reportAbnormalEventList.length)
+      || (Array.isArray(d.orderTagList) && d.orderTagList.some((t) => /异常报备/.test(str(t && (t.displayName || t.tagName)))));
+    if (hasReport) {
+      try {
+        const aj = await request(API_ORDER_ABNORMAL, "POST", {
+          metas: { teamid: teamNum },
+          params: { request: { trackingId: id, teamIds: [teamNum] } }
+        });
+        abnormalData = (aj && aj.result && aj.result.data) || [];
+      } catch (e) { abnormalData = []; }
+    }
+    body.innerHTML = orderDetailHtml(d, id, abnormalData);
+  } catch (e) {
+    body.innerHTML = `<div class="ql-order-error">获取运单详情失败：${esc((e && e.message) || e)}</div>`;
+  }
+}
+function closeOrderDetail() {
+  const mask = $("ql-order-mask");
+  if (mask) mask.hidden = true;
+}
 
 // ---------------------------------------------------------------- 控件
 function setDim(d) {
@@ -1300,28 +1692,26 @@ function setView(v) {
 }
 /** v3.56.0：月份步进控件状态统一刷新（与运力模块同款交互：边界置灰 + 当前月高亮）。 */
 function syncMonthUI() {
-  const min = shiftMonth(curMonth(), -MONTHS_BACK), max = curMonth();
-  const picker = $("month-picker");
-  const prev = $("btn-prev-month"), next = $("btn-next-month"), now = $("btn-this-month");
-  picker.value = state.month;
-  picker.min = min;
-  picker.max = max;
-  prev.disabled = state.month <= min;
-  next.disabled = state.month >= max;
-  prev.title = prev.disabled ? `已到最早可查月份 ${min}` : `上一个月（${shiftMonth(state.month, -1)}）`;
-  next.title = next.disabled ? `已到当前月份 ${max}` : `下一个月（${shiftMonth(state.month, 1)}）`;
-  const isNow = state.month === curMonth();
-  if (now) {
-    now.classList.toggle("is-current", isNow);
-    now.title = isNow ? "当前已是本月" : `切回本月（${curMonth()}）`;
-  }
+  const sEl = $("ql-start"), eEl = $("ql-end");
+  const minStart = `${shiftMonth(curMonth(), -MONTHS_BACK)}-01`;
+  const maxEnd = `${curMonth()}-${padDay(monthBounds(curMonth()).lastDay)}`;
+  if (sEl) { sEl.value = state.start; sEl.min = minStart; sEl.max = state.end || maxEnd; }
+  if (eEl) { eEl.value = state.end; eEl.min = state.start || minStart; eEl.max = maxEnd; }
 }
-function setMonth(m) {
-  if (!validMonth(m)) return;
-  const min = shiftMonth(curMonth(), -MONTHS_BACK), max = curMonth();
-  if (m < min || m > max) return;
-  state.month = m;
-  localStorage.setItem(LS_MONTH, m);
+
+function setRange(s, e) {
+  const okYmd = (v) => /^\d{4}-\d{2}-\d{2}$/.test(String(v || ""));
+  if (!okYmd(s) || !okYmd(e)) return;
+  if (s > e) { const t = s; s = e; e = t; }
+  const minStart = `${shiftMonth(curMonth(), -MONTHS_BACK)}-01`;
+  const maxEnd = `${curMonth()}-${padDay(monthBounds(curMonth()).lastDay)}`;
+  if (s < minStart) s = minStart;
+  if (e > maxEnd) e = maxEnd;
+  if (s > e) s = e;
+  state.start = s;
+  state.end = e;
+  state.month = e.slice(0, 7);
+  try { localStorage.setItem(LS_RANGE, JSON.stringify({ start: s, end: e })); } catch (err) { /* 无痕忽略 */ }
   syncMonthUI();
   loadAll();
 }
@@ -1358,19 +1748,27 @@ function boot() {
     const m = chrome.runtime.getManifest();
     if (m && m.version) $("tb-ver").textContent = "v" + m.version;
   } catch (e) { /* 测试环境 */ }
-  const saved = localStorage.getItem(LS_MONTH);
-  state.month = validMonth(saved) ? saved : curMonth();
+  const defStart = `${curMonth()}-01`;
+  const defEnd = `${curMonth()}-${padDay(monthBounds(curMonth()).lastDay)}`;
+  let savedRange = null;
+  try { savedRange = JSON.parse(localStorage.getItem(LS_RANGE) || "null"); } catch (e) { savedRange = null; }
+  const okYmd = (v) => /^\d{4}-\d{2}-\d{2}$/.test(String(v || ""));
+  state.start = savedRange && okYmd(savedRange.start) ? savedRange.start : defStart;
+  state.end = savedRange && okYmd(savedRange.end) ? savedRange.end : defEnd;
+  if (!okYmd(state.start) || !okYmd(state.end) || state.start > state.end) {
+    state.start = defStart;
+    state.end = defEnd;
+  }
+  state.month = state.end.slice(0, 7);
   syncMonthUI();
-  $("month-picker").addEventListener("change", () => setMonth($("month-picker").value));
-  $("month-picker").addEventListener("click", (e) => {
-    try { if (e.target.showPicker) e.target.showPicker(); } catch (err) { /* ignore */ }
-  });
-  $("btn-prev-month").addEventListener("click", () => setMonth(shiftMonth(state.month, -1)));
-  $("btn-next-month").addEventListener("click", () => setMonth(shiftMonth(state.month, 1)));
-  $("btn-this-month").addEventListener("click", () => {
-    if (state.month === curMonth()) return;   // 已在当前月，避免重复取数
-    setMonth(curMonth());
-  });
+  for (const id of ["ql-start", "ql-end"]) {
+    const el = $(id);
+    if (el) el.addEventListener("change", () => setRange($("ql-start").value, $("ql-end").value));
+  }
+  const full = $("btn-full-month");
+  if (full) full.addEventListener("click", () => setRange(defStart, defEnd));
+  const last7 = $("btn-last-7");
+  if (last7) last7.addEventListener("click", () => setRange(ymdAdd(todayYmd(), -7), ymdAdd(todayYmd(), -1)));
   $("btn-refresh").addEventListener("click", () => loadAll(true));   // 强制重拉，跳过运力模块缓存
   $("allday-cfg").textContent = allDayLabel();
   $("btn-allday").addEventListener("click", openAllDayCfg);
@@ -1399,10 +1797,53 @@ function boot() {
   });
   $("ql-pop-close").addEventListener("click", closePop);
   $("ql-pop-mask").addEventListener("click", (ev) => { if (ev.target === $("ql-pop-mask")) closePop(); });
-  document.addEventListener("keydown", (ev) => {
-    if (ev.key === "Escape") { closePop(); closeAllDayCfg(); }
+  // v3.57.20：坏单明细里点运单号 → 插件内弹运单详情
+  const popBody = $("ql-pop-body");
+  if (popBody) popBody.addEventListener("click", (ev) => {
+    const b = ev.target.closest && ev.target.closest("[data-order-tid]");
+    if (!b) return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    openOrderDetail(b.dataset.orderTid, b.dataset.orderTeam);
   });
-  setMonth(validMonth($("month-picker").value) ? $("month-picker").value : curMonth());
+  const orderClose = $("ql-order-close"), orderMask = $("ql-order-mask");
+  const mediaClose = $("ql-media-close"), mediaMask = $("ql-media-mask");
+  if (mediaClose) mediaClose.addEventListener("click", closeMedia);
+  if (mediaMask) mediaMask.addEventListener("click", (ev) => { if (ev.target === mediaMask) closeMedia(); });
+  const orderBody = $("ql-order-body");
+  if (orderBody) orderBody.addEventListener("click", (ev) => {
+    const media = ev.target.closest && ev.target.closest("[data-media-url]");
+    if (media) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      openMedia(media.dataset.mediaUrl, media.dataset.mediaKind,
+        (media.dataset.mediaKind === "video" ? "视频" : media.dataset.mediaKind === "audio" ? "录音" : "图片"));
+      return;
+    }
+    const b = ev.target.closest && ev.target.closest("[data-copy]");
+    if (!b) return;
+    const text = String(b.dataset.copy || "");
+    if (!text) return;
+    const done = () => { const old = b.textContent; b.textContent = "已复制"; setTimeout(() => { b.textContent = old; }, 1200); };
+    if (navigator && navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(done).catch(() => {});
+    } else {
+      const ta = document.createElement("textarea");
+      ta.value = text; ta.style.position = "fixed"; ta.style.left = "-9999px";
+      document.body.appendChild(ta); ta.select(); document.execCommand("copy"); ta.remove(); done();
+    }
+  });
+  if (orderClose) orderClose.addEventListener("click", closeOrderDetail);
+  if (orderMask) orderMask.addEventListener("click", (ev) => {
+    if (ev.target === orderMask) closeOrderDetail();
+  });
+  document.addEventListener("keydown", (ev) => {
+    if (ev.key !== "Escape") return;
+    if (mediaMask && !mediaMask.hidden) { closeMedia(); return; }
+    if (orderMask && !orderMask.hidden) { closeOrderDetail(); return; }
+    closePop(); closeAllDayCfg();
+  });
+  loadAll();
 }
 
 // 测试桩（离线单元回归可用 window.__QL__ 取纯函数）
@@ -1417,7 +1858,8 @@ Object.assign(window.__QL__ = window.__QL__ || {}, {
   allDayLabel, ALLDAY_DEFAULT, ALLDAY_LS,
   API_ATT_DETAIL, API_ATT_LIVE, API_TEAMS, API_KPI_DETAIL, API_VIOLATION,
   SITE_TO_AREA, KPI_FILTERS, KPI_COLS, BAD_COLS, VIOL_SEG_DAYS, VIOL_BATCH,
-  setDim, setView, setMonth, loadAll, renderAll, shiftPop, badPop
+  openOrderDetail, closeOrderDetail, orderDetailHtml, openMedia, closeMedia, mediaThumb, API_ORDER_DETAIL, API_ORDER_ABNORMAL,
+  setDim, setView, setRange, loadAll, renderAll, shiftPop, badPop
 });
 
 // v3.48.1：面板 iframe 内脚本已加载 → 回报宿主「READY」；宿主 3 秒没收到就说明
