@@ -73,6 +73,9 @@ const SITE_TO_AREA = {
   "福州晋安区福新中路站-UB": "福州晋安区商圈片"
 };
 
+// 冗余时长的允许额度：本时段内「不在线的分钟数」超过 30 分钟即视为已用穿
+const SLACK_ALLOW_SEC = 30 * 60;
+
 const $ = (id) => document.getElementById(id);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g,
@@ -106,7 +109,9 @@ const state = {
   seq: 0,
   statCache: new Map(),        // `${teamId}|${date}` → {at, byCode, teamKnightNum}
   expanded: new Set(),
-  slotCode: ""
+  slotCode: "",
+  validTrend: new Map(),       // `${teamId}|${knightId}` -> { v } 上一次的有效在线秒数（判断是否在增长）
+  trendSlot: ""                // 趋势比较只在同一时段内有效，切时段自动清空
 };
 
 // ---------------------------------------------------------------- 双通道请求
@@ -202,6 +207,7 @@ async function loadAttendance(team, code) {
     order: num(x.deliveryOrder),
     onlineTime: num(x.timeOnlineTime), validOnline: num(x.timeValidOnlineTime),
     onlineTarget: num(x.timeOnlineTimeTarget),
+    orderDone: num(x.timeFinishOrder), orderTarget: num(x.timeFinishOrderTarget),
     startOnline: num(x.startOnlineTime),
     fullOnline: num(x.fullDayOnlineTime), fullOrder: num(x.fullDayFinishOrder)
   }));
@@ -310,29 +316,92 @@ function aggByArea(sites) {
 /** 明细行：异常 / 不在线共用一套字段。
  *  v3.29.1：「本时段在线」列改显示**有效在线**（timeValidOnlineTime ÷ 60），
  *  原始在线（timeOnlineTime）与目标时长只放在悬浮提示里，避免把毛时长当成考核口径。 */
+/** 时长显示到秒：1小时38分12秒 / 38分12秒 / 12秒 */
+function durText(sec) {
+  const s = Math.max(0, Math.round(num(sec)));
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), ss = s % 60;
+  if (h) return `${h}小时${m}分${ss}秒`;
+  if (m) return `${m}分${ss}秒`;
+  return `${ss}秒`;
+}
+/** 目标值：整小时显示「N小时」，整分显示「N分」，其余保留到秒 */
+function targetText(sec) {
+  const s = Math.max(0, Math.round(num(sec)));
+  if (!s) return "—";
+  if (s % 3600 === 0) return `${s / 3600}小时`;
+  if (s % 60 === 0) return `${s / 60}分`;
+  return durText(s);
+}
+function fracCell(cur, target) {
+  const t = target == null ? "—" : String(target);
+  return `<span class="rt-frac"><b>${esc(String(cur))}</b><i></i><em>${esc(t)}</em></span>`;
+}
 function detailRow(site, row) {
   const online = isOnline(row);
-  const rawMin = Math.round(num(row.onlineTime) / 60);
-  const validMin = Math.round(num(row.validOnline) / 60);
-  const targetMin = Math.round(num(row.onlineTarget) / 60);
-  const tip = `本时段有效在线 ${validMin} 分（timeValidOnlineTime）` +
-    ` · 原始在线 ${rawMin} 分（timeOnlineTime）` +
-    (targetMin > 0 ? ` · 目标 ${targetMin} 分` : "");
+  const rawSec = num(row.onlineTime);
+  const validSec = num(row.validOnline);
+  const targetSec = num(row.onlineTarget);
+  const doneOrd = num(row.orderDone);
+  const targetOrd = num(row.orderTarget);
+  const tip = `本时段有效在线 ${durText(validSec)}（timeValidOnlineTime）` +
+    ` · 原始在线 ${durText(rawSec)}（timeOnlineTime）` +
+    (targetSec > 0 ? ` · 目标 ${targetText(targetSec)}` : "") +
+    ` · 完单 ${doneOrd}${targetOrd > 0 ? " / 目标 " + targetOrd : ""}` +
+    ` · 背单 ${num(row.order)}`;
   return {
     area: site.area, site: site.teamName, teamId: site.teamId,
     knightId: num(row.knightId), name: String(row.name || ""), mobile: String(row.mobile || ""),
     shifts: (row.timeName || []).join(" / "),
-    online, orders: ordersOf(row), statusText: workStatusText(row),
-    onlineMin: rawMin, validMin, targetMin, onlineTipText: tip,
+    online, statusText: workStatusText(row),
+    onlineTipText: tip,
+    validText: durText(validSec), targetText: targetText(targetSec),
+    doneOrd, targetOrd, orders: ordersOf(row),
     lastOnline: num(row.startOnline) > 0 ? hhmm(new Date(num(row.startOnline))) : "",
     kind: online ? "online" : (ordersOf(row) > 0 ? "offline-order" : "abnormal")
   };
 }
+/** 本时段从开始到现在过了多少秒（封顶到时段时长，未开始按 0 计）。 */
+function slotElapsedSec(slot) {
+  if (!slot) return 0;
+  const a = timeToMin(slot.start);
+  let b = timeToMin(slot.end);
+  if (b <= a) b = 1440;                       // 跨零点时段
+  const dur = (b - a) * 60;
+  const now = new Date();
+  const start = new Date(now.getFullYear(), now.getMonth(), now.getDate(), Math.floor(a / 60), a % 60, 0, 0);
+  let diff = Math.round((now.getTime() - start.getTime()) / 1000);
+  if (diff < 0 && slot.current) diff += 86400; // 跨零点、当前时段在凌晨
+  return Math.max(0, Math.min(dur || diff, diff));
+}
+function slackText(sec) {
+  const n = Math.round(num(sec));
+  return (n < 0 ? "−" : "+") + durText(Math.abs(n));
+}
 /** 从一个站点的汇总里抽出两张明细表。 */
 function buildDetails(sites) {
   const abnormal = [], offline = [];
+  const slot = activeSlot();
+  const code = slot ? String(slot.code) : String(state.slotCode || "");
+  if (state.trendSlot !== code) {          // 切时段 / 首次加载：趋势重新开始比
+    state.validTrend.clear();
+    state.trendSlot = code;
+  }
+  const elapsed = slotElapsedSec(slot);
   for (const s of sites || []) {
-    for (const r of s.abnormal) abnormal.push(detailRow(s, r));
+    for (const r of s.abnormal) {
+      const row = detailRow(s, r);
+      // 冗余时长 = 30 分钟 −（本时段已过时长 − 本时段有效在线）
+      row.elapsedSec = elapsed;
+      row.slackSec = SLACK_ALLOW_SEC - Math.max(0, elapsed - num(r.validOnline));
+      const key = row.teamId + "|" + row.knightId;
+      const prev = state.validTrend.get(key);
+      row.trend = prev ? (num(r.validOnline) > prev.v ? "up"
+        : (num(r.validOnline) < prev.v ? "down" : "flat")) : "";
+      state.validTrend.set(key, { v: num(r.validOnline) });
+      // v3.58.14：只列「有效时长不走」的异常骑手；正在增长（已恢复）的不再进明细
+      if (row.trend === "up") continue;
+      abnormal.push(row);
+    }
     for (const r of s.offlineOrder) offline.push(detailRow(s, r));
   }
   const byName = (a, b) => String(a.site).localeCompare(String(b.site), "zh") || a.knightId - b.knightId;
@@ -513,11 +582,12 @@ function renderAreas() {
     });
   });
 }
-function detailHead(first) {
-  return `<thead><tr><th class="c-site">站点</th><th class="c-area">商圈片</th><th class="c-name">骑手</th>` +
-    `<th class="c-mobile">手机号</th><th class="c-shift">排班时段</th>` +
-    (first ? `<th class="c-num">背单</th>` : "") +
-    `<th class="c-num" title="本时段有效在线时长（timeValidOnlineTime，剔除无效在线）；悬浮单个单元格可看原始在线时长与目标时长">有效在线</th>` +
+function detailHead() {
+  return `<thead><tr><th class="c-site">站点</th><th class="c-area">商圈片</th><th class="c-name">骑手 / 手机号</th>` +
+    `<th class="c-shift">排班时段</th>` +
+    `<th class="c-num c-ord" title="当前背单数（deliveryOrder）">背单</th>` +
+    `<th class="c-num c-time" title="本时段有效在线 / 目标时长（timeValidOnlineTime / timeOnlineTimeTarget），显示到秒">有效在线</th>` +
+    `<th class="c-num c-ord" title="本时段有效完单 / 目标完单（timeFinishOrder / timeFinishOrderTarget）">完单</th>` +
     `<th class="c-num">最近上线</th><th class="c-state">状态</th></tr></thead>`;
 }
 function renderDetails() {
@@ -526,28 +596,39 @@ function renderDetails() {
   if (ca) ca.textContent = `${state.abnormal.length} 人`;
   if (co) co.textContent = `${state.offline.length} 人`;
   if (ta) {
-    ta.innerHTML = detailHead(false) + `<tbody>` + (state.abnormal.length
+    ta.innerHTML = detailHead() + `<tbody>` + (state.abnormal.length
       ? state.abnormal.map((r) => `<tr>` +
         `<td class="c-site" title="${esc(r.site)}">${esc(r.site.replace(/^福州/, "").replace(/-UB$/, ""))}</td>` +
         `<td class="c-area" title="${esc(r.area)}">${esc(r.area)}</td>` +
-        `<td class="c-name">${esc(r.name || "未命名")}<em>${esc(r.knightId)}</em></td>` +
-        `<td class="c-mobile">${esc(r.mobile)}</td>` +
+        `<td class="c-name">${esc(r.name || "未命名")}<em>${esc(r.knightId)}</em>` +
+        `<span class="rt-mob">${esc(r.mobile || "—")}</span></td>` +
         `<td class="c-shift" title="${esc(r.shifts)}">${esc(r.shifts || "—")}</td>` +
-        `<td class="c-num" title="${esc(r.onlineTipText)}">${r.validMin} 分</td>` +
+        `<td class="c-num c-ord">${r.orders}</td>` +
+        `<td class="c-num c-time${r.trend ? " rt-trend-" + r.trend : ""}" ` +
+          `title="${esc(r.onlineTipText + "；趋势：" + (r.trend === "up" ? "较上次刷新在增长（绿）" : r.trend === "flat" ? "较上次刷新没有变化（红）" : r.trend === "down" ? "较上次刷新减少（红）" : "首次读取，下次刷新开始比较"))}">` +
+          fracCell(r.validText, r.targetText) +
+          (r.slackSec != null
+            ? `<span class="rt-slack${r.slackSec < 0 ? " bad" : ""}" ` +
+              `title="冗余时长 = 30分钟 −（本时段已过 ${esc(durText(r.elapsedSec))} − 有效在线 ${esc(r.validText)}）">` +
+              `冗余 ${esc(slackText(r.slackSec))}</span>`
+            : "") +
+          `</td>` +
+        `<td class="c-num c-ord">${fracCell(r.doneOrd, r.targetOrd)}</td>` +
         `<td class="c-num">${esc(r.lastOnline || "—")}</td>` +
-        `<td class="c-state bad" title="工作状态 ${esc(r.statusText)}">异常 · ${esc(r.statusText)} · 0 背单</td></tr>`).join("")
-      : `<tr><td colspan="8" class="rt-empty">${state.loading ? "正在取数…" : "本时段没有异常骑手 🎉"}</td></tr>`) + `</tbody>`;
+        `<td class="c-state bad" title="工作状态 ${esc(r.statusText)}">异常 · ${esc(r.statusText)} · ${r.orders} 背单</td></tr>`).join("")
+      : `<tr><td colspan="9" class="rt-empty">${state.loading ? "正在取数…" : "本时段没有异常骑手 🎉"}</td></tr>`) + `</tbody>`;
   }
   if (to) {
-    to.innerHTML = detailHead(true) + `<tbody>` + (state.offline.length
+    to.innerHTML = detailHead() + `<tbody>` + (state.offline.length
       ? state.offline.map((r) => `<tr>` +
         `<td class="c-site" title="${esc(r.site)}">${esc(r.site.replace(/^福州/, "").replace(/-UB$/, ""))}</td>` +
         `<td class="c-area" title="${esc(r.area)}">${esc(r.area)}</td>` +
-        `<td class="c-name">${esc(r.name || "未命名")}<em>${esc(r.knightId)}</em></td>` +
-        `<td class="c-mobile">${esc(r.mobile)}</td>` +
+        `<td class="c-name">${esc(r.name || "未命名")}<em>${esc(r.knightId)}</em>` +
+        `<span class="rt-mob">${esc(r.mobile || "—")}</span></td>` +
         `<td class="c-shift" title="${esc(r.shifts)}">${esc(r.shifts || "—")}</td>` +
-        `<td class="c-num warn">${r.orders}</td>` +
-        `<td class="c-num" title="${esc(r.onlineTipText)}">${r.validMin} 分</td>` +
+        `<td class="c-num c-ord warn">${r.orders}</td>` +
+        `<td class="c-num c-time" title="${esc(r.onlineTipText)}">${fracCell(r.validText, r.targetText)}</td>` +
+        `<td class="c-num c-ord">${fracCell(r.doneOrd, r.targetOrd)}</td>` +
         `<td class="c-num">${esc(r.lastOnline || "—")}</td>` +
         `<td class="c-state warn" title="工作状态 ${esc(r.statusText)}">${esc(r.statusText)} · 下线背单</td></tr>`).join("")
       : `<tr><td colspan="9" class="rt-empty">${state.loading ? "正在取数…" : "本时段没有下线背单的骑手"}</td></tr>`) + `</tbody>`;

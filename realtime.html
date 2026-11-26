@@ -74,7 +74,7 @@
   <section class="rt-card">
     <div class="rt-card-head">
       <h2>异常骑手</h2>
-      <span class="rt-hint">已排本时段 · 不在线 · 0 背单</span>
+      <span class="rt-hint">已排本时段 · 不在线 · 0 背单 · 有效时长仍在增长的不列出</span>
       <span class="rt-head-right"><b class="rt-count" id="rt-abnormal-count">0 人</b></span>
     </div>
     <div class="rt-table-wrap">
@@ -101,7 +101,11 @@
     背单 = <code>deliveryOrder&gt;0</code>，在线率 = 排班在线 ÷ 实排，
     <b>异常 = 已排本时段 &amp;&amp; 不在线 &amp;&amp; 非小休 &amp;&amp; 0 背单</b>，<b>下线背单 = 不在线 &amp;&amp; 非小休 &amp;&amp; 背单 &gt; 0</b>。
     明细表里的「有效在线」= 本时段有效在线时长（<code>timeValidOnlineTime</code>，已剔除无效在线），
-    不是原始在线（<code>timeOnlineTime</code>）；鼠标停在数字上可看到原始在线时长与本时段目标时长。
+    不是原始在线（<code>timeOnlineTime</code>），按<b>分数</b>显示：分子为有效时长（精确到秒），分母为本时段目标时长（<code>timeOnlineTimeTarget</code>）；
+    「完单」同样是分数：分子为本时段有效完单（<code>timeFinishOrder</code>），分母为目标完单（<code>timeFinishOrderTarget</code>）；
+    「背单」是当前手里还没送的单量（<code>deliveryOrder</code>）。鼠标停在数字上可看到原始在线、目标时长与背单明细。
+    异常骑手的「有效在线」会与上一次刷新比较：<b class="rt-trend-up-txt">增长标绿</b>、<b class="rt-trend-flat-txt">没变化或下降标红</b>；
+    下方的「冗余」= 30 分钟 −（本时段已过时长 − 本时段有效在线），为负说明本时段无效时间已用超过 30 分钟。
     商圈片按站点名映射（与考核看板 / 排班模块同一套），映射不到就按站点自己成组。
     应排 / 实排每 5 分钟才重新取一次（排班不会 30 秒一变），在线 / 背单每次刷新都取最新。
     页面切到后台时自动暂停刷新，回到前台立即补一次。

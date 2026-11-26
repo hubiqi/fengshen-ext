@@ -52,7 +52,9 @@ button.date-active:hover { background: #24457c; }
 .att-switch button:hover:not(.on) { background: #F3F6FC; color: #1D4ED8; }
 .att-switch button.on { background: #2F5597; border-color: #2F5597; color: #FFFFFF; font-weight: 600; }
 .att-switch button:focus-visible { outline: 2px solid #93C5FD; outline-offset: 2px; }
-table.tbl.att { width: 100%; min-width: 1218px; border: 1px solid #E5E7EB; }
+/* v3.57.89：列宽按内容取自然宽度，容器不够就左右滑动，不再把列压窄 */
+table.tbl.att { width: max-content; min-width: 1218px; table-layout: auto;
+  border: 1px solid #E5E7EB; }
 table.tbl.att th, table.tbl.att td { border: 1px solid #E5E7EB; padding: 4px 2px; }
 table.tbl.att thead th { height: 40px; background: #F2F5FA; color: #374151;
   font-size: 14px; font-weight: 700; }
@@ -102,7 +104,8 @@ button.fr-day.on { border-color: #B45309; background: #FFF7ED; color: #B45309; }
 button.fr-day.on i.fr-box { background: #B45309; border-color: #B45309; color: #FFF; }
 .fr-note { width: 100%; margin: 0 0 10px; text-align: center;
   font-size: 12.5px; color: #6B7280; line-height: 1.6; padding: 0 16px; }
-table.tbl.fr { width: 100%; min-width: 0; border: 1px solid #E5E7EB;
+/* v3.57.89：炸班矩阵同样按内容取自然宽度，外层 .tbl-scroll 负责左右滑动 */
+table.tbl.fr { width: max-content; min-width: 100%; border: 1px solid #E5E7EB;
   table-layout: auto; }   /* 列宽由内容自适应，不写死 colgroup / 不锁 1218px */
 table.tbl.fr th, table.tbl.fr td { border: 1px solid #E5E7EB; padding: 4px 5px; }
 table.tbl.fr thead th { height: 34px; background: #F2F5FA; color: #374151;
@@ -124,7 +127,7 @@ table.tbl.fr td.rm-cnt { min-width: 58px; font-size: 14px; font-weight: 700; col
 table.tbl.fr td.rm-hist { min-width: 46px; color: #6B7280; }
 table.tbl.fr td.rm-cell { min-width: 42px; text-align: center; padding: 4px 0; }
 table.tbl.fr td.rm-cell.blank { background: #FFFFFF; }
-table.tbl.fr td.rm-tmr { min-width: 260px; font-size: 10.5px; color: #4B5563;
+table.tbl.fr td.rm-tmr { min-width: 260px; max-width: 380px; font-size: 10.5px; color: #4B5563;
   white-space: normal; word-break: break-word; overflow: visible; line-height: 1.7; }
 /* T+1排班按班次拆成小块；命中本日异常班次的标红并可点开近三天追溯 */
 table.tbl.fr .rm-shift { display: inline-block; margin: 1px 1px; padding: 0 2px;
@@ -190,7 +193,8 @@ table.fail-tbl td.site { color: #4B5563; }
 /* 数值列右对齐，长列表扫读更快 */
 table.fail-tbl th:nth-child(3), table.fail-tbl td:nth-child(3),
 table.fail-tbl th:nth-child(4), table.fail-tbl td:nth-child(4) { text-align: right; width: 88px; }
-table.fail-tbl th:nth-child(5), table.fail-tbl td:nth-child(5) { width: 112px; }
+/* 第 5 列：改派（被剔除的人工改派成功单） */
+table.fail-tbl th:nth-child(5), table.fail-tbl td:nth-child(5) { text-align: right; width: 64px; }
 table.fail-tbl td.who { width: 150px; }
 table.fail-tbl td.why { white-space: nowrap; color: #B45309; }
 table.fail-tbl tr.off td { background: #FFF7F7; }
@@ -212,3 +216,13 @@ td.att-kpi-cell.has-kpi:hover { color: #7F1D1D; }
 
 /* v3.57.62：出勤达成页面铺满面板宽度（原来 .sheet 固定 1240，两边大片空白） */
 body.att-page .sheet { width: auto; max-width: none; margin: 0; padding: 20px 18px 30px; }
+
+/* 炸班明细：全天达成剔除人工改派后的展示 */
+table.fail-tbl td.fail-cut-col { color: #B91C1C; font-weight: 700; }
+table.fail-tbl td.fail-ord-cut { color: #B91C1C; font-weight: 700; }
+table.fail-tbl em.fail-cut { display: block; font-style: normal; font-size: 11px;
+  font-weight: 400; color: #9CA3AF; line-height: 1.3; }
+
+/* 炸班明细矩阵：全天列被剔除的人工改派单数（✗ 右上角） */
+table.roster-tbl em.rm-cut, table#table5 em.rm-cut { font-style: normal; font-size: 10px;
+  color: #B91C1C; font-weight: 700; vertical-align: super; margin-left: 1px; }

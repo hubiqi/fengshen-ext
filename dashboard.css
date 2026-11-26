@@ -79,6 +79,35 @@ button.date-quick.is-current .dq-dot { background: #7DD3FC; }
 /* v3.57.36：横向滚到边界时不要继续把滚动传给外层（否则整个面板/页面会跟着左右晃） */
 .tbl-scroll { overflow-x: auto; overscroll-behavior-x: contain; }
 html, body { overscroll-behavior-x: none; }
+
+/* v3.57.89：所有表格容器统一支持左右滑动，并把滚动条常显出来
+   （macOS 默认是悬浮滚动条，不划一下看不见，容易以为表格不能左右拖） */
+.tbl-scroll, .rent-history-wrap, .rt-table-wrap, .td-table-wrap, .deduct-preview-wrap {
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+}
+.tbl-scroll::-webkit-scrollbar,
+.rent-history-wrap::-webkit-scrollbar,
+.rt-table-wrap::-webkit-scrollbar,
+.td-table-wrap::-webkit-scrollbar,
+.deduct-preview-wrap::-webkit-scrollbar { width: 10px; height: 10px; }
+.tbl-scroll::-webkit-scrollbar-track,
+.rent-history-wrap::-webkit-scrollbar-track,
+.rt-table-wrap::-webkit-scrollbar-track,
+.td-table-wrap::-webkit-scrollbar-track,
+.deduct-preview-wrap::-webkit-scrollbar-track { background: #F3F6FB; border-radius: 6px; }
+.tbl-scroll::-webkit-scrollbar-thumb,
+.rent-history-wrap::-webkit-scrollbar-thumb,
+.rt-table-wrap::-webkit-scrollbar-thumb,
+.td-table-wrap::-webkit-scrollbar-thumb,
+.deduct-preview-wrap::-webkit-scrollbar-thumb {
+  background: #C3CFE2; border-radius: 6px; border: 2px solid #F3F6FB;
+}
+.tbl-scroll::-webkit-scrollbar-thumb:hover,
+.rent-history-wrap::-webkit-scrollbar-thumb:hover,
+.rt-table-wrap::-webkit-scrollbar-thumb:hover,
+.td-table-wrap::-webkit-scrollbar-thumb:hover,
+.deduct-preview-wrap::-webkit-scrollbar-thumb:hover { background: #9FB0C9; }
 table.tbl { border-collapse: collapse; table-layout: fixed; margin: 0 auto;
   font-variant-numeric: tabular-nums; }
 table.tbl th, table.tbl td { border: 1px solid #000000; text-align: center;

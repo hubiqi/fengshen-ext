@@ -21,6 +21,10 @@
 // 系统标记并非按运力标准判定。本页一律忽略该列，全天按「有效在线≥6h 且 完单≥18单」
 // 手工判定；时段达成按 config.py PERIOD_STANDARDS 的时长 + 完单双门槛判定。
 //
+// v3.57.84：全天达成剔除人工改派单（KPI 第十三条）。出勤统计的全天完单 = 运单配送成功数，
+//   本身没有剔除改派，所以额外按 isReassign=1 只查当日改派单（2~3 页），逐骑手扣除后再判 18 单。
+//   炸班明细新增「改派」列，并显示剔除前的原始完单；取不到改派单时退回含改派口径并提示。
+//
 // teamIds 的取法：优先复用原看板已落盘的运单缓存（0 次额外请求）；缓存不存在时
 // 只查当日运单第 1 页取站点 ID（1 次请求）。历史日期的站点范围与今天一致。
 
@@ -33,7 +37,6 @@ const API_ATT_DETAIL = XT + "xtop.fs.special.examine.exportStatisticsDetail/1.0"
 const API_KPI_DAY = XT + "xtop.performance.fs.opp.perfDetail.queryDetailList/1.0";
 const PAGE_SIZE = 90;
 const THROTTLE_MS = 1200;
-const REFRESH_MS = 5 * 60 * 1000;
 const HISTORY_DAYS = 90;
 
 const $ = (id) => document.getElementById(id);
@@ -98,6 +101,7 @@ const state = {
   rosterDay: localStorage.getItem("wb_att_roster_day") === "on",
   loading: false, gen: 0, errors: [], fallbackTried: false,
   schSheets: [], attSheets: [], assess: null, detailStats: null,
+  reassignOrders: null, reassignError: "",   // 人工改派单（isReassign=1），仅用于全天达成剔除
   startedAt: null, finishedAt: null, dataNote: "", teamSource: "", teamCount: 0,
   memo: new Map(),  // 日期 -> 已加载的 sheets，切换日期秒回；「立即刷新」强制重拉
   teamIds: [],
@@ -137,6 +141,42 @@ function buildQueryPayload(page) {
   } } };
 }
 
+/** 所选日期的运单终态时间窗口：今天 00:00~现在，历史日期整天。 */
+function dayWindow(date) {
+  const [y, m, d] = String(date).split("-").map(Number);
+  const start = new Date(y, m - 1, d, 0, 0, 0, 0);
+  const end = isToday(date) ? new Date() : new Date(y, m - 1, d, 23, 59, 59, 999);
+  return { start: start.getTime(), end: end.getTime() };
+}
+
+/** 只查当日「人工改派」运单（isReassign=1），用于全天达成剔除。
+ *  出勤统计的全天完单 = 运单配送成功数（实测逐骑手完全相等），**没有**剔除人工改派；
+ *  KPI 第十三条要求在标1–标5 里剔除。改派单一天通常只有一两百张，2~3 页就取完。 */
+const MAX_REASSIGN_PAGES = 20;
+async function loadReassignOrders(teamIds, date) {
+  const w = dayWindow(date);
+  const out = [];
+  let total = 0;
+  for (let page = 1; page <= MAX_REASSIGN_PAGES; page++) {
+    const d = await callApi(API_QUERY, { params: { request: {
+      deliverTypeList: [1, 2], teamIds: teamIds || [],
+      trackingFinishStart: w.start, trackingFinishEnd: w.end,
+      merchantConsumerDistanceStart: "0", merchantConsumerDistanceEnd: "999999",
+      payAmountStart: "0", payAmountEnd: "999999",
+      weightStart: "0", weightEnd: "999999",
+      trackingFinishTimePeriodList: ["0-86400"],
+      current: page, pageSize: PAGE_SIZE,
+      isReassign: 1
+    } } }, page === 1);
+    const list = Array.isArray(d.data) ? d.data : [];
+    if (typeof d.total === "number") total = d.total;
+    out.push(...list);
+    if (!list.length || out.length >= total) break;
+    await sleep(450);
+  }
+  return out;
+}
+
 // ---------------------------------------------------------------- 双通道请求（与考核看板同一套）
 async function rawApi(api, payload, via) {
   if (via === "bridge") {
@@ -174,9 +214,11 @@ function unwrap(j) {
 }
 async function callApi(api, payload, isFirst) {
   let lastErr = null;
+  let directRetried = false;
   for (let attempt = 0; attempt < 5; attempt++) {
+    const ch = state.via;             // 记录本次实际用的通道，避免并发调用把 state.via 改掉后判断错
     try {
-      return unwrap(await rawApi(api, payload, state.via));
+      return unwrap(await rawApi(api, payload, ch));
     } catch (e) {
       lastErr = e;
       if (e.code === "REQUEST_TOO_FREQUENT") { await sleep(1800 * (attempt + 1)); continue; }
@@ -186,6 +228,13 @@ async function callApi(api, payload, isFirst) {
         state.fallbackTried = true;
         await switchChannel("bridge",
           "直连未成功（" + (e.message || "未知原因") + "），已自动切换到「静默桥接」：后台标签取数，不弹窗、不抢焦点。");
+        continue;
+      }
+      // v3.57.96：桥接失败（常见于后台标签被 Chrome 休眠）→ 切回直连再试，避免整页空白
+      if (ch === "bridge" && !directRetried) {
+        directRetried = true;
+        await switchChannel("direct",
+          "后台桥接未成功（" + (e.message || "未知原因") + "），已切回直连重试。");
         continue;
       }
       throw e;
@@ -248,7 +297,9 @@ function setBusy(b) { $("btn-refresh").disabled = b; $("btn-refresh").textConten
 function recompute() {
   // 运单传空数组：出勤达成只依赖排班统计 + 考勤（实时快照或历史时段明细），
   // 与原考核看板的运单增量链路解耦；dateStr 传所选日期，排班统计按该日期过滤。
-  state.assess = ASSESS.build([], state.schSheets, state.attSheets, state.date, XLSX_READER);
+  // 改派单已查过才传（空数组 = 当天确实没有改派，与「没查」严格区分）
+  const opts = Array.isArray(state.reassignOrders) ? { reassignOrders: state.reassignOrders } : undefined;
+  state.assess = ASSESS.build([], state.schSheets, state.attSheets, state.date, XLSX_READER, opts);
   state.mode = isToday(state.date) ? "live" : "history";
   render();
 }
@@ -332,9 +383,21 @@ function bindRosterDay() {
 // 分母为 0 显示「—」；未结束班次且暂无达标骑手时显示「统计中 / 未开始」。
 // 炸班明细的 key 必须与 assess.js 的 attKey 一致（area + \u0001 + 时段）
 const failKey = (area, per) => area + "\u0001" + per;
-const failListOf = (att, area, per) => (att.fails && att.fails[failKey(area, per)]) || [];
+const TOTAL_AREA = "*";
+/** 取某片区某班次的炸班列表；area 传 TOTAL_AREA 时汇总全部片区（总计行用）。 */
+function failListOf(att, area, per) {
+  if (area === TOTAL_AREA) {
+    const out = [];
+    for (const [k, list] of Object.entries((att && att.fails) || {})) {
+      const i = k.indexOf("\u0001");
+      if (i >= 0 && k.slice(i + 1) === per) out.push(...list);
+    }
+    return out;
+  }
+  return (att.fails && att.fails[failKey(area, per)]) || [];
+}
 
-/** 排了班但没达标的骑手数：点击单元格就展开这批人（片区行才可点，总计行不展开） */
+/** 排了班但没达标的骑手数：点击单元格就展开这批人（片区行与总计行都可点） */
 function attCell(c, per, mode, att, area) {
   const den = mode === "real" ? c.real : c.due;
   const rate = mode === "real" ? c.realRate : c.dueRate;
@@ -430,7 +493,7 @@ function renderAttTable(id, att, mode, periods) {
   const firstW = 210, rateW = 112, kpiW = 104;
   const cols = `<colgroup><col style="width:${firstW}px">` +
     P.map(() => "<col>").join("") +
-    `<col style="width:${rateW}px"><col style="width:${kpiW}px"></colgroup>`;
+    `<col style="width:${rateW}px"><col style="width:${kpiW}px"><col style="width:${kpiW}px"></colgroup>`;
   const rateHeadTip = attRateTip({ wsum: attWeightSum(state.weights) });
   const head = `<thead><tr><th>团队名称</th>` + P.map((p) => {
     const st = att.standards[p];
@@ -439,19 +502,23 @@ function renderAttTable(id, att, mode, periods) {
       : `有效在线≥${(st && st.timeMin) || 0}分钟 且 完单≥${(st && st.orders) || 0}单`;
     return `<th title="${esc(hint)}">${esc(p)}</th>`;
   }).join("") + `<th class="att-rate" title="${esc(rateHeadTip)}">时段排班率</th>` +
-    `<th class="att-kpi-col" title="达标异常：全天出勤完成（是否有效出勤=1），但 KPI 骑手日明细的骑手达标标准为空">达标异常</th></tr></thead>`;
+    `<th class="att-kpi-col" title="达标异常：全天出勤完成（是否有效出勤=1），但 KPI 骑手日明细的骑手达标标准为空">达标异常</th>` +
+    `<th class="att-kpi-col" title="非排班达标：KPI 骑手日明细里「是否排班 = 否」但「骑手达标标准」为 1~5 档">非排班达标</th></tr></thead>`;
   const body = ["<tbody>"];
   for (const r of att.rows) {
     body.push(`<tr><td class="name" title="${esc(r.area)}">${esc(shortArea(r.area))}</td>` +
       P.map((p) => attCell(r.cells[p], p, mode, att, r.area)).join("") +
-      attRateCell(attPeriodRate(r.cells, att)) + attKpiCell(r.area) + `</tr>`);
+      attRateCell(attPeriodRate(r.cells, att)) + attKpiCell(r.area, "abn") +
+      attKpiCell(r.area, "nonsched") + `</tr>`);
   }
   body.push(`<tr class="total"><td>总计</td>` +
-    P.map((p) => attCell(att.totals[p], p, mode, att, "")).join("") +
-    attRateCell(attPeriodRate(att.totals, att)) + attKpiCell("*") + `</tr></tbody>`);
+    P.map((p) => attCell(att.totals[p], p, mode, att, TOTAL_AREA)).join("") +
+    attRateCell(attPeriodRate(att.totals, att)) + attKpiCell("*", "abn") +
+    attKpiCell("*", "nonsched") + `</tr></tbody>`);
   const t = $(id);
-  t.style.width = "100%";
-  t.style.minWidth = "1218px";
+  // 宽度交给 CSS（width: max-content; min-width: 1218px），容器不够时左右滑动
+  t.style.width = "";
+  t.style.minWidth = "";
   t.innerHTML = cols + head + body.join("");
   renderKpiCells();
 }
@@ -596,7 +663,9 @@ function matrixRows(att, periods) {
   const sched = scheduledSet(state.attSheets);
   const bad = new Map(), who = new Map();
   for (const x of failRows) {
-    if (!who.has(x.rid)) who.set(x.rid, { rid: x.rid, name: x.name || "—", site: x.site || "" });
+    if (!who.has(x.rid)) who.set(x.rid, { rid: x.rid, name: x.name || "—", site: x.site || "", cuts: {} });
+    const meta = who.get(x.rid);
+    if (num(x.reassign) > 0) meta.cuts[x.per] = num(x.reassign);
     if (!bad.has(x.rid)) bad.set(x.rid, new Set());
     bad.get(x.rid).add(x.per);
   }
@@ -669,6 +738,9 @@ function renderRosterMatrix(att, periods) {
   }
   tips.push("T+1排班按班次拆开显示：与本日炸班班次同名的标红，点标红班次可看该骑手近三天这个班次的日期 / 是否达标 / 有效时长 / 有效完单。");
   tips.push("名单取自考勤「排班状态 = 排班」的记录，与排班统计的「排班人数」可能差 1–2 人。");
+  if (att.reassign && att.reassign.orders > 0) {
+    tips.push(`<b>全天达成已剔除人工改派单</b>：✗ 右上角的 <em class="rm-cut">−N</em> 表示该骑手全天单据里被剔除的改派成功单数。`);
+  }
   $("fr-note").innerHTML = tips.join(" ");
 
   // 列宽自适应：不写死 colgroup，交给 table-layout:auto 按内容分列；
@@ -698,9 +770,15 @@ function renderRosterMatrix(att, periods) {
       `<td class="rm-site" title="${esc(r.site)}">${esc(site)}</td>` +
       `<td class="rm-who"><b>${esc(r.name)}</b><span>${esc(r.rid)}</span></td>` +
       `<td class="num rm-cnt">${fmt(r.cnt)}</td>` +
-      r.cells.map((c, i) => `<td class="rm-cell${c ? " " + c : " blank"}" data-per="${esc(P[i])}">` +
-        (c === "no" ? `<i class="mk no">✗</i>` : c === "ok" ? `<i class="mk ok">✓</i>` : "") +
-        `</td>`).join("") +
+      r.cells.map((c, i) => {
+        const cutN = (r.cuts && r.cuts[P[i]]) || 0;   // 该班次被剔除的人工改派成功单
+        return `<td class="rm-cell${c ? " " + c : " blank"}" data-per="${esc(P[i])}">` +
+          (c === "no" ? `<i class="mk no">✗</i>` : c === "ok" ? `<i class="mk ok">✓</i>` : "") +
+          (cutN > 0
+            ? `<em class="rm-cut" title="该骑手 ${esc(P[i])} 完单已剔除人工改派 ${fmt(cutN)} 单">−${fmt(cutN)}</em>`
+            : "") +
+          `</td>`;
+      }).join("") +
       hDates.map((d) => `<td class="num rm-hist" title="${d}">${histCell(d, r.rid)}</td>`).join("") +
       `<td class="rm-tmr" title="${esc(tmText)}">${tmHtml}</td></tr>`);
   }
@@ -708,33 +786,41 @@ function renderRosterMatrix(att, periods) {
   tbl.innerHTML = head + body.join("");
   return total;
 }
-/** 达标异常列：先占位，KPI 日明细到位后回填（按商圈片匹配）。 */
-function attKpiCell(area) {
-  return `<td class="att-kpi-cell" data-kpi-area="${esc(area)}">—</td>`;
+/** 达标异常 / 非排班达标列：先占位，KPI 日明细到位后回填（按商圈片匹配）。 */
+function attKpiCell(area, kind) {
+  return `<td class="att-kpi-cell" data-kpi-area="${esc(area)}" data-kpi-kind="${esc(kind || "abn")}">—</td>`;
 }
 function kpiAreaKey(s) { return shortArea(String(s || "").trim()); }
 function renderKpiCells() {
   const k = state.kpi || {};
-  const byArea = new Map();
-  for (const x of (k.list || [])) {
-    const key = kpiAreaKey(x.area);
-    byArea.set(key, (byArea.get(key) || 0) + 1);
-  }
-  let total = 0;
-  for (const n of byArea.values()) total += n;
+  const build = (list) => {
+    const byArea = new Map();
+    let total = 0;
+    for (const x of (list || [])) {
+      const key = kpiAreaKey(x.area);
+      byArea.set(key, (byArea.get(key) || 0) + 1);
+      total++;
+    }
+    return { byArea, total };
+  };
+  const abn = build(k.list), non = build(k.nonSched);
   for (const td of document.querySelectorAll(".att-kpi-cell")) {
+    const kind = td.dataset.kpiKind === "nonsched" ? "nonsched" : "abn";
+    const src = kind === "nonsched" ? non : abn;
     const key = td.dataset.kpiArea;
-    const n = key === "*" ? total : (byArea.get(kpiAreaKey(key)) || 0);
+    const n = key === "*" ? src.total : (src.byArea.get(kpiAreaKey(key)) || 0);
     td.textContent = k.err ? "—" : (n || "—");
     td.classList.toggle("has-kpi", !k.err && n > 0);
     td.title = k.err ? "读取失败：" + k.err
-      : (n ? `点击查看 ${key === "*" ? "" : shortArea(key) + " "}达标异常骑手（${n} 人）` : "");
+      : (n ? `点击查看 ${key === "*" ? "" : shortArea(key) + " "}${kind === "nonsched" ? "非排班达标" : "达标异常"}骑手（${n} 人）` : "");
     td.dataset.kpiCount = String(n || 0);
   }
 }
 
 /** v3.57.60：KPI「UB 骑手日明细」——全天出勤完成（是否有效出勤=1）但骑手达标标准为空 = 达标异常。 */
-const KPI_DAY_IDX = { day: 0, area: 6, agency: 4, rid: 7, name: 8, orders: 9, online: 11, valid: 12, standard: 15, quitOther: 17, quitArea: 18, delivered: 19, spec: 21, gear: 25 };
+// v3.57.94：index 14 = 是否排班（是/否），新增「非排班达标」判定用
+const KPI_DAY_IDX = { day: 0, area: 6, agency: 4, rid: 7, name: 8, orders: 9, online: 11,
+  valid: 12, sched: 14, standard: 15, quitOther: 17, quitArea: 18, delivered: 19, spec: 21, gear: 25 };
 function kpiCell(r, i) {
   const c = r && r[i];
   return String(c && c.content != null ? c.content : "").trim();
@@ -745,14 +831,26 @@ async function loadKpiDay(date) {
   const end = new Date(y, m - 1, d, 23, 59, 59).getTime();
   const rows = [];
   for (let page = 1; page <= 30; page++) {
-    const data = await callApi(API_KPI_DAY, { params: { request: {
-      queryParam: { ds: [start, end] }, planType: "UPLUS_AGENCY",
-      tabCode: "RIDER_DAY_DATA_UB", pageIndex: page, pageSize: 100
-    } } });
+    let data = null;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        data = await Promise.race([
+          callApi(API_KPI_DAY, { params: { request: {
+            queryParam: { ds: [start, end] }, planType: "UPLUS_AGENCY",
+            tabCode: "RIDER_DAY_DATA_UB", pageIndex: page, pageSize: 100
+          } } }),
+          sleep(20000).then(() => { throw new Error(`KPI 明细第 ${page} 页超时（20 秒）`); })
+        ]);
+        break;
+      } catch (e) {
+        if (attempt >= 1) throw e;
+        await sleep(900);        // 单页偶发失败重试一次，不把整页数据丢掉
+      }
+    }
     const list = Array.isArray(data && data.data) ? data.data : [];
     rows.push(...list);
     if (!list.length || rows.length >= num(data && data.total)) break;
-    await sleep(320);
+    await sleep(420);            // 放缓节奏，降低「请求太频繁」
   }
   return rows.map((r) => ({
     rid: kpiCell(r, KPI_DAY_IDX.rid),
@@ -762,6 +860,7 @@ async function loadKpiDay(date) {
     orders: num(kpiCell(r, KPI_DAY_IDX.orders)),
     online: num(kpiCell(r, KPI_DAY_IDX.online)),
     valid: kpiCell(r, KPI_DAY_IDX.valid) === "1",
+    sched: kpiCell(r, KPI_DAY_IDX.sched),
     standard: kpiCell(r, KPI_DAY_IDX.standard),
     quitOther: kpiCell(r, KPI_DAY_IDX.quitOther),
     quitArea: kpiCell(r, KPI_DAY_IDX.quitArea),
@@ -777,59 +876,98 @@ function kpiDurText(sec) {
   const h = Math.floor(n / 3600), m = Math.round((n % 3600) / 60);
   return h ? `${h}小时${m ? m + "分" : ""}` : `${m}分钟`;
 }
-async function refreshKpiAbnormal(date) {
+async function refreshKpiAbnormal(date, force) {
+  // v3.58.12：KPI 日明细要翻十几页，render() 每次都会调到；同一天 5 分钟内直接复用，
+  // 失败后 60 秒内不再重试，避免反复触发限流导致「读取失败」。
+  const k = state.kpi;
+  const age = Date.now() - (state.kpiAt || 0);
+  if (!force && k && k.date === date) {
+    if (!k.err && age < 5 * 60 * 1000) { renderKpiAbnormal(); renderKpiCells(); return; }
+    if (k.err && age < 60 * 1000) { renderKpiAbnormal(); renderKpiCells(); return; }
+  }
+  if (state.kpiLoadingDate === date && !force) {
+    // v3.58.13：请求卡死时不能让状态永远停在「…」——超过 90 秒视为失效，允许重来
+    if (Date.now() - (state.kpiLoadingAt || 0) < 90 * 1000) return;
+  }
+  state.kpiLoadingDate = date;
+  state.kpiLoadingAt = Date.now();
   const token = (state.kpiToken = (state.kpiToken || 0) + 1);
   const link = $("kpi-abn");
   if (link) { link.textContent = "…"; link.classList.remove("is-err"); }
   try {
-    const list = await loadKpiDay(date);
+    const all = await loadKpiDay(date);
     if (token !== state.kpiToken) return;
-    state.kpi = { date, list: list.filter((x) => x.valid && !x.standard), err: "" };
+    state.kpi = {
+      date,
+      list: all.filter((x) => x.valid && !x.standard),
+      // 非排班达标：是否排班 = 否，但骑手达标标准拿到了 1~5 档
+      nonSched: all.filter((x) => x.sched === "否" && /^[1-5]$/.test(x.standard)),
+      err: ""
+    };
+    state.kpiAt = Date.now();
   } catch (e) {
     if (token !== state.kpiToken) return;
-    state.kpi = { date, list: [], err: String((e && e.message) || e) };
+    state.kpi = { date, list: [], nonSched: [], err: String((e && e.message) || e) };
+    state.kpiAt = Date.now();
+  } finally {
+    // 只有「当前这次」请求能清加载标记，避免旧请求把新请求的状态清掉
+    if (token === state.kpiToken) { state.kpiLoadingDate = ""; state.kpiLoadingAt = 0; }
   }
   renderKpiAbnormal();
   renderKpiCells();
 }
 function renderKpiAbnormal() {
-  const link = $("kpi-abn");
-  if (!link) return;
   const k = state.kpi || {};
-  if (k.err) {
-    link.textContent = "读取失败";
-    link.classList.add("is-err");
-    link.title = k.err;
-    return;
-  }
-  link.classList.remove("is-err");
-  const n = (k.list || []).length;
-  link.textContent = n;
-  link.title = n ? "点击查看达标异常骑手明细" : "没有达标异常骑手";
+  const paint = (id, n, tipZero, tipSome) => {
+    const el = $(id);
+    if (!el) return;
+    if (k.err) {
+      el.textContent = "读取失败";
+      el.classList.add("is-err");
+      el.title = k.err;
+      return;
+    }
+    el.classList.remove("is-err");
+    el.textContent = n;
+    el.title = n ? tipSome : tipZero;
+  };
+  paint("kpi-abn", (k.list || []).length, "没有达标异常骑手", "点击查看达标异常骑手明细");
+  paint("kpi-nonsched", (k.nonSched || []).length, "没有非排班达标骑手", "点击查看非排班达标骑手明细");
 }
-function openKpiModal(area) {
+function openKpiModal(area, kind) {
   const k = state.kpi || {};
-  if (!k.list || !k.list.length) return;
+  const isNon = kind === "nonsched";
+  const src = isNon ? (k.nonSched || []) : (k.list || []);
+  if (!src.length) return;
   const modal = $("kpi-modal");
   if (!modal) return;
-  const all = k.list.slice();
   const list = area && area !== "*"
-    ? all.filter((x) => kpiAreaKey(x.area) === kpiAreaKey(area))
-    : all;
+    ? src.filter((x) => kpiAreaKey(x.area) === kpiAreaKey(area))
+    : src.slice();
   if (!list.length) return;
   const areaLabel = area && area !== "*" ? shortArea(area) + " · " : "";
-  $("kpi-title").textContent = `达标异常骑手 · ${areaLabel}${list.length} 人`;
-  $("kpi-sub").textContent = `${state.kpi.date} · 全天出勤完成但 KPI 骑手日明细「骑手达标标准」为 -`;
-  $("kpi-tip").innerHTML = "判定：骑手日明细 <b>是否有效出勤 = 1</b> 且 <b>骑手达标标准 / W1目标骑手数【商圈片维度】为空</b>。" +
-    "通常是商圈片没绑或目标未配置，导致该骑手当天拿不到达标标准。";
+  if (isNon) {
+    $("kpi-title").textContent = `非排班达标 · ${areaLabel}${list.length} 人`;
+    $("kpi-sub").textContent = `${k.date} · KPI 骑手日明细「是否排班 = 否」但「骑手达标标准」为 1~5 档`;
+    $("kpi-tip").innerHTML = "判定：骑手日明细 <b>是否排班 = 否</b> 且 <b>骑手达标标准 ∈ 1~5</b>。" +
+      "表示该骑手当天没有排班，却仍按某一档达标标准结算，建议核对排班导入与商圈片标准配置。";
+  } else {
+    $("kpi-title").textContent = `达标异常骑手 · ${areaLabel}${list.length} 人`;
+    $("kpi-sub").textContent = `${k.date} · 全天出勤完成但 KPI 骑手日明细「骑手达标标准」为 -`;
+    $("kpi-tip").innerHTML = "判定：骑手日明细 <b>是否有效出勤 = 1</b> 且 <b>骑手达标标准 / W1目标骑手数【商圈片维度】为空</b>。" +
+      "通常是商圈片没绑或目标未配置，导致该骑手当天拿不到达标标准。";
+  }
   const rows = list.sort((a, b) => String(a.name).localeCompare(String(b.name), "zh-CN"));
   $("kpi-tbl").innerHTML =
-    "<thead><tr><th>骑手</th><th>站点 / 片区</th><th>全天有效时长</th><th>全天完单</th>" +
+    "<thead><tr><th>骑手</th><th>站点 / 片区</th><th>是否排班</th><th>达标标准</th>" +
+    "<th>全天有效时长</th><th>全天完单</th>" +
     "<th>妥投(不含改派)</th><th>同城异商最后离职</th><th>同商异片最后离职</th>" +
     "<th>投机单量</th><th>装备抽检不通过</th></tr></thead><tbody>" +
     rows.map((x) => "<tr>" +
       `<td>${esc(x.name || "—")}<em>${esc(x.rid)}</em></td>` +
       `<td>${esc(x.area || x.agency || "—")}</td>` +
+      `<td class="${x.sched === "否" ? "kpi-gear-bad" : ""}">${esc(x.sched || "—")}</td>` +
+      `<td class="${x.standard ? "" : "kpi-gear-bad"}">${esc(x.standard || "—")}</td>` +
       `<td>${esc(kpiDurText(x.online))}</td>` +
       `<td>${int(x.orders)}</td>` +
       `<td>${int(x.delivered)}</td>` +
@@ -857,15 +995,14 @@ function render() {
 
   $("mode-tag").textContent = modeLabel;
   $("mode-tag").className = "mode-tag" + (history ? " history" : "");
-  $("auto").disabled = history;
-  $("auto").title = history ? "历史日期为定稿数据，无需自动刷新" : "今天的实时快照每 5 分钟自动刷新";
+  if (window.WBAutoRefresh) WBAutoRefresh.setEnabled(!history);
   $("btn-today").classList.toggle("date-active", !history);
   $("btn-t1").classList.toggle("date-active", state.date === shiftDate(todayStr(), -1));
   if ($("date-picker").value !== state.date) $("date-picker").value = state.date;
   syncDateNav();
   $("doc-note").textContent = history
-    ? "数据源：排班统计（应排人数 / 排班人数）+ 出勤统计历史时段明细（有效在线时长 / 完单量）；全天达成按有效在线≥6小时且完单≥18单手工判定，不采用系统的全天达成标记"
-    : "数据源：排班统计（应排人数 / 排班人数）+ 实时考勤（排班状态 / 时段有效在线 / 时段完单）；有效出勤按 KPI 时段标准双达标去重，全天按 6h / 18 单";
+    ? "数据源：排班统计（应排人数 / 排班人数）+ 出勤统计历史时段明细（有效在线时长 / 完单量）；全天达成按有效在线≥6小时且完单≥18单手工判定，并剔除人工改派单（KPI 第十三条），不采用系统的全天达成标记"
+    : "数据源：排班统计（应排人数 / 排班人数）+ 实时考勤（排班状态 / 时段有效在线 / 时段完单）；有效出勤按 KPI 时段标准双达标去重，全天按 6h / 18 单并剔除人工改派单";
   $("doc-foot-small").textContent = history
     ? `注：${state.date} 为历史日期，取次日定稿的时段明细，不再显示「统计中」；全天达成忽略系统的「是否达成」标记，按 6h / 18 单手工计算；两张表按当日排班实际班次动态生成列`
     : "注：考勤为当日实时快照，只列已结束的班次（未跑完的班次结束后自动出现）；下方炸班明细为「一人一行 × 时段列」矩阵，默认不含「全天」列（今天未结束，判定不准，可在清单标题右侧手动打开）；T-3 / T-2 / T-1 取近三天的出勤明细；两张表按当日排班实际班次动态生成列，宽表可左右滑动查看全部时段";
@@ -888,7 +1025,8 @@ function render() {
       `　｜　实排达成 <b>${day.realRate == null ? "—" : attPct(day.realRate)}</b>` +
       ` · 应排达成 <b>${day.dueRate == null ? "—" : attPct(day.dueRate)}</b>` +
       ` · 时段排班率 <b>${rateAll.value == null ? "—" : attPct(rateAll.value)}</b>` +
-      `　｜　达标异常 <b class="att-link" id="kpi-abn" title="全天出勤完成但骑手达标标准为 -">…</b> 人`;
+      `　｜　达标异常 <b class="att-link" id="kpi-abn" title="全天出勤完成但骑手达标标准为 -">…</b> 人` +
+      ` · 非排班达标 <b class="att-link" id="kpi-nonsched" title="未排班但骑手达标标准为 1~5 档">…</b> 人`;
     let note = `应排 = 排班统计「应排人数」；实排 = 「排班人数」；有效出勤 = 考勤「排班状态=排班」且` +
       `（时段有效在线≥该时段标准 且 时段完单≥该时段标准）的去重骑手数，全天按 6h / 18 单。` +
       `实排达成 = 有效出勤÷实排；应排达成 = 有效出勤÷应排（多排班可 >100%，不封顶）。` +
@@ -900,6 +1038,15 @@ function render() {
       : ` 今天只显示 <b>已结束</b> 的班次：未跑完的班次人还在陆续上线、单还在攒，算成不达标没意义，结束后会自动出现。` +
         ` 下方炸班明细矩阵默认也不给 <b>全天</b> 列：一天没过完，按 6h / 18 单判「全天未达标」不准，` +
         `可在清单标题右侧手动打开，仅供参考。`;
+    if (att.reassign && att.reassign.orders > 0) {
+      note += ` <b>全天达成已剔除人工改派单</b>（KPI 第十三条）：当日命中 ${fmt(att.reassign.orders)} 单 / ` +
+        `${fmt(att.reassign.riders)} 人，其中 ${fmt(att.reassign.downgraded)} 人剔除后跌破 18 单；` +
+        `时段完单与片区实际完单仍含改派单，只有全天达成判定剔除。`;
+    } else if (!att.reassign && state.reassignError) {
+      note += ` <span class="warn-text">人工改派单未取到（${esc(state.reassignError)}），本次全天达成未剔除改派单，点「立即刷新」可重试。</span>`;
+    }
+    note += ` 「非排班达标」= KPI 骑手日明细里 <b>是否排班 = 否</b> 且 <b>骑手达标标准为 1~5 档</b>，` +
+      `点数字可看骑手明细（说明当天没排班却仍按某档标准结算，需核对排班 / 商圈片标准配置）。`;
     if (att.degraded) {
       note += ` <span class="warn-text">考勤导出缺少「完单量」列，有效出勤已降级为只看有效在线时长。</span>`;
     }
@@ -954,7 +1101,7 @@ function render() {
     (att && att.ok
       ? ` · 炸班 ${fmt(failShown)} 个班次已按「一人一行 × 时段列」列在下方矩阵里` + excludedText +
         ` · T-3 / T-2 / T-1 取大前天 / 前天 / 昨日的出勤明细` +
-        `；点表格任一单元格可只看该格，弹窗不进入导出图` : "") +
+        `；点表格任一单元格（含「总计」行）可只看该格，弹窗不进入导出图` : "") +
     (state.startedAt && state.finishedAt ? ` · 本次耗时 ${((state.finishedAt - state.startedAt) / 1000).toFixed(0)}s` : "");
 
   // 两张表都已渲染，最后按当前页签决定显示哪一张（数据缺失时整块隐藏，这里只切内部状态）
@@ -976,14 +1123,17 @@ const minsText = (n) => {
 function openFailModal(area, per) {
   const a = state.assess && state.assess.attendance;
   if (!a || !a.ok) return;
+  const isTotal = area === TOTAL_AREA;      // 总计行：汇总全部片区的同班次炸班
   const list = failListOf(a, area, per);
-  const row = (a.rows || []).find((r) => r.area === area);
-  const c = (row && row.cells[per]) || { due: 0, real: 0, valid: 0, realRate: null };
+  const row = isTotal ? null : (a.rows || []).find((r) => r.area === area);
+  const c = isTotal ? (a.totals[per] || { due: 0, real: 0, valid: 0, realRate: null })
+    : ((row && row.cells[per]) || { due: 0, real: 0, valid: 0, realRate: null });
   const std = per === "全天"
     ? (a.dayStandard || { timeMin: 0, orders: 0 })
     : ((a.standards && a.standards[per]) || { timeMin: 0, orders: 0 });
 
-  $("fail-title").textContent = `${shortArea(area)} · ${per} · 炸班 ${list.length} 人`;
+  $("fail-title").textContent =
+    `${isTotal ? "全部片区（总计）" : shortArea(area)} · ${per} · 炸班 ${list.length} 人`;
   $("fail-sub").textContent =
     `应排 ${fmt(c.due)} · 实排 ${fmt(c.real)} · 有效出勤 ${fmt(c.valid)}` +
     ` · 实排达成 ${c.realRate == null ? "—" : attPct(c.realRate)}` +
@@ -995,20 +1145,30 @@ function openFailModal(area, per) {
     tips.push("该班次尚未结束（实时快照），下面这些骑手可能还在补齐有效时长 / 完单，稍后会自动刷新。");
   }
   tips.push("明细取自考勤「排班状态 = 排班」的骑手记录，与排班统计的「排班人数」可能相差 1–2 人（两套表口径不同）。");
+  if (isTotal) tips.push("这里是「总计」行：同一班次下各片区炸班骑手的合计，站点列可区分所在片区。");
+  if (per === "全天") {
+    tips.push("完单已按 KPI 第十三条剔除人工改派单，括号内为出勤统计原始完单；「改派」列是被剔除的改派成功单数。");
+  }
   if (!list.length) tips.unshift("该班次排班的骑手全部达到有效出勤标准，没有炸班。");
   $("fail-tip").textContent = tips.join(" ");
 
   if (!list.length) {
     $("fail-tbl").innerHTML = `<tbody><tr><td class="fail-empty">— 无炸班骑手 —</td></tr></tbody>`;
   } else {
-    const head = `<thead><tr><th>骑手</th><th>站点</th><th>有效在线</th><th>完单</th><th>未达标原因</th></tr></thead>`;
+    const head = `<thead><tr><th>骑手</th><th>站点</th><th>有效在线</th><th>完单</th>` +
+      `<th title="该骑手当日被剔除的人工改派成功单">改派</th><th>未达标原因</th></tr></thead>`;
     const body = list.map((x) => {
       const bad = x.reason === "未出勤";
+      const cut = num(x.reassign);
+      const ordText = cut > 0
+        ? `${fmt(x.orders)}<em class="fail-cut">原 ${fmt(x.ordersRaw)}</em>`
+        : fmt(x.orders);
       return `<tr class="${bad ? "off" : ""}">` +
         `<td class="who"><b>${esc(x.name || "—")}</b><span>${esc(x.rid || "")}</span></td>` +
         `<td class="site" title="${esc(x.site)}">${esc(String(x.site || "").replace(/^福州/, ""))}</td>` +
         `<td>${minsText(x.min)}</td>` +
-        `<td>${fmt(x.orders)}</td>` +
+        `<td class="${cut > 0 ? "fail-ord-cut" : ""}" title="${cut > 0 ? `出勤统计原始完单 ${fmt(x.ordersRaw)} 单，剔除人工改派 ${cut} 单` : ""}">${ordText}</td>` +
+        `<td class="fail-cut-col">${cut > 0 ? `−${fmt(cut)}` : "—"}</td>` +
         `<td class="why">${esc(x.reason)}</td></tr>`;
     }).join("");
     $("fail-tbl").innerHTML = head + `<tbody>${body}</tbody>`;
@@ -1251,6 +1411,8 @@ async function loadAll(opts) {
   const mode = isToday(date) ? "live" : "history";
   Object.assign(state, {
     mode, schSheets: [], attSheets: [], assess: null, detailStats: null,
+    reassignOrders: null, reassignError: "",
+    kpi: null, kpiAt: 0, kpiLoadingDate: "",
     errors: [], fallbackTried: false,
     dataNote: "", startedAt: new Date(), finishedAt: null, teamSource: "", teamCount: 0
   });
@@ -1263,6 +1425,7 @@ async function loadAll(opts) {
     state.schSheets = memo.sch;
     state.attSheets = memo.att;
     state.detailStats = memo.detailStats || null;
+    state.reassignOrders = Array.isArray(memo.reassign) ? memo.reassign : null;
     state.teamSource = memo.teamSource || "";
     state.teamCount = memo.teamCount || 0;
     state.finishedAt = memo.finishedAt || new Date();
@@ -1284,7 +1447,8 @@ async function loadAll(opts) {
     setProgress(1, 1, "export");
     const results = await Promise.allSettled([
       loadExportSheet(API_SCHEDULE, "schedule", teamIds, date),
-      loadAttendanceSheets(mode, teamIds, date)
+      loadAttendanceSheets(mode, teamIds, date),
+      loadReassignOrders(teamIds, date)
     ]);
     if (gen !== state.gen) return;
     if (results[0].status === "fulfilled") state.schSheets = results[0].value;
@@ -1292,6 +1456,10 @@ async function loadAll(opts) {
       state.attSheets = results[1].value.sheets;
       state.detailStats = results[1].value.stats;
     }
+    // 改派单取不到不阻断出表：全天达成退回「含改派」口径，并在页面上写明
+    state.reassignOrders = results[2].status === "fulfilled" ? results[2].value : null;
+    state.reassignError = results[2].status === "rejected"
+      ? String((results[2].reason && results[2].reason.message) || results[2].reason || "未知原因") : "";
     const attLabel = mode === "history" ? "历史出勤明细" : "考勤";
     const failed = [];
     if (results[0].status === "rejected") failed.push("排班（" + results[0].reason.message + "）");
@@ -1307,6 +1475,7 @@ async function loadAll(opts) {
     if (!failed.length) {
       state.memo.set(memoKey, {
         sch: state.schSheets, att: state.attSheets, detailStats: state.detailStats,
+        reassign: state.reassignOrders,
         teamSource: state.teamSource, teamCount: state.teamCount, finishedAt: state.finishedAt
       });
     }
@@ -1362,7 +1531,15 @@ $("btn-refresh").addEventListener("click", () => restart(true));
 (function bindKpiAbnormal() {
   const box = $("att-kpi");
   if (box) box.addEventListener("click", (e) => {
-    if (e.target && e.target.id === "kpi-abn") openKpiModal();
+    const k = state.kpi || {};
+    if (e.target && e.target.id === "kpi-abn") {
+      if (k.err || !(k.list || []).length) { refreshKpiAbnormal(state.date, true); return; }
+      openKpiModal(null, "abn"); return;
+    }
+    if (e.target && e.target.id === "kpi-nonsched") {
+      if (k.err || !(k.nonSched || []).length) { refreshKpiAbnormal(state.date, true); return; }
+      openKpiModal(null, "nonsched"); return;
+    }
   });
   const m = $("kpi-modal");
   if (m) m.addEventListener("click", (e) => {
@@ -1376,7 +1553,7 @@ $("btn-refresh").addEventListener("click", () => restart(true));
     t.addEventListener("click", (e) => {
       const td = e.target.closest && e.target.closest("td.att-kpi-cell");
       if (!td || !num(td.dataset.kpiCount)) return;
-      openKpiModal(td.dataset.kpiArea);
+      openKpiModal(td.dataset.kpiArea, td.dataset.kpiKind || "abn");
     });
   }
   document.addEventListener("keydown", (e) => {
@@ -1421,7 +1598,6 @@ $("btn-goto-assess").addEventListener("click", () => {
     extMsg({ type: "WB_OPEN_TAB", page: "assess" }).catch(() => {});
   }
 });
-$("auto").addEventListener("change", (e) => localStorage.setItem("wb_att_auto", e.target.checked ? "1" : "0"));
 $("btn-channel").addEventListener("click", async () => {
   const next = state.via === "direct" ? "bridge" : "direct";
   await switchChannel(next, next === "bridge"
@@ -1441,11 +1617,12 @@ $("btn-clean").addEventListener("click", () => {
   b.onclick = () => { document.body.classList.remove("clean"); b.remove(); $("btn-clean").textContent = "纯净看板"; };
   document.body.appendChild(b);
 });
-setInterval(() => {
-  // 历史日期是定稿数据，不需要每 5 分钟重拉；只有「今天」的实时快照才自动刷新
-  if (!$("auto").checked || state.loading || document.hidden || state.mode !== "live") return;
+// 自动刷新：间隔取全局设置（默认 5 分钟，可在工具栏改）
+// 历史日期是定稿数据不重拉；只有「今天」的实时快照才自动刷新
+if (window.WBAutoRefresh) WBAutoRefresh.register(() => {
+  if (!WBAutoRefresh.enabled || state.loading || document.hidden || state.mode !== "live") return;
   loadAll();
-}, REFRESH_MS);
+});
 
 window.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
@@ -1511,7 +1688,6 @@ window.__SET_HIST__ = (obj, detail) => {
   });
   applyView();       // 按上次选的页签先把显示摆好，数据到了再渲染表格
   applyRosterDay();  // 全天开关默认关，历史日期下先藏起来
-  const a = localStorage.getItem("wb_att_auto"); if (a != null) $("auto").checked = a === "1";
   const saved = localStorage.getItem("wb_att_date");
   const today = todayStr();
   if (validDate(saved) && saved <= today && saved >= shiftDate(today, -HISTORY_DAYS)) state.date = saved;

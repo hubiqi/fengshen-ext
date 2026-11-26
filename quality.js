@@ -64,7 +64,9 @@ const ATT_SEG_DAYS = 7;        // 出勤明细接口硬限制：单次最多导�
 const KPI_PAGE_SIZE = 100;     // 实测 pageSize > 100 接口返回空数据
 const KPI_MAX_PAGES = 10;      // 每类问题订单最多 10 页 = 1000 单
 const VIOL_SEG_DAYS = 2;       // 违规处罚接口硬限制：单次查询 ≤ 2 天
-const VIOL_BATCH = 50;         // 违规运单号逗号拼接批量回查的批次大小
+const VIOL_BATCH = 50;         // 已停用：改为一次性回查，失败对半拆分（保留常量兼容旧测试）
+const KPI_TID_MAX_PAGES = 50;  // 整包回查最多 50 页（pageSize=100，即 5000 单）
+const KPI_RECENT_DAYS = 7;     // 违规明细有延迟，近 7 天用考核明细兜底
 const VIOL_MAX_PAGES = 6;      // 每个 2 天段最多翻 6 页
 const MONTHS_BACK = 11;        // 当前月 + 往前 11 个月
 const LS_MONTH = "wb_ql_month";
@@ -707,6 +709,7 @@ async function loadViolationTrackingIds(b) {
   state.violAppealPass = 0;
   state.violOvertime = 0;
   state.violMap = new Map();
+  state.violExcluded = new Set();
   for (let d = 1; d <= b.maxDay; d += VIOL_SEG_DAYS) {
     const segEnd = Math.min(d + VIOL_SEG_DAYS - 1, b.maxDay);
     const start = new Date(b.y, b.m - 1, d, 0, 0, 0).getTime();
@@ -724,8 +727,8 @@ async function loadViolationTrackingIds(b) {
         state.violTotal += 1;
         const v = violationMeta(x);
         if (!v) continue;
-        if (v.appeal === 30) { state.violAppealPass += 1; continue; }   // 申诉成功
-        if (v.category === "OVERTIME") { state.violOvertime += 1; continue; } // 超时
+        if (v.appeal === 30) { state.violAppealPass += 1; state.violExcluded.add(v.tid); continue; }   // 申诉成功
+        if (v.category === "OVERTIME") { state.violOvertime += 1; state.violExcluded.add(v.tid); continue; } // 超时
         tids.add(v.tid);
         if (v.category === "CLAIM") claimTids.add(v.tid);
         const prev = state.violMap.get(v.tid);
@@ -749,6 +752,68 @@ async function loadViolationTrackingIds(b) {
   state.violClaimCount = claimTids.size;
   return [...tids];
 }
+/** 一次性提交全部运单号，结果分页合并；失败自动对半拆分。 */
+async function kpiQueryBadTids(tids, seen) {
+  for (let page = 1; page <= KPI_TID_MAX_PAGES; page++) {
+    const j = await requestRL(API_KPI_DETAIL, "POST", {
+      params: { request: {
+        // 按运单号回查不带 ds —— 索赔 / 投诉可能跨月
+        queryParam: { trackingId: tids.join(",") },
+        planType: "UPLUS_AGENCY", tabCode: "TRACK_UB",
+        pageIndex: page, pageSize: KPI_PAGE_SIZE
+      } }
+    });
+    const d = (j && j.result && j.result.data) || {};
+    const list = Array.isArray(d.data) ? d.data : [];
+    parseBadRows(j, seen);
+    if (!list.length || list.length < KPI_PAGE_SIZE) break;
+    await sleep(120);
+  }
+}
+async function kpiQueryAllBadTids(tids, seen) {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try { await kpiQueryBadTids(tids, seen); return ""; }
+    catch (e) {
+      const msg = String((e && e.message) || e);
+      const transient = /频繁|TOO_FREQUENT|303|HTTP 5\d\d|Failed to fetch|network|timeout|超时/i.test(msg);
+      if (transient && attempt === 0) { await sleep(1000); continue; }
+      if (tids.length <= 1) return msg;
+      const mid = Math.floor(tids.length / 2);
+      const e1 = await kpiQueryAllBadTids(tids.slice(0, mid), seen);
+      const e2 = await kpiQueryAllBadTids(tids.slice(mid), seen);
+      return e1 || e2;
+    }
+  }
+  return "";
+}
+/** 近 7 天兜底：直接用 4 类问题订单筛选扫考核明细（不跨本月）。 */
+async function loadKpiRecentBad(b, seen) {
+  const now = new Date();
+  const today0 = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const month0 = new Date(b.y, b.m - 1, 1).getTime();
+  const start = Math.max(today0 - (KPI_RECENT_DAYS - 1) * 86400000, month0);
+  const end = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999).getTime();
+  let firstErr = "";
+  for (const f of KPI_FILTERS) {
+    for (let page = 1; page <= 10; page++) {
+      let j = null;
+      try {
+        j = await requestRL(API_KPI_DETAIL, "POST", { params: { request: {
+          queryParam: Object.assign({ ds: [start, end] }, f),
+          planType: "UPLUS_AGENCY", tabCode: "TRACK_UB",
+          pageIndex: page, pageSize: KPI_PAGE_SIZE
+        } } });
+      } catch (e) { firstErr = firstErr || String((e && e.message) || e); break; }
+      const d = (j && j.result && j.result.data) || {};
+      const list = Array.isArray(d.data) ? d.data : [];
+      parseBadRows(j, seen);
+      if (!list.length || list.length < KPI_PAGE_SIZE) break;
+      await sleep(120);
+    }
+  }
+  return firstErr;
+}
+
 async function loadBadOrders(month, onStep) {
   const b = monthBounds(month);
   const seen = new Map();
@@ -759,19 +824,20 @@ async function loadBadOrders(month, onStep) {
   // 与运力模块同款补全：4 个 Radio 筛选漏普通差评 / 投诉 / 索赔，用申诉明细运单号并集补齐
   try {
     const tids = await loadViolationTrackingIds(b);
-    for (let i = 0; i < tids.length; i += VIOL_BATCH) {
-      const batch = tids.slice(i, i + VIOL_BATCH);
-      const j = await requestRL(API_KPI_DETAIL, "POST", {
-        params: { request: {
-          // v3.57.16：按运单号回查不带 ds —— 索赔 / 投诉可能跨月，带本月区间会把旧运单漏掉
-          queryParam: { trackingId: batch.join(",") },
-          planType: "UPLUS_AGENCY", tabCode: "TRACK_UB",
-          pageIndex: 1, pageSize: KPI_PAGE_SIZE
-        } }
-      });
-      parseBadRows(j, seen);
-      setProgress(82, `坏单：违规运单号回查 ${Math.min(i + VIOL_BATCH, tids.length)}/${tids.length}`);
-      if (i + VIOL_BATCH < tids.length) await sleep(300);
+    if (tids.length) {
+      setProgress(80, `坏单：违规运单号回查（整包 ${tids.length} 单）…`);
+      const err = await kpiQueryAllBadTids(tids, seen);
+      if (err) console.warn("[viol] 运单回查部分失败:", err);
+      setProgress(84, `坏单：违规运单号回查完成（${tids.length} 单）`);
+    }
+    // v3.58.11：违规明细有延迟，近 7 天用考核明细 4 类筛选兜底
+    try {
+      await loadKpiRecentBad(b, seen);
+    } catch (e) {
+      console.warn("[viol] 近 7 天兜底失败:", e && e.message);
+    }
+    if (state.violExcluded && state.violExcluded.size) {
+      for (const tid of state.violExcluded) seen.delete(tid);
     }
   } catch (e) {
     console.warn("[viol] 坏单补全失败（不影响 Radio 筛选结果）:", e && e.message);
@@ -1873,3 +1939,16 @@ try {
 } catch (e) { /* ignore */ }
 
 boot();
+
+// 自动刷新：间隔取全局设置（默认 5 分钟，可在工具栏改）
+if (window.WBAutoRefresh) WBAutoRefresh.register(() => {
+  try {
+    if (document.hidden || state.loading) return;
+    if (document.querySelector(".wf-pop:not([hidden])")) return;
+    const mask = document.getElementById("ql-pop-mask");
+    if (mask && !mask.hidden) return;
+    const ae = document.activeElement;
+    if (ae && (ae.tagName === "INPUT" || ae.tagName === "SELECT" || ae.tagName === "TEXTAREA" || ae.isContentEditable)) return;
+    loadAll(false);
+  } catch (e) { /* ignore */ }
+});

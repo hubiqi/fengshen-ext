@@ -58,6 +58,8 @@ const API_RESIGN_STATES = XT + "xtop.lpd.rights.knightSepAgrmtFsWeb.getSepAgrmtP
 const API_RESIGN_CONFIRM = XT + "xtop.lpd.rights.knightSepAgrmtFsWeb.confirmSepAgrmt/1.0";
 const API_RESIGN_APPROVE = XT + "xtop.lpd.rights.knightSepAgrmtFsWeb.approveCancelSeqAgrmt/1.0";
 const LS_RESIGN = "wb_todo_resign_v1";
+const LS_RESIGN_AUTO = "wb_todo_resign_auto_v1";
+const LS_RESIGN_AUTO_H = "wb_todo_resign_auto_h_v1";   // 自动确认阈值（小时），默认 12
 const RESIGN_PAGE_URL = "https://aeolus.ele.me/?targetId=66300#/app/xuanxing/hooh-mixin/fengshen-rider-resignation/index.html";
 const LEDGER_DAYS = 30;        // 台账取值窗口：跟台账明细页默认的「近 30 天」一致
 const OSS_APP = {
@@ -114,7 +116,15 @@ const state = {
   handled: new Map(), refreshAllBusy: false,
   resign: [], resignAt: 0, resignLoading: false, resignError: "", resignDebug: "",
   resignModal: null, resignBusy: false,
-  ledgerModal: null, ledgerBusy: false, ledgerPlayers: []
+  resignAuto: localStorage.getItem(LS_RESIGN_AUTO) === "1",
+  resignAutoH: loadResignAutoH(),
+  resignAutoDone: new Set(), resignAutoFail: new Map(), resignAutoBusy: false,
+  resignAutoErr: "",
+  ledgerModal: null, ledgerBusy: false, ledgerPlayers: [],
+  // v3.57.90 健康证待处理（未上传 / 即将过期 / 已过期，启用中）
+  health: [], healthAt: 0, healthLoading: false, healthError: "",
+  healthPartial: false, healthOrderError: "", healthTeams: [],
+  healthOnly: localStorage.getItem("wb_todo_health_only_v1") === "1"
 };
 
 function loadWarnCfg() {
@@ -367,23 +377,31 @@ function clearTrainSec() {
 
 /** 扩展页直连被 CORS/重定向拦住时，交给后台 SW 代取；失败再退回页面 fetch。 */
 async function proxyText(url, opts) {
+  // v3.57.97：网络抖动 / SW 刚好重启时 "Failed to fetch" 很常见，自动重试一次再报错
   let resp = null;
   let swErr = "";
-  try {
-    resp = await extMsg(Object.assign({ type: "FETCH_PROXY", url }, opts || {}));
-  } catch (e) { resp = null; }
-  if (resp && (resp.ok || resp.text != null)) return resp;
-  if (resp && resp.error) swErr = String(resp.error);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      resp = await extMsg(Object.assign({ type: "FETCH_PROXY", url }, opts || {}));
+    } catch (e) { resp = null; }
+    if (resp && (resp.ok || resp.text != null)) return resp;
+    if (resp && resp.error) swErr = String(resp.error);
+    if (attempt === 0) await sleepMs(400);
+  }
   const init = { method: (opts && opts.method) || "GET", credentials: "include" };
   if (opts && opts.headers) init.headers = opts.headers;
   if (opts && opts.body != null) init.body = opts.body;
-  try {
-    const r = await fetch(url, init);
-    return { ok: r.ok, status: r.status, finalUrl: r.url, text: await r.text() };
-  } catch (e) {
-    const msg = String((e && e.message) || e);
-    throw new Error(swErr ? `后台代取失败：${swErr}；直连也失败：${msg}` : msg);
+  let lastMsg = "";
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const r = await fetch(url, init);
+      return { ok: r.ok, status: r.status, finalUrl: r.url, text: await r.text() };
+    } catch (e) {
+      lastMsg = String((e && e.message) || e);
+      if (attempt === 0) await sleepMs(400);
+    }
   }
+  throw new Error(swErr ? `后台代取失败：${swErr}；直连也失败：${lastMsg}` : lastMsg);
 }
 
 /** 在报表页里等 PageInfo 就绪，取 secParam（该函数会被序列化注入页面，不能引用外部变量）。 */
@@ -596,32 +614,48 @@ async function fetchTraining(opts) {
   try {
     const days = Math.max(1, Math.min(30, Math.round(state.trainDays) || 5));
     const job = trainWidgetJob(days);
-    let cached = loadTrainSec();
-    let j = await fetchWidget(job, cached && cached.token, cached && cached.sec);
-    if (!j || j.code !== 0 || !j.data || !j.data.value) {
-      let fresh = null;
+    let ok = false, lastErr = null;
+    // v3.57.97：取数层偶发 "Failed to fetch"（网络抖动 / SW 正在重启）自动重试，不直接报失败
+    for (let attempt = 0; attempt < 3; attempt++) {
       try {
-        fresh = await refreshTrainSec();
+        let cached = loadTrainSec();
+        let j = await fetchWidget(job, cached && cached.token, cached && cached.sec);
+        if (!j || j.code !== 0 || !j.data || !j.data.value) {
+          let fresh = null;
+          try {
+            fresh = await refreshTrainSec();
+          } catch (e) {
+            fresh = await recoverTrainSec();
+            if (!fresh) throw e;
+          }
+          j = await fetchWidget(job, fresh.token, fresh.sec);
+        }
+        const value = j && j.data && j.data.value;
+        if (!value) {
+          const msg = (j && (j.message || j.finalMessage)) || "培训数据接口返回异常";
+          if (/token|登录|permission|权限/i.test(msg)) clearTrainSec();
+          throw new Error(msg);
+        }
+        if (!(value.columns || []).length) throw new Error("培训表结构变化，没有读取到列");
+        const rows = parseTrainTable(value, days);
+        state.training = rows;
+        state.trainingAt = Date.now();
+        saveTrainCache(rows);
+        if (!silent) {
+          showNotice(`已刷新新骑手培训待办 ${rows.length} 条（近 ${days} 天到期、需培训且未完成）。`, "", 3000);
+        }
+        ok = true;
+        break;
       } catch (e) {
-        fresh = await recoverTrainSec();
-        if (!fresh) throw e;
+        lastErr = e;
+        const msg = String((e && e.message) || e);
+        const transient = /Failed to fetch|NetworkError|network error|HTTP 5\d\d|接口返回异常（非 JSON）/i.test(msg);
+        if (!transient || attempt >= 2) throw e;
+        if (!silent) showNotice(`培训数据网络波动（${msg}），正在第 ${attempt + 2} 次尝试…`, "", 2500);
+        await sleepMs(800 * (attempt + 1));
       }
-      j = await fetchWidget(job, fresh.token, fresh.sec);
     }
-    const value = j && j.data && j.data.value;
-    if (!value) {
-      const msg = (j && (j.message || j.finalMessage)) || "培训数据接口返回异常";
-      if (/token|登录|permission|权限/i.test(msg)) clearTrainSec();
-      throw new Error(msg);
-    }
-    if (!(value.columns || []).length) throw new Error("培训表结构变化，没有读取到列");
-    const rows = parseTrainTable(value, days);
-    state.training = rows;
-    state.trainingAt = Date.now();
-    saveTrainCache(rows);
-    if (!silent) {
-      showNotice(`已刷新新骑手培训待办 ${rows.length} 条（近 ${days} 天到期、需培训且未完成）。`, "", 3000);
-    }
+    if (!ok && lastErr) throw lastErr;
   } catch (e) {
     state.trainingError = String((e && e.message) || e);
     if (!silent) showNotice(`培训待办读取失败：${state.trainingError}。可直接点「刷新培训」重试。`, "err");
@@ -893,12 +927,37 @@ function loadResignCache() {
 function saveResignCache(rows) {
   try { localStorage.setItem(LS_RESIGN, JSON.stringify({ ts: Date.now(), rows })); } catch (e) { /* ignore */ }
 }
+// 「已撤销 / 撤销通过 / 已通过 / 已拒绝 …」都含「撤销」或「通过」这类字眼，
+// 必须先排除终态，否则历史记录（"已撤销"）会被误判成「撤销待审核」。
+const RESIGN_DONE_RE = /已撤销|撤销通过|撤销成功|已通过|审核通过|已拒绝|已驳回|已失效|已取消|已终止|已完成|已过期|已关闭/;
+/** 接口状态字段名不统一（stateCode / fsSeqAgrmtStateCode / stateName…），统一补 stateCode：
+ *  created = 待审核离职日期，cancelProcessCreated = 撤销申请待审核。 */
+function resignStateCode(r) {
+  const raw = str(r.stateCode || r.fsSeqAgrmtStateCode || r.seqAgrmtStateCode
+    || r.processStateCode || r.agreementStateCode || r.state || "");
+  if (raw === "created" || raw === "cancelProcessCreated") return raw;   // 接口给了明确状态码就用它
+  const name = str(r.stateName || r.statusName || r.stateDesc || "");
+  if (RESIGN_DONE_RE.test(name)) return raw;        // 终态：原样保留，不算待审核
+  if (/待审核|审核中|待处理/.test(name)) {
+    return /撤销/.test(name) ? "cancelProcessCreated" : "created";
+  }
+  return raw;
+}
+function normalizeResignRows(rows) {
+  return (rows || []).map((r) => ({ ...r, stateCode: resignStateCode(r) }));
+}
+/** 这条申请是不是「待审核」（终态一律排除，避免历史数据混进来）。 */
+function resignIsPendingRow(r) {
+  const name = str(r.stateName || r.statusName || r.stateDesc || "");
+  if (RESIGN_DONE_RE.test(name)) return false;
+  return r.stateCode === "created" || r.stateCode === "cancelProcessCreated"
+    || /待审核|审核中|待处理/.test(name);
+}
 /** created = 待审核离职日期；cancelProcessCreated = 撤销申请待审核。 */
 function resignPending() {
   const limitMs = num(state.catCfg.resignHours || 72) * 3600 * 1000;
   return state.resign
-    .filter((r) => r.stateCode === "created" || r.stateCode === "cancelProcessCreated"
-      || /待审核/.test(str(r.stateName)))
+    .filter(resignIsPendingRow)
     .filter((r) => {
       const ts = toMs(r.initiatingAt);
       if (!ts) return true;
@@ -972,6 +1031,93 @@ async function resignFetchPage(pageIndex, pageSize, condition) {
   }
   return { list: [], total: 0 };
 }
+/** 自动确认阈值（小时）：默认 12，可改 1~72，存在本机 */
+function loadResignAutoH() {
+  const n = Number(localStorage.getItem(LS_RESIGN_AUTO_H));
+  if (!isFinite(n) || n <= 0) return 12;
+  return Math.min(72, Math.max(1, Math.round(n)));
+}
+function resignAutoLabel() {
+  const b = $("btn-resign-auto");
+  const box = $("resign-auto-h");
+  if (box && document.activeElement !== box) box.value = String(state.resignAutoH);
+  if (!b) return;
+  b.textContent = `自动确认：${state.resignAuto ? "开" : "关"}`;
+  b.classList.toggle("is-on", !!state.resignAuto);
+  b.title = `审批剩余不足 ${state.resignAutoH} 小时时，自动用最迟离职日期确认通过（当前${state.resignAuto ? "已开启" : "关闭"}，右侧可改阈值）`;
+}
+/** 离职操作类接口的参数包裹方式不统一（params / 裸参数 / params.request），
+ *  依次试几种，返回第一个「业务成功」的结果；全部失败才抛出最后一次的错误。 */
+async function callResignAction(url, inners) {
+  const list = Array.isArray(inners) ? inners : [inners];
+  const shapes = (inner) => [{ params: inner }, inner, { params: { request: inner } }];
+  let lastErr = null;
+  for (const inner of list) {
+    for (const shape of shapes(inner)) {
+      try {
+        const j = await request(url, shape);
+        const fail = ledgerCallFailed(j);
+        if (!fail) return j;
+        lastErr = new Error(fail);
+        lastErr.raw = j;
+      } catch (e) { lastErr = e; }
+    }
+  }
+  throw lastErr || new Error("接口无响应");
+}
+
+/** confirmSepAgrmt 的 separationAt 可能是「YYYY-MM-DD」也可能是时间戳，两种都试。 */
+function resignConfirmPayloads(row, date) {
+  const base = { orgCode: row.orgCode, employeeId: row.employeeId };
+  const dms = new Date(String(date) + "T00:00:00").getTime();
+  const out = [{ ...base, separationAt: date }];
+  if (Number.isFinite(dms) && dms > 0) out.push({ ...base, separationAt: dms });
+  return out;
+}
+
+/** 剩余 ≤ 阈值（默认 12 小时）且未处理过的「待审核离职日期」→ 用最迟日期自动确认。
+ *  默认关闭，需手动开启。返回本次自动确认成功的条数。 */
+async function autoConfirmResign() {
+  if (!state.resignAuto || state.resignBusy || state.resignAutoBusy) return 0;
+  const rows = resignPending().filter((r) => r.stateCode === "created");
+  if (!rows.length) return 0;
+  state.resignAutoBusy = true;
+  let done = 0;
+  try {
+    for (const row of rows) {
+      const key = resignKey(row);
+      if (state.resignAutoDone.has(key)) continue;
+      const failAt = state.resignAutoFail.get(key) || 0;
+      if (failAt && Date.now() - failAt < 10 * 60 * 1000) continue;
+      const dl = resignDeadline(row);
+      if (!dl || dl.left <= 0 || dl.left > state.resignAutoH * 3600 * 1000) continue;
+      const date = resignDateRange(row).end;
+      const who = row.employeeName || row.knightId || "";
+      try {
+        await callResignAction(API_RESIGN_CONFIRM, resignConfirmPayloads(row, date));
+        state.resignAutoDone.add(key);
+        state.resignAutoFail.delete(key);
+        state.resignAutoErr = "";
+        state.resign = state.resign.filter((r) => resignKey(r) !== key);
+        done++;
+        showNotice(`已自动确认 ${who} 的离职日期：${date}（审核${dl.text}，阈值 ${state.resignAutoH}h）`, "", 6000);
+      } catch (e) {
+        state.resignAutoFail.set(key, Date.now());
+        const msg = String((e && e.message) || e);
+        const raw = e && e.raw ? ` 返回：${JSON.stringify(e.raw).slice(0, 220)}` : "";
+        state.resignAutoErr = `${who}：${msg}${raw}`;
+        showNotice(`自动确认失败：${who}（${msg}）。10 分钟内不再重试，可点「处理」手动确认。`, "err", 12000);
+        renderAll();
+        try { console.warn("[resign-auto] 自动确认失败", row && row.knightId, e); } catch (x) { /* ignore */ }
+      }
+    }
+  } finally {
+    state.resignAutoBusy = false;
+    if (done) { saveResignCache(state.resign); renderAll(); }
+  }
+  return done;
+}
+
 async function fetchResign(opts) {
   const silent = !!(opts && opts.silent);
   if (state.resignLoading) return;
@@ -987,9 +1133,10 @@ async function fetchResign(opts) {
       total = num(got.total);
       if (!got.list.length || rows.length >= total) break;
     }
-    state.resign = rows;
+    state.resign = normalizeResignRows(rows);
     state.resignAt = Date.now();
-    saveResignCache(rows);
+    saveResignCache(state.resign);
+    setTimeout(() => { autoConfirmResign(); }, 300);
     if (!silent) {
       const pend = resignPending().length;
       showNotice(`已刷新离职申请 ${rows.length} 条，其中待审核 ${pend} 条。`, "", 3000);
@@ -1065,7 +1212,8 @@ function renderResign() {
   const box = $("td-resign-list");
   const sub = $("td-resign-sub");
   if (!sec || !box) return;
-  const visible = state.filter !== "training" && state.filter !== "ledger";
+  const visible = state.filter !== "training" && state.filter !== "ledger"
+    && state.filter !== "health";
   sec.hidden = !visible;
   if (!visible) return;
   const rows = resignPending();
@@ -1074,6 +1222,7 @@ function renderResign() {
     if (state.resignLoading) parts.push("正在读取离职申请…");
     else if (state.resignError) parts.push("读取失败：" + state.resignError);
     else parts.push(`剩余 ≤ ${int(state.catCfg.resignHours)} 小时 · 待审核 ${rows.length} 条`);
+    if (state.resignAutoErr) parts.push("自动确认失败：" + state.resignAutoErr.slice(0, 60));
     if (state.resignAt) parts.push("更新于 " + shortTime(new Date(state.resignAt)));
     sub.textContent = parts.join(" · ");
   }
@@ -1107,8 +1256,8 @@ function renderResign() {
     const cancel = r.stateCode === "cancelProcessCreated";
     const badge = cancel ? "撤销待审核" : "待审核";
     const when = cancel
-      ? `撤销申请 · 期望离职 ${esc(resignDay(r.expectSeparationAt))}`
-      : `期望离职 <b>${esc(resignDay(r.expectSeparationAt))}</b>`;
+      ? `撤销申请 · 期望离职 ${esc(resignDateStr(r.expectSeparationAt) || "—")}`
+      : `期望离职 <b>${esc(resignDateStr(r.expectSeparationAt) || "—")}</b>`;
     return `<div class="td-lrow is-resign">` +
       `<div class="l-main"><div class="l-title">${esc(r.employeeName || "—")}` +
       `<span class="l-cat">${esc(r.currentDeptName || "—")}</span></div>` +
@@ -1146,7 +1295,7 @@ function openResignModal(key) {
       `<div class="lg-info">` +
       `<div><span>骑手</span><b>${esc(row.employeeName || "—")} · ${esc(row.knightId || "—")}</b></div>` +
       `<div><span>站点</span><b>${esc(row.currentDeptName || "—")}</b></div>` +
-      `<div><span>期望离职</span><b>${esc(resignDay(row.expectSeparationAt))}</b></div>` +
+      `<div><span>期望离职</span><b>${esc(resignDateStr(row.expectSeparationAt) || "—")}</b></div>` +
       `<div><span>发起时间</span><b>${esc(resignTime(row.initiatingAt))}</b></div>` +
       `<div><span>申请状态</span><b>${esc(row.stateName || "—")}</b></div>` +
       (() => {
@@ -1160,10 +1309,13 @@ function openResignModal(key) {
       (cancel ? `<div class="td-train-empty" style="padding:14px 8px">该骑手撤销了离职申请，确认后按你的选择处理。</div>`
         : (() => {
           const range = resignDateRange(row);
+          const dl = resignDeadline(row);
+          const urgent = dl && dl.left > 0 && dl.left <= state.resignAutoH * 3600 * 1000;
           return `<div class="rg-date"><label for="td-rg-date">离职日期</label>` +
             `<input id="td-rg-date" type="date" min="${range.start}" max="${range.end}" ` +
-            `value="${esc(resignDateStr(row.expectSeparationAt) || range.start)}"></div>` +
-            `<div class="rg-tip">可选范围：${esc(range.start)} 到 ${esc(range.end)}</div>`;
+            `value="${esc(range.end)}"></div>` +
+            `<div class="rg-tip">可选范围：${esc(range.start)} 到 ${esc(range.end)}（默认已选最迟日期）</div>` +
+            (urgent ? `<div class="rg-tip rg-urgent">审批剩余不足 ${esc(String(state.resignAutoH))} 小时（${esc(dl.text)}），已默认选最迟日期，请尽快确认。</div>` : "");
         })());
   }
   if (acts) {
@@ -1212,10 +1364,11 @@ async function submitResign(kind, pass) {
     } else {
       payload = { params: { orgCode: row.orgCode, employeeId: row.employeeId, pass: !!pass } };
     }
-    const url = kind === "confirmDate" ? API_RESIGN_CONFIRM : API_RESIGN_APPROVE;
-    const j = await request(url, payload);
-    const fail = ledgerCallFailed(j);
-    if (fail) throw new Error(fail);
+    if (kind === "confirmDate") {
+      await callResignAction(API_RESIGN_CONFIRM, resignConfirmPayloads(row, str(payload.params.separationAt)));
+    } else {
+      await callResignAction(API_RESIGN_APPROVE, payload.params);
+    }
     const key = resignKey(row);
     state.resign = state.resign.filter((r) => resignKey(r) !== key);
     saveResignCache(state.resign);
@@ -1230,12 +1383,395 @@ async function submitResign(kind, pass) {
   }
 }
 
+
+// ---------------------------------------------------------------- 健康证待处理（v3.57.90）
+// 数据源：蜂鸟 TEAM 骑手列表 GET knight.ele.me/aeolus/knights_info
+//   healthcert_status：0 未上传 / 5 即将过期 / 4 已过期；available_status=1 = 启用中
+// 近 8 天是否有单：T-7 ~ T-1 用「出勤统计 → 导出明细数据」按骑手汇总「全天」完单，
+//   T0 用实时考勤快照的「全天完单量」（复用出勤达成那套取数，不另造口径）。
+const API_HC = "https://knight.ele.me/aeolus/knights_info";
+const API_HC_STAFF = "https://app2-edu.ele.me/kunkka-svr/ehr/staff/knight/list";
+const API_HC_DETAIL = XT + "xtop.fs.special.examine.exportStatisticsDetail/1.0";
+const API_HC_LIVE = XT + "xtop.fs.special.realtimeattendance.exportAttendance/1.0";
+const HC_PAGE_URL = "https://aeolus.ele.me/?targetId=54052#/knight/knightList/index?quick_filter=expired_healthcert";
+const LS_HEALTH = "wb_todo_health_v1";
+const HC_KEEP_MS = 5 * 60 * 1000;
+const HC_PAGE = 100;
+const HC_STATUS = [
+  { code: 0, key: "none", label: "未上传", cls: "today", weight: 2 },
+  { code: 5, key: "risk", label: "即将过期", cls: "warn", weight: 1 },
+  { code: 4, key: "expired", label: "已过期", cls: "overdue", weight: 3 }
+];
+
+const hcPad = (n) => String(n).padStart(2, "0");
+function hcToday() {
+  const d = new Date();
+  return `${d.getFullYear()}-${hcPad(d.getMonth() + 1)}-${hcPad(d.getDate())}`;
+}
+function hcShift(date, days) {
+  const [y, m, d] = String(date).split("-").map(Number);
+  const dt = new Date(y, m - 1, d + days);
+  return `${dt.getFullYear()}-${hcPad(dt.getMonth() + 1)}-${hcPad(dt.getDate())}`;
+}
+const maskMobile = (v) => {
+  const s = String(v || "");
+  return s.length >= 7 ? s.slice(0, 3) + "****" + s.slice(-4) : s;
+};
+/** 入职天数：入职当天算第 1 天（today - 入职日 + 1）。 */
+function hcDaysSince(day) {
+  const [y, m, d] = String(day || "").split("-").map(Number);
+  if (!y) return null;
+  const start = new Date(y, m - 1, d).getTime();
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const diff = Math.floor((today - start) / 86400000);
+  return diff >= 0 ? diff + 1 : null;
+}
+/** 人资名单：骑手 → 入职日期（优先在职记录；同一骑手多条取最晚入职）。 */
+async function loadHealthStaff() {
+  const map = new Map();
+  for (let page = 1; page <= 20; page++) {
+    const r = await proxyText(`${API_HC_STAFF}?pageIndex=${page}&pageSize=500`);
+    let j = null;
+    try { j = JSON.parse(r.text || "null"); } catch (e) { j = null; }
+    const d = j && j.data;
+    const list = d && Array.isArray(d.list) ? d.list : [];
+    if (!list.length) break;
+    for (const x of list) {
+      const rid = String(x.knightId == null ? x.id : x.knightId).trim();
+      if (!rid) continue;
+      const entry = String(x.entryTime || "").slice(0, 10);
+      const onJob = Number(x.workStatus) === 1;
+      const cur = map.get(rid);
+      if (!cur || (onJob && !cur.onJob) || (onJob === cur.onJob && entry > cur.entryTime)) {
+        map.set(rid, { entryTime: entry, onJob });
+      }
+    }
+    const total = Number(d.count || d.total || 0);
+    if (total && page * 500 >= total) break;
+    await new Promise((r2) => setTimeout(r2, 150));
+  }
+  return map;
+}
+function loadHealthCache() {
+  try {
+    const o = JSON.parse(localStorage.getItem(LS_HEALTH) || "null");
+    if (!o || !Array.isArray(o.rows) || !o.ts) return null;
+    if (Date.now() - o.ts > HC_KEEP_MS) return null;
+    return o;
+  } catch (e) { return null; }
+}
+function saveHealthCache() {
+  try {
+    localStorage.setItem(LS_HEALTH, JSON.stringify({
+      ts: Date.now(), rows: state.health, teams: state.healthTeams, partial: state.healthPartial
+    }));
+  } catch (e) { /* ignore */ }
+}
+
+/** 导出接口 → 下载链接 */
+async function healthExportUrl(api, payload) {
+  const r = await proxyText(api, {
+    method: "POST",
+    headers: { "Content-Type": "text/plain;charset=UTF-8" },
+    body: JSON.stringify(payload)
+  });
+  let j = null;
+  try { j = JSON.parse(r.text); } catch (e) { /* ignore */ }
+  const d = j && j.result && j.result.data;
+  const url = d && (d.url || d.downloadUrl);
+  if (!url) throw new Error((j && j.error && j.error.message) || "导出接口未返回下载链接");
+  return url;
+}
+async function healthReadXlsx(url) {
+  // OSS 下载优先走扩展页直连（SW 的 CORS 规则已放行 aliyuncs）；
+  // 消息通道无法可靠传 ArrayBuffer，所以 FETCH_BINARY 只作为兜底并做一次转换。
+  let buf = null;
+  try {
+    const r = await fetch(url, { credentials: "omit" });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    buf = await r.arrayBuffer();
+  } catch (e) {
+    const b = await extMsg({ type: "FETCH_BINARY", url });
+    if (!b || !b.ok) throw new Error((b && b.error) || (e && e.message) || "xlsx 下载失败");
+    buf = b.buffer instanceof ArrayBuffer ? b.buffer : new Uint8Array(b.buffer || []).buffer;
+  }
+  return await XLSX_READER.read(buf);
+}
+/** 出勤明细：累加「全天」行的完单量；实时快照：取每人的「全天完单量」 */
+function hcNormDate(v) {
+  const s = String(v == null ? "" : v).trim();
+  let m = /^(\d{4})-(\d{2})-(\d{2})/.exec(s);
+  if (m) return `${m[1]}-${m[2]}-${m[3]}`;
+  m = /^(\d{4})(\d{2})(\d{2})$/.exec(s);
+  if (m) return `${m[1]}-${m[2]}-${m[3]}`;
+  return "";
+}
+/** 把一份出勤导出并进汇总：total 为骑手总完单，byDay 为骑手 × 日期完单，dataDates 记录文件里实际有数据的日期。
+ *  明细文件：只认「时段=全天」行，累加；实时快照：同一骑手每行都重复全天完单量，取最大值。 */
+function mergeHealthSheet(sheets, opts) {
+  const { live, today, total, byDay, dataDates } = opts;
+  for (const sh of sheets || []) {
+    const rows = sh && sh.rows;
+    if (!rows || rows.length < 2) continue;
+    const col = Object.create(null);
+    rows[0].forEach((h, i) => {
+      const k = String(h == null ? "" : h).trim();
+      if (k && col[k] === undefined) col[k] = i;
+    });
+    const iR = col["骑手ID"] != null ? col["骑手ID"] : col["骑手id"];
+    if (iR == null) continue;
+    const cell = (r, i) => (i == null || i < 0 || r[i] == null ? "" : String(r[i]).trim());
+    if (live) {
+      const iD = col["全天完单量"];
+      if (iD == null) continue;
+      dataDates.add(today);
+      const maxToday = new Map();
+      for (const r of rows.slice(1)) {
+        const rid = cell(r, iR);
+        if (!rid) continue;
+        const n = Number(r[iD]) || 0;
+        if (!maxToday.has(rid) || n > maxToday.get(rid)) maxToday.set(rid, n);
+      }
+      for (const [rid, n] of maxToday) {
+        if (!byDay.has(rid)) byDay.set(rid, new Map());
+        byDay.get(rid).set(today, n);
+        total.set(rid, (total.get(rid) || 0) + n);
+      }
+    } else {
+      const iP = col["时段"];
+      if (iP == null) continue;
+      const iO = col["完单量"] != null ? col["完单量"] : col["全天完单量"];
+      if (iO == null) continue;
+      const iDate = col["考勤日期"] != null ? col["考勤日期"] : col["日期"];
+      for (const r of rows.slice(1)) {
+        const d = hcNormDate(iDate == null ? "" : r[iDate]);
+        if (d) dataDates.add(d);
+        if (cell(r, iP) !== "全天") continue;
+        const rid = cell(r, iR);
+        if (!rid || !d) continue;
+        const n = Number(r[iO]) || 0;
+        if (!byDay.has(rid)) byDay.set(rid, new Map());
+        const m = byDay.get(rid);
+        m.set(d, (m.get(d) || 0) + n);
+        total.set(rid, (total.get(rid) || 0) + n);
+      }
+    }
+  }
+}
+
+async function loadHealthOrders(teamIds) {
+  if (!teamIds || !teamIds.length) throw new Error("没有取到站点 ID");
+  const today = hcToday();
+  const days = [];
+  for (let i = -7; i <= 0; i++) days.push(hcShift(today, i));   // T-7 ~ T0
+  const [a, b] = await Promise.allSettled([
+    healthExportUrl(API_HC_DETAIL, { params: { request: {
+      teamIds, startDate: hcShift(today, -7), endDate: hcShift(today, -1)
+    } } }),
+    healthExportUrl(API_HC_LIVE, { params: { request: {
+      teamIds, startDate: today, endDate: today
+    } } })
+  ]);
+  const total = new Map(), byDay = new Map(), dataDates = new Set();
+  let ok = 0, firstErr = "";
+  if (a.status === "fulfilled") {
+    try {
+      mergeHealthSheet(await healthReadXlsx(a.value), { live: false, today, total, byDay, dataDates });
+      ok++;
+    } catch (e) { firstErr = firstErr || String((e && e.message) || e); }
+  } else firstErr = String((a.reason && a.reason.message) || a.reason || "");
+  if (b.status === "fulfilled") {
+    try {
+      mergeHealthSheet(await healthReadXlsx(b.value), { live: true, today, total, byDay, dataDates });
+      ok++;
+    } catch (e) { firstErr = firstErr || String((e && e.message) || e); }
+  } else firstErr = firstErr || String((b.reason && b.reason.message) || b.reason || "");
+  if (!ok) throw new Error(firstErr || "订单数据未取到");
+  return { total, byDay, days, dataDates };
+}
+
+async function fetchHealth(opts) {
+  const silent = !!(opts && opts.silent);
+  if (state.healthLoading) return;
+  state.healthLoading = true;
+  state.healthError = "";
+  renderAll();
+  try {
+    const seen = new Map();
+    let teams = [];
+    for (const st of HC_STATUS) {
+      let got = 0, total = 0;
+      for (let page = 1; page <= 20; page++) {
+        const qs = `?team_id=-1&id_certify_status=-1&healthcert_status=${st.code}` +
+          `&violation_status=-1&work_status=-1&equipment_code_status=-1` +
+          `&available_status=1&knight_label=-1&page_now=${page}&page_size=${HC_PAGE}&audit_status=-1`;
+        const r = await proxyText(API_HC + qs);
+        let j = null;
+        try { j = JSON.parse(r.text); } catch (e) { /* ignore */ }
+        const d = j && j.data;
+        if (!d) throw new Error((j && (j.message || j.name)) || "健康证名单读取失败");
+        if (!teams.length && Array.isArray(d.teams)) {
+          teams = d.teams.map((t) => Number(t.id)).filter((n) => n > 0);
+        }
+        total = Number(d.total) || total;
+        const list = Array.isArray(d.knights) ? d.knights : [];
+        for (const k of list) {
+          const id = String(k.id == null ? "" : k.id);
+          if (!id || seen.has(id)) continue;
+          seen.set(id, {
+            id, name: k.knight_name || "—", mobile: k.mobile || "",
+            teamId: k.team_id, teamName: k.team_name || "",
+            workStatus: k.work_status, available: k.available_status,
+            hcCode: Number(k.healthcert_status), hc: st,
+            orders8: null, hasOrder: false
+          });
+        }
+        got += list.length;
+        if (!list.length || got >= total) break;
+        await new Promise((r2) => setTimeout(r2, 120));
+      }
+    }
+    const rows = [...seen.values()];
+    // 入职日期 / 入职天数：补人资名单（健康证接口不带入职时间）
+    try {
+      const staff = await loadHealthStaff();
+      for (const r of rows) {
+        const st = staff.get(r.id);
+        r.entry = st && st.entryTime ? st.entryTime : "";
+        r.entryDays = r.entry ? hcDaysSince(r.entry) : null;
+      }
+    } catch (e) {
+      for (const r of rows) { r.entry = ""; r.entryDays = null; }
+    }
+    let orders = null;
+    try {
+      orders = await loadHealthOrders(teams);
+      state.healthPartial = false;
+      state.healthOrderError = "";
+    } catch (e) {
+      state.healthPartial = true;
+      state.healthOrderError = String((e && e.message) || e);
+    }
+    for (const r of rows) {
+      const n = orders ? (orders.total.get(r.id) || 0) : null;
+      r.orders8 = n == null ? null : n;
+      r.hasOrder = !!(n && n > 0);
+      // 近 8 天（T-7~T0）逐日完单：文件里整日没数据的显示「—」，其余按 0 计
+      r.days = orders ? orders.days.map((d) => {
+        const m = orders.byDay.get(r.id);
+        const v = m && m.has(d) ? m.get(d) : (orders.dataDates.has(d) ? 0 : null);
+        return { d, n: v };
+      }) : null;
+    }
+    state.health = rows;
+    state.healthTeams = teams;
+    state.healthAt = Date.now();
+    saveHealthCache();
+    if (!silent) {
+      const has = rows.filter((r) => r.hasOrder).length;
+      showNotice(`健康证待处理 ${rows.length} 人（近 8 天有单 ${has} 人）` +
+        (state.healthPartial ? `；订单数据未取到：${state.healthOrderError}` : ""),
+        state.healthPartial ? "err" : "", 4500);
+    }
+  } catch (e) {
+    state.healthError = String((e && e.message) || e);
+    if (!silent) showNotice("健康证名单读取失败：" + state.healthError, "err", 5000);
+  } finally {
+    state.healthLoading = false;
+    renderAll();
+  }
+}
+
+function healthPending() {
+  return state.health.slice().sort((x, y) =>
+    (y.hasOrder ? 1 : 0) - (x.hasOrder ? 1 : 0) ||
+    (y.hc && y.hc.weight || 0) - (x.hc && x.hc.weight || 0) ||
+    String(x.name).localeCompare(String(y.name), "zh-CN"));
+}
+
+function renderHealth() {
+  const sec = $("td-health"), box = $("td-health-list"), sub = $("td-health-sub");
+  if (!sec || !box) return;
+  const visible = state.filter !== "training" && state.filter !== "ledger"
+    && state.filter !== "resign";
+  sec.hidden = !visible;
+  if (!visible) return;
+  const all = healthPending();
+  const list = state.healthOnly ? all.filter((x) => x.hasOrder) : all;
+  const btn = $("btn-health-only");
+  if (btn) {
+    btn.textContent = `只看有单：${state.healthOnly ? "开" : "关"}`;
+    btn.classList.toggle("is-on", state.healthOnly);
+  }
+  if (sub) {
+    const parts = [];
+    if (state.healthLoading) parts.push("正在读取健康证名单…");
+    else if (state.healthError) parts.push("读取失败：" + state.healthError);
+    else {
+      const none = all.filter((x) => x.hc.key === "none").length;
+      const risk = all.filter((x) => x.hc.key === "risk").length;
+      const exp = all.filter((x) => x.hc.key === "expired").length;
+      const has = all.filter((x) => x.hasOrder).length;
+      parts.push(`启用中 ${all.length} 人 · 未上传 ${none} / 即将过期 ${risk} / 已过期 ${exp} · 近8天有单 ${has} 人`);
+      if (state.healthPartial) parts.push("订单数据未取到（显示 —）");
+    }
+    if (state.healthAt) parts.push("更新于 " + shortTime(new Date(state.healthAt)));
+    sub.textContent = parts.join(" · ");
+  }
+  if (state.healthLoading && !all.length) {
+    box.innerHTML = `<div class="td-train-empty">正在读取健康证名单…</div>`;
+    return;
+  }
+  if (state.healthError && !all.length) {
+    box.innerHTML = `<div class="td-train-empty err">健康证名单读取失败：${esc(state.healthError)}</div>`;
+    return;
+  }
+  if (!list.length) {
+    box.innerHTML = `<div class="td-train-empty">` +
+      (state.healthOnly ? "近 8 天没有跑单的健康证异常骑手 🎉" : "没有未上传 / 即将过期 / 已过期的骑手 🎉") +
+      `</div>`;
+    return;
+  }
+  const today = hcToday();
+  box.innerHTML = list.map((r) => {
+    const ord = r.orders8 == null ? "近8天完单 —"
+      : (r.orders8 > 0 ? `近8天完单 ${int(r.orders8)} 单` : "近8天无单");
+    const entryBox = r.entry
+      ? `<div class="hc-entry-box" title="入职日期 ${esc(r.entry)}${r.entryDays != null ? " · 入职第 " + int(r.entryDays) + " 天" : ""}">` +
+        `<span class="hc-entry-date"><i>入职</i>${esc(r.entry)}</span>` +
+        (r.entryDays != null
+          ? `<span class="hc-entry-days">${int(r.entryDays)}<small>天</small></span>`
+          : "") +
+        `</div>`
+      : "";
+    const days = Array.isArray(r.days) ? `<div class="hc-days">` + r.days.map((x) => {
+      const lab = x.d === today ? "今天" : x.d.slice(5);
+      const has = x.n != null && x.n > 0;
+      const txt = x.n == null ? "—" : int(x.n);
+      const tip = x.n == null ? `${x.d} 数据未出` : `${x.d} 完单 ${int(x.n)} 单`;
+      return `<span class="hc-day${has ? " has" : ""}${x.n == null ? " na" : ""}" title="${esc(tip)}">` +
+        `<i>${esc(lab)}</i><b>${esc(txt)}</b></span>`;
+    }).join("") + `</div>` : "";
+    return `<div class="td-lrow is-health">` +
+      `<div class="l-main"><div class="l-title">${esc(r.name)}` +
+      `<span class="l-cat">${esc(r.teamName || "—")}</span></div>` +
+      `<div class="l-meta">骑手 ${esc(String(r.id))}` +
+      (r.mobile ? ` · ${esc(maskMobile(r.mobile))}` : "") +
+      ` ｜ ${r.hasOrder ? `<b class="td-has-order">${esc(ord)}</b>` : esc(ord)}</div>` +
+      days + `</div>` +
+      entryBox +
+      `<span class="td-badge ${r.hc.cls}" title="健康证状态">${esc(r.hc.label)}</span></div>`;
+  }).join("");
+}
+
 function renderLedger() {
   const sec = $("td-ledger");
   const box = $("td-ledger-list");
   const sub = $("td-ledger-sub");
   if (!sec || !box) return;
-  const visible = state.filter !== "training" && state.filter !== "resign";
+  const visible = state.filter !== "training" && state.filter !== "resign"
+    && state.filter !== "health";
   sec.hidden = !visible;
   if (!visible) return;
   const pending = ledgerPending();
@@ -1467,7 +2003,7 @@ function renderTraining() {
   const sub = $("td-train-sub");
   if (!sec || !grid) return;
   const visible = state.filter !== "overdue" && state.filter !== "today"
-    && state.filter !== "ledger" && state.filter !== "resign";
+    && state.filter !== "ledger" && state.filter !== "resign" && state.filter !== "health";
   sec.hidden = !visible;
   if (!visible) return;
   const cards = threeCardIndex();
@@ -1610,19 +2146,22 @@ async function refreshAll() {
       loadTasks(),
       fetchTraining({ silent: true }),
       fetchLedger({ silent: true }),
-      fetchResign({ silent: true })
+      fetchResign({ silent: true }),
+      fetchHealth({ silent: true })
     ]);
     const bits = [
       `商站任务 ${state.tasks.length} 条`,
       `培训 ${state.training.length} 人`,
       `台账待审核 ${ledgerPending().length} 条`,
-      `离职待审核 ${resignPending().length} 条`
+      `离职待审核 ${resignPending().length} 条`,
+      `健康证待处理 ${state.health.length} 人`
     ];
     const errs = [];
     if (state.error) errs.push("商站任务：" + state.error);
     if (state.trainingError) errs.push("培训：" + state.trainingError);
     if (state.ledgerError) errs.push("台账：" + state.ledgerError);
     if (state.resignError) errs.push("离职：" + state.resignError);
+    if (state.healthError) errs.push("健康证：" + state.healthError);
     if (errs.length) showNotice("部分数据刷新失败 —— " + errs.join("；"), "err", 6000);
     else showNotice("已刷新全部数据：" + bits.join(" · "), "", 3200);
     renderAll();
@@ -1667,7 +2206,8 @@ function renderKpis() {
   const train = state.training.length;
   const ledgerCount = ledgerPending().length;
   const resignCount = resignPending().length;
-  const totalWarn = warnTasks + train + ledgerCount + resignCount;
+  const healthCount = state.health.length;
+  const totalWarn = warnTasks + train + ledgerCount + resignCount + healthCount;
 
   const warnGroups = new Map();
   for (const t of state.tasks) {
@@ -1683,7 +2223,8 @@ function renderKpis() {
   const top = [
     { k: "warn", label: "任务预警", v: totalWarn, cls: "warn", big: true,
       s: `全部预警 ${int(totalWarn)} 条`,
-      breakdown: [["商站任务", warnTasks], ["新骑手培训", train], ["台账待审核", ledgerCount], ["离职待审核", resignCount]],
+      breakdown: [["商站任务", warnTasks], ["新骑手培训", train], ["台账待审核", ledgerCount],
+        ["离职待审核", resignCount], ["健康证待处理", healthCount]],
       chips: warnChips },
     { k: "today", label: "今日到期", v: today, cls: "bad", s: "商站任务有效期在今天" },
     { k: "overdue", label: "已超时", v: overdue, cls: "bad", s: "商站任务已过有效期" }
@@ -1695,7 +2236,9 @@ function renderKpis() {
     { k: "ledger", label: "台账待审核", v: ledgerCount, cls: ledgerCount ? "bad" : "",
       s: `近 ${int(state.catCfg.ledgerDays)} 天上传 · 未审核` },
     { k: "resign", label: "离职待审核", v: resignCount, cls: resignCount ? "bad" : "",
-      s: `剩余 ≤ ${int(state.catCfg.resignHours)} 小时` }
+      s: `剩余 ≤ ${int(state.catCfg.resignHours)} 小时` },
+    { k: "health", label: "健康证待处理", v: healthCount, cls: healthCount ? "warn" : "",
+      s: "启用中 · 未上传 / 即将过期 / 已过期" }
   ];
 
   const paint = (cards, target) => {
@@ -1726,7 +2269,8 @@ function renderTable() {
   const t = $("td-table");
   if (!t) return;
   const wrap = $("td-table-wrap");
-  const only = state.filter === "training" || state.filter === "ledger" || state.filter === "resign";
+  const only = state.filter === "training" || state.filter === "ledger"
+    || state.filter === "resign" || state.filter === "health";
   if (wrap) wrap.hidden = only;
   if (only) return;
   const rows = filteredTasks();
@@ -1796,6 +2340,11 @@ function renderCount() {
       (state.ledgerLoading ? " · 正在读取…" : "");
     return;
   }
+  if (state.filter === "health") {
+    el.textContent = `健康证待处理 ${state.health.length} 人` +
+      (state.healthLoading ? " · 正在读取…" : "");
+    return;
+  }
   el.textContent = `显示 ${rows.length} / 共 ${state.tasks.length} 条 · 预警 ${warn} 条`;
 }
 function renderWarnSummary() {
@@ -1816,6 +2365,7 @@ function renderAll() {
   renderTraining();
   renderLedger();
   renderResign();
+  renderHealth();
   renderTable();
   renderCount();
   renderWarnSummary();
@@ -1918,10 +2468,57 @@ function bind() {
   if (rgMask) rgMask.addEventListener("click", (e) => { if (e.target === rgMask) closeResignModal(); });
   const rgClose = $("td-rg-close");
   if (rgClose) rgClose.addEventListener("click", closeResignModal);
+  const rauto = $("btn-resign-auto");
+  if (rauto) rauto.addEventListener("click", async () => {
+    if (!state.resignAuto && !window.confirm(`开启后，审批剩余不足 ${state.resignAutoH} 小时的离职申请会自动用「最迟离职日期」确认通过（不可撤销）。确定开启？`)) return;
+    state.resignAuto = !state.resignAuto;
+    state.resignAutoErr = "";
+    try { localStorage.setItem(LS_RESIGN_AUTO, state.resignAuto ? "1" : "0"); } catch (e) { /* ignore */ }
+    resignAutoLabel();
+    if (!state.resignAuto) return;
+    // 先数一下有多少条落入阈值，方便在「一条都没有」时给出明确反馈
+    const hit = resignPending().filter((r) => r.stateCode === "created").filter((r) => {
+      const dl = resignDeadline(r);
+      return dl && dl.left > 0 && dl.left <= state.resignAutoH * 3600 * 1000;
+    }).length;
+    if (!hit) {
+      const loading = state.resignLoading || !state.resignAt;
+      showNotice(loading
+        ? `自动确认已开启（审核剩余 ≤${state.resignAutoH} 小时）。正在读取离职申请，读取完成后会自动处理。`
+        : `自动确认已开启（审核剩余 ≤${state.resignAutoH} 小时）。当前没有落入阈值的待审核离职日期。`, "", 5000);
+      return;
+    }
+    await autoConfirmResign();
+  });
+  const rh = $("resign-auto-h");
+  if (rh) {
+    const applyH = () => {
+      const n = Number(rh.value);
+      const v = isFinite(n) && n > 0 ? Math.min(72, Math.max(1, Math.round(n))) : 12;
+      state.resignAutoH = v;
+      rh.value = String(v);
+      try { localStorage.setItem(LS_RESIGN_AUTO_H, String(v)); } catch (e) { /* ignore */ }
+      resignAutoLabel();
+      if (state.resignAuto) autoConfirmResign();
+    };
+    rh.addEventListener("change", applyH);
+    rh.addEventListener("blur", applyH);
+    rh.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); applyH(); rh.blur(); } });
+  }
   const rbtn = $("btn-resign-refresh");
   if (rbtn) rbtn.addEventListener("click", () => fetchResign());
   const ropen = $("btn-resign-open");
   if (ropen) ropen.addEventListener("click", () => window.open(RESIGN_PAGE_URL, "_blank", "noopener"));
+  const hbtn = $("btn-health-refresh");
+  if (hbtn) hbtn.addEventListener("click", () => fetchHealth());
+  const honly = $("btn-health-only");
+  if (honly) honly.addEventListener("click", () => {
+    state.healthOnly = !state.healthOnly;
+    try { localStorage.setItem("wb_todo_health_only_v1", state.healthOnly ? "1" : "0"); } catch (e) { /* ignore */ }
+    renderAll();
+  });
+  const hopen = $("btn-health-open");
+  if (hopen) hopen.addEventListener("click", () => window.open(HC_PAGE_URL, "_blank", "noopener"));
   const lbtn = $("btn-ledger-refresh");
   if (lbtn) lbtn.addEventListener("click", () => fetchLedger());
   const llist = $("td-ledger-list");
@@ -1973,24 +2570,37 @@ function bind() {
 
 window.__TODO__ = {
   state, loadTasks, fetchTraining, renderTraining, allItems,
-  fetchLedger, renderLedger, ledgerPending, fetchResign, renderResign, resignPending, threeCardIndex, openLedgerModal, submitLedger, voidLedger,
+  fetchLedger, renderLedger, ledgerPending, fetchResign, renderResign, resignPending,
+  fetchHealth, renderHealth, healthPending,
+  threeCardIndex, openLedgerModal, submitLedger, voidLedger,
   warnState, stationOf, riderOf, filter: filteredTasks, renderAll, setFilter
 };
 
-const AUTO_REFRESH_MS = 5 * 60 * 1000;
+// 自动刷新间隔取全局设置（默认 5 分钟，可在工具栏改；0 = 关闭）
+function autoRefreshMs() {
+  const sec = window.WBAutoRefresh ? WBAutoRefresh.sec : 300;
+  return sec > 0 ? sec * 1000 : 0;
+}
 
 function autoRefresh(force) {
+  const every = autoRefreshMs();
+  if (!every) return;
   const now = Date.now();
   const taskAt = state.loadedAt ? state.loadedAt.getTime() : 0;
-  if (!state.loading && (force || now - taskAt >= AUTO_REFRESH_MS)) loadTasks();
-  if (!state.trainingLoading && (force || now - state.trainingAt >= AUTO_REFRESH_MS)) {
+  const due = (last) => force || !last || now - last >= every - 5000;
+  if (!state.loading && due(taskAt)) loadTasks();
+  if (!state.trainingLoading && due(state.trainingAt)) {
     fetchTraining({ silent: true });
   }
-  if (!state.ledgerLoading && (force || now - state.ledgerAt >= AUTO_REFRESH_MS)) {
+  if (!state.ledgerLoading && due(state.ledgerAt)) {
     fetchLedger({ silent: true });
   }
-  if (!state.resignLoading && (force || now - state.resignAt >= AUTO_REFRESH_MS)) {
+  if (!state.resignLoading && due(state.resignAt)) {
     fetchResign({ silent: true });
+  }
+  // 健康证要额外拉两次出勤导出，自动刷新放慢到至少 15 分钟一次；手动「刷新」不受限
+  if (!state.healthLoading && (force || !state.healthAt || now - state.healthAt >= Math.max(every, 15 * 60 * 1000) - 5000)) {
+    fetchHealth({ silent: true });
   }
 }
 
@@ -2014,14 +2624,23 @@ function autoRefresh(force) {
   }
   const rcached = loadResignCache();
   if (rcached) {
-    state.resign = rcached.rows || [];
+    state.resign = normalizeResignRows(rcached.rows || []);
     state.resignAt = rcached.ts || 0;
   }
+  const hcached = loadHealthCache();
+  if (hcached) {
+    state.health = hcached.rows || [];
+    state.healthTeams = hcached.teams || [];
+    state.healthPartial = !!hcached.partial;
+    state.healthAt = hcached.ts || 0;
+  }
+  resignAutoLabel();
   renderAll();
   loadTasks();
   fetchTraining({ silent: !!cached });
   fetchLedger({ silent: !!lcached });
   fetchResign({ silent: !!rcached });
+  fetchHealth({ silent: !!hcached });
   setInterval(autoRefresh, 60 * 1000);
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden) autoRefresh(false);

@@ -65,7 +65,7 @@ body.rent-page { background: #F3F4F6; }
 .rent-bind-sum b { color: #2F5597; font-size: 14px; }
 .rent-bind-sum .rent-hint { margin-left: 4px; }
 .rent-bind-rows { max-height: 460px; overflow: auto; border: 1px solid #E5E7EB; border-radius: 6px; padding: 2px 8px; }
-.bind-row { display: grid; grid-template-columns: 190px 88px 88px 62px minmax(360px, 1fr);
+.bind-row { display: grid; grid-template-columns: 190px 88px 88px 70px 88px 62px minmax(360px, 1fr);
   gap: 8px; align-items: center; padding: 4px 0; border-bottom: 1px dashed #F1F5F9; font-size: 12px; }
 .bind-row:last-child { border-bottom: 0; }
 .bind-row.head { position: sticky; top: 0; background: #FFFFFF; z-index: 1;
@@ -76,6 +76,10 @@ body.rent-page { background: #F3F4F6; }
 .br-name em { font-style: normal; font-weight: 400; color: #9CA3AF; font-size: 11px; margin-left: 5px; }
 .br-date { color: #6B7280; }
 .br-day { color: #15803D; font-weight: 700; text-align: right; }
+/* v3.58.5：已绑定天数 / 已绑定金额 */
+.br-bound { color: #B45309; font-weight: 700; text-align: right; }
+.br-fee { color: #9CA3AF; text-align: right; font-variant-numeric: tabular-nums; }
+.br-fee.has { color: #B45309; font-weight: 600; }
 .bind-bar { display: flex; gap: 1px; height: 15px; }
 .bind-bar i { flex: 1 1 0; border-radius: 2px; background: #E5E7EB; }
 .bind-bar i.ok { background: #22C55E; }
@@ -152,8 +156,8 @@ body.rent-page { background: #F3F4F6; }
 .rent-progress .rp-bar i { display: block; height: 100%; width: 0; background: #3B82F6; transition: width .15s; }
 
 .rent-history-wrap { overflow-x: auto; }
-table.tbl.rent-history { width: 100%; min-width: 860px; border: 1px solid #E5E7EB;
-  table-layout: fixed; }
+table.tbl.rent-history { width: max-content; min-width: 100%; border: 1px solid #E5E7EB;
+  table-layout: auto; }
 table.tbl.rent-history th, table.tbl.rent-history td { border: 1px solid #E5E7EB;
   padding: 6px 6px; font-size: 12px; }
 table.tbl.rent-history thead th { height: 32px; background: #F2F5FA; color: #374151; }

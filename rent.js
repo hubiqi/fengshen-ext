@@ -723,13 +723,15 @@ const BIND_LABEL = {
   ok: "可绑定", past: "超出补登期", before: "未入职", after: "已离职", busy: "已绑定"
 };
 
-/** 单日状态：入职前 / 离职后 / 早于 T-6 / 已有同类型租用单占用，都不可绑定。
- *  离职当日仍算可绑定；busy 是已经展开好的按日占用表。 */
+/** 单日状态：入职前 / 离职后 / 已有同类型租用单占用 / 早于 T-6，都不可绑定。
+ *  离职当日仍算可绑定；busy 是已经展开好的按日占用表。
+ *  v3.58.4：已绑定优先于「补登期外」——月初已经绑过的日期也标「已绑定」，
+ *  没绑的才显示「超出补登期」，占用统计随之变成整月口径。 */
 function bindState(rec, day, today, busy) {
   if (rec.entry && day < rec.entry) return "before";
   if (rec.leave && day > rec.leave) return "after";
-  if (day < earliestBindDate(today)) return "past";
   if (busy && busy.length) return "busy";
+  if (day < earliestBindDate(today)) return "past";
   return "ok";
 }
 /** 某骑手在所选物资类型下，被已有租用单覆盖的日期 → 占用说明。 */
@@ -770,8 +772,26 @@ function computeBind(list, month, includeLeft, typeFilter, pool) {
     const okDays = days.filter((d, i) => cells[i] === "ok");
     if (!includeLeft && !okDays.length) continue;
     const ownRents = rentsInMonth(rec.id, days, typeFilter, pool);
+    // v3.58.5：已绑定天数 / 已绑定金额（按该类型月扣款折算日单价，默认 1000 元/月）
+    // v3.58.6：天数和金额都改为「本月占用天数 × 数量」求和，与按金额反算的「本月已绑」同口径
+    const mDays = days.length;
+    const feeOf = (tid) => {
+      const saved = num(state.deductFees[String(tid)]);
+      const monthly = saved > 0 ? saved : DEDUCT_DEFAULT_FEE;
+      return mDays > 0 ? monthly / mDays : 0;
+    };
+    const typeIds = String(typeFilter) === "all"
+      ? (state.types || []).map((t) => t.id)
+      : [typeFilter];
+    let boundDays = 0, boundFee = 0;
+    for (const tid of typeIds) {
+      const dd = boundDaysInMonth(rec.id, tid, month, pool);
+      if (!dd) continue;
+      boundDays += dd;
+      boundFee += dd * feeOf(tid);
+    }
     out.push({
-      ...rec, cells, okDays, busy, ownRents,
+      ...rec, cells, okDays, busy, ownRents, boundDays, boundFee,
       earliest: okDays.length ? okDays[0] : ""
     });
   }
@@ -799,7 +819,7 @@ function renderBind() {
       const okDays = rows.reduce((s, r) => s + r.okDays.length, 0);
       const people = rows.filter((r) => r.okDays.length).length;
       const left = rows.filter((r) => r.leave && r.leave >= todayStr()).length;
-      const busy = rows.reduce((s, r) => s + r.cells.filter((c) => c === "busy").length, 0);
+      const busy = rows.reduce((s, r) => s + (r.boundDays || 0), 0);   // v3.58.6：含数量的已绑天数
       sum.innerHTML = `<b>${people}</b> 人本月还有可绑定日 · 合计 <b>${okDays}</b> 个可绑定人日` +
         (left ? ` · <b>${left}</b> 人本月离职` : "") +
         `<span class="rent-hint">（${esc(siteLabel())} · T-${BIND_BACK_DAYS} 起可绑 · 名单 ${state.roster.length} 人 · ` +
@@ -819,17 +839,24 @@ function renderBind() {
     return;
   }
   const head = `<div class="bind-row head">` +
-    `<span>骑手</span><span>入职</span><span>离职</span><span>可绑定</span>` +
+    `<span>骑手</span><span>入职</span><span>离职</span>` +
+    `<span title="本月该类型已有单：占用天数 × 数量，求和">已绑天数</span>` +
+    `<span title="已绑天数 × 该类型日单价（月扣款 ÷ 当月天数），仅供参考">已绑金额</span>` +
+    `<span>可绑定</span>` +
     `<span class="bind-bar">${days.map((d) => `<i>${Number(d.slice(-2))}</i>`).join("")}</span></div>`;
   const body = rows.slice(0, 80).map((r) => {
     const tip = (r.okDays.length ? `最早可从 ${r.okDays[0]} 开始` : "本月无剩余可绑定日") +
+      (r.boundDays ? ` · 本月已绑 ${r.boundDays} 天 ≈ ¥${Math.round(r.boundFee)}` : "") +
       (r.teamName ? ` · ${r.teamName}` : "") +
       (r.ownRents.length ? ` · 已有单 ${r.ownRents.slice(0, 2).map((x) => `${x.typeName} ${x.start}~${x.end}`).join("；")}` : "");
     const siteTag = state.siteIds.length > 1 && r.teamName ? ` · ${r.teamName}` : "";
+    const feeTxt = r.boundFee > 0 ? `¥${Math.round(r.boundFee).toLocaleString("zh-CN")}` : "—";
     return `<div class="bind-row" title="${esc(r.name)}（${r.id}）· ${esc(tip)}">` +
       `<span class="br-name">${esc(r.name || "未命名")}<em>${esc(r.id)}${esc(siteTag)}${r.status === "已离职" ? " · 已离职" : ""}</em></span>` +
       `<span class="br-date">${esc(r.entry || "—")}</span>` +
       `<span class="br-date">${esc(r.leave || "—")}</span>` +
+      `<span class="br-bound">${r.boundDays ? r.boundDays + " 天" : "—"}</span>` +
+      `<span class="br-fee${r.boundFee > 0 ? " has" : ""}">${feeTxt}</span>` +
       `<span class="br-day">${r.okDays.length} 天</span>` +
       `<span class="bind-bar">${r.cells.map((c) => `<i class="${c}"></i>`).join("")}</span></div>`;
   }).join("");
@@ -889,7 +916,7 @@ function boundDetail(list) {
   return arr.join("\n");
 }
 const BIND_BASE_HEAD = ["站点", "骑手姓名", "手机号", "骑士ID", "入职日期", "离职日期", "在职状态",
-  "可绑定天数", "可绑定区间", "最早可绑定起日", "已有单(本月)"];
+  "已绑定天数", "已绑定金额", "可绑定天数", "可绑定区间", "最早可绑定起日", "已有单(本月)"];
 
 function matrixSheet(group, month, list, pool, scopeLabel) {
   const S = XLSX_WRITER.STYLE;
@@ -900,6 +927,8 @@ function matrixSheet(group, month, list, pool, scopeLabel) {
   for (const r of rows) {
     const base = [
       r.teamName || scopeLabel, r.name, r.mobile, r.id, r.entry || "", r.leave || "", r.status || "",
+      r.boundDays || 0,
+      r.boundFee ? Math.round(r.boundFee) : 0,
       r.okDays.length,
       r.okDays.length ? `${r.okDays[0]} ~ ${r.okDays[r.okDays.length - 1]}` : "",
       r.earliest || "",
@@ -912,7 +941,7 @@ function matrixSheet(group, month, list, pool, scopeLabel) {
   }
   return {
     name: group.sheet, rows: out, styles,
-    widths: [16, 12, 14, 14, 13, 13, 10, 12, 26, 17, 38].concat(days.map(() => 18)),
+    widths: [16, 12, 14, 14, 13, 13, 10, 12, 13, 12, 26, 17, 38].concat(days.map(() => 18)),
     freeze: { rows: 1, cols: BIND_BASE_HEAD.length },
     headHeight: 30, rowHeight: 36, people: rows.length
   };
@@ -1080,7 +1109,8 @@ function capMaxTotal(capItem, dailyFee) {
   if (!(c > 0) || !(f > 0)) return 0;
   return Math.floor(c / f + 1e-9);
 }
-/** 某骑手某类型在本月「已绑」的天数：把本月范围内的租用单按天累加（同类型不重叠，直接相加）。 */
+/** 某骑手某类型在本月「已绑」的天数：本月范围内的每张单按天累加，再乘该单数量（num）。
+ *  v3.58.6：之前漏了数量，num>1 的单少算了；现统一按「天数 × 数量」求和。 */
 function boundDaysInMonth(knightId, typeId, month, rents) {
   const days = monthDays(String(month || todayStr()).slice(0, 7));
   const first = days[0], last = days[days.length - 1];
@@ -1091,7 +1121,8 @@ function boundDaysInMonth(knightId, typeId, month, rents) {
     const s = r.start > first ? r.start : first;
     const e = r.end < last ? r.end : last;
     if (!s || !e || s > e) continue;
-    n += dayDiff(s, e) + 1;
+    const qty = Math.max(1, num(r.num));
+    n += (dayDiff(s, e) + 1) * qty;
   }
   return n;
 }
@@ -2406,3 +2437,13 @@ window.__RENT__ = {
   if (state.via === "bridge") showNotice("当前使用「静默桥接」通道：后台标签页取数，不会打断浏览。", "blue");
   if (!window.__WB_TEST__) await loadAll();
 })();
+
+// 自动刷新：间隔取全局设置（默认 5 分钟，可在工具栏改）
+if (window.WBAutoRefresh) WBAutoRefresh.register(() => {
+  try {
+    if (document.hidden) return;
+    const ae = document.activeElement;
+    if (ae && (ae.tagName === "INPUT" || ae.tagName === "SELECT" || ae.tagName === "TEXTAREA" || ae.isContentEditable)) return;
+    loadAll();
+  } catch (e) { /* ignore */ }
+});

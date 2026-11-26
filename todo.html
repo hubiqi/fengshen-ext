@@ -18,7 +18,7 @@
   <div class="tb-right">
     <button id="btn-train-refresh" class="ghost" title="立即重新读取新骑手培训待办（近 N 天到期、需培训且未完成）">刷新培训</button>
     <button id="btn-warn-cfg" class="ghost" title="按任务分类设置预警提前量（0 ~ 不限），并可改培训提前天数">预警设置 <b id="warn-summary">0天</b></button>
-    <button id="btn-refresh" class="primary" title="刷新全部数据：商站任务 + 新骑手培训 + 台账明细">立即刷新</button>
+    <button id="btn-refresh" class="primary" title="刷新全部数据：商站任务 + 新骑手培训 + 台账明细 + 离职待审核 + 健康证待处理">立即刷新</button>
   </div>
 </header>
 
@@ -34,6 +34,7 @@
       <button class="td-filter" data-filter="training">新骑手培训</button>
       <button class="td-filter" data-filter="ledger">台账待审核</button>
       <button class="td-filter" data-filter="resign">离职待审核</button>
+      <button class="td-filter" data-filter="health">健康证待处理</button>
       <button class="td-filter active" data-filter="warn">任务预警</button>
       <button class="td-filter" data-filter="today">今日到期</button>
       <button class="td-filter" data-filter="overdue">已超时</button>
@@ -54,7 +55,9 @@
     <header class="td-train-head">
       <strong>台账待审核</strong>
       <span class="td-train-sub" id="td-ledger-sub"></span>
-      <button id="btn-ledger-refresh" class="ghost td-ledger-refresh" title="重新读取台账明细">刷新台账</button>
+      <span class="td-head-acts">
+        <button id="btn-ledger-refresh" class="ghost" title="重新读取台账明细">刷新台账</button>
+      </span>
     </header>
     <div class="td-ledger-list" id="td-ledger-list"></div>
   </section>
@@ -63,10 +66,29 @@
     <header class="td-train-head">
       <strong>离职待审核</strong>
       <span class="td-train-sub" id="td-resign-sub"></span>
-      <button id="btn-resign-refresh" class="ghost td-ledger-refresh" title="重新读取离职申请">刷新</button>
-      <button id="btn-resign-open" class="ghost td-ledger-refresh" title="在新标签打开离职管理页">去处理</button>
+      <span class="td-head-acts">
+        <span class="td-auto-resign">
+          <button id="btn-resign-auto" class="ghost" title="剩余不足设定小时数时，自动用最迟离职日期确认通过（默认关闭）">自动确认：关</button>
+          <span class="td-auto-h" title="阈值：审批剩余不足多少小时时自动确认，可改 1~72 小时">≤<input id="resign-auto-h" type="number" min="1" max="72" step="1" value="12" aria-label="自动确认阈值（小时）">h</span>
+        </span>
+        <button id="btn-resign-refresh" class="ghost" title="重新读取离职申请">刷新</button>
+        <button id="btn-resign-open" class="ghost" title="在新标签打开离职管理页">去处理</button>
+      </span>
     </header>
     <div class="td-ledger-list" id="td-resign-list"></div>
+  </section>
+
+  <section class="td-ledger" id="td-health" hidden>
+    <header class="td-train-head">
+      <strong>健康证待处理</strong>
+      <span class="td-train-sub" id="td-health-sub"></span>
+      <span class="td-head-acts">
+        <button id="btn-health-only" class="ghost" title="只看近 8 天（T-7~T0）有跑单的骑手">只看有单：关</button>
+        <button id="btn-health-refresh" class="ghost" title="重新读取健康证名单，并匹配近 8 天是否有订单">刷新</button>
+        <button id="btn-health-open" class="ghost" title="在新标签打开蜂鸟 TEAM 骑手列表">去处理</button>
+      </span>
+    </header>
+    <div class="td-ledger-list" id="td-health-list"></div>
   </section>
 
   <div class="td-table-wrap" id="td-table-wrap">
@@ -130,6 +152,8 @@
   </div>
 </div>
 
+<script src="xlsx.js"></script>
+<script src="auto-refresh.js"></script>
 <script src="todo.js"></script>
 </body>
 </html>

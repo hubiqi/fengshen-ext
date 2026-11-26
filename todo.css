@@ -33,7 +33,8 @@ body.td-page { margin: 0; background: #F3F6FB; color: #1F2937; }
 
 .td-table-wrap { background: #FFFFFF; border: 1px solid #E2E8F2; border-radius: 10px; overflow: auto;
   max-height: calc(100vh - 250px); }
-table.tbl.td-table { width: 100%; table-layout: fixed; border-collapse: collapse; margin: 0; }
+table.tbl.td-table { width: 100%; min-width: 1100px; table-layout: fixed;
+  border-collapse: collapse; margin: 0; }
 table.tbl.td-table thead th { position: sticky; top: 0; z-index: 2; background: #2F5597; color: #FFFFFF;
   font-size: 12px; font-weight: 700; padding: 9px 8px; border: 0; border-bottom: 1px solid #24427A; }
 table.tbl.td-table tbody td { border-bottom: 1px solid #EEF2F7; padding: 8px; font-size: 12px;
@@ -369,3 +370,50 @@ table.tbl.td-table th.c-desc, table.tbl.td-table td.c-desc { display: none; }
 /* 任务行可点击跳转商站任务管理 */
 #td-table tbody tr.clickable { cursor: pointer; }
 #td-table tbody tr.clickable:hover td { background: #EFF6FF; }
+.rg-tip.rg-urgent { color: #B91C1C; font-weight: 700; }
+#btn-resign-auto.is-on { color: #B91C1C; border-color: #FCA5A5; background: #FEF2F2; font-weight: 700; }
+
+/* 区块右上角按钮统一靠右排列 */
+.td-head-acts { margin-left: auto; display: inline-flex; align-items: center; gap: 8px; flex: none; }
+.td-train-head .td-head-acts .ghost { margin-left: 0; }
+.td-train-head .td-head-acts { align-self: center; }
+
+/* 离职待审核：自动确认阈值（可改，默认 12h） */
+.td-auto-resign { display: inline-flex; align-items: center; gap: 6px; }
+.td-auto-h { display: inline-flex; align-items: center; gap: 2px; font-size: 12px; color: #6B7280; white-space: nowrap; }
+.td-auto-h input { width: 42px; height: 26px; padding: 0 3px; font-size: 12px; text-align: center;
+  border: 1px solid #E5E7EB; border-radius: 6px; color: #1F2937; background: #fff; font-family: inherit; }
+.td-auto-h input:focus { border-color: #93C5FD; outline: none; box-shadow: 0 0 0 2px #DBEAFE; }
+.td-auto-h input::-webkit-outer-spin-button,
+.td-auto-h input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.td-auto-h input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
+
+/* v3.57.90：健康证待处理 */
+.td-lrow.is-health { border-left-color: #F59E0B; background: #FFFCF5; }
+.td-lrow.is-health .td-badge { flex: none; }
+.td-has-order { color: #B91C1C; font-weight: 700; }
+#btn-health-only.is-on { color: #B45309; border-color: #FCD34D; background: #FFFBEB; font-weight: 700; }
+
+/* 健康证：近 8 天逐日完单（T-7 ~ T0） */
+.hc-days { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 5px; }
+.hc-day { display: inline-flex; align-items: baseline; gap: 3px; padding: 1px 6px;
+  border-radius: 5px; background: #F8FAFC; border: 1px solid #EDF1F7;
+  font-size: 10.5px; color: #94A3B8; line-height: 1.7; }
+.hc-day i { font-style: normal; }
+.hc-day b { color: #64748B; font-weight: 700; font-variant-numeric: tabular-nums; }
+.hc-day.has { background: #FFF7ED; border-color: #FED7AA; color: #B45309; }
+.hc-day.has b { color: #C2410C; }
+.hc-day.na { opacity: .55; }
+
+/* 健康证：入职日期 / 入职天数 */
+.hc-entry { color: #6B7280; }
+
+/* 健康证：入职日期 / 入职天数放右侧，天数放大标红 */
+.td-lrow.is-health .hc-entry-box { flex: none; display: flex; flex-direction: column;
+  align-items: flex-end; justify-content: center; gap: 2px; padding: 0 12px; white-space: nowrap; }
+.td-lrow.is-health .hc-entry-date { font-size: 14px; font-weight: 600; color: #374151;
+  font-variant-numeric: tabular-nums; line-height: 1.25; }
+.td-lrow.is-health .hc-entry-date i { font-style: normal; font-weight: 400; color: #9CA3AF; margin-right: 4px; }
+.td-lrow.is-health .hc-entry-days { font-size: 19px; font-weight: 800; color: #DC2626;
+  line-height: 1.15; font-variant-numeric: tabular-nums; }
+.td-lrow.is-health .hc-entry-days small { font-size: 12px; font-weight: 700; margin-left: 2px; }

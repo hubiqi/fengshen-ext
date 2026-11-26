@@ -113,11 +113,33 @@ chrome.action.onClicked.addListener(async () => {
 let bridgeTabId = null;
 let bridgeOwned = false;   // 只有插件自己新建的标签才允许被关闭
 
+/** 后台标签可能被 Chrome 休眠（discarded / unloaded），此时 executeScript 会报
+ *  「manifest must request permission」。先唤醒/重载再注入。 */
+async function wakeTab(tabId) {
+  try {
+    const t = await chrome.tabs.get(tabId);
+    if (!t) return false;
+    if (t.discarded || t.status === "unloaded") {
+      await chrome.tabs.reload(tabId);
+      for (let i = 0; i < 15; i++) {
+        await sleep(400);
+        const n = await chrome.tabs.get(tabId).catch(() => null);
+        if (!n) return false;
+        if (!n.discarded && n.status === "complete") return true;
+      }
+    }
+    return true;
+  } catch (e) { return false; }
+}
+
 async function getBridgeTab() {
   if (bridgeTabId != null) {
     try {
       const t = await chrome.tabs.get(bridgeTabId);
-      if (t && (t.url || "").startsWith("https://a.ele.me/")) return bridgeTabId;
+      if (t && (t.url || "").startsWith("https://a.ele.me/")) {
+        await wakeTab(bridgeTabId);
+        return bridgeTabId;
+      }
     } catch (e) { /* 标签已关闭 */ }
     bridgeTabId = null;
   }
@@ -126,6 +148,7 @@ async function getBridgeTab() {
   if (opened.length) {
     bridgeTabId = opened[0].id;
     bridgeOwned = false;
+    await wakeTab(bridgeTabId);
     return bridgeTabId;
   }
   // 万不得已才新建一个后台标签（active:false，不抢焦点）
@@ -133,6 +156,7 @@ async function getBridgeTab() {
   bridgeTabId = t.id;
   bridgeOwned = true;
   await sleep(1500);
+  await wakeTab(bridgeTabId);
   return bridgeTabId;
 }
 

@@ -54,6 +54,7 @@ jobs:
             quality.html quality.css quality.js \
             todo.html todo.css todo.js \
             assess.js sync.js capture.js xlsx.js hevc-player.js \
+            auto-refresh.js \
             vendor/ \
             scripts/hot-update.command \
             native/host.js install-native.command

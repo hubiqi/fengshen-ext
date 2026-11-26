@@ -45,7 +45,6 @@ const API_ATTENDANCE = XT + "xtop.fs.special.realtimeattendance.exportAttendance
 // 出勤统计 → 导出明细数据：历史日期的骑手 × 时段明细（替代忽略日期的实时考勤导出）
 const API_ATT_DETAIL = XT + "xtop.fs.special.examine.exportStatisticsDetail/1.0";
 const PAGE_SIZE = 90;        // 实测 >90 返回 PAGE_SIZE_OVER_RANGE
-const REFRESH_MS = 5 * 60 * 1000;
 const HISTORY_DAYS = 90;
 const TEAM_KEY = "wb_team_ids_v1";   // 站点范围缓存：识别一次长期复用，避免每次刷新都查运单
 
@@ -164,9 +163,11 @@ function unwrap(j) {
 // 统一重试 + 第一页直连失败自动降级到静默桥接
 async function callApi(api, payload, isFirst) {
   let lastErr = null;
+  let directRetried = false;
   for (let attempt = 0; attempt < 5; attempt++) {
+    const ch = state.via;
     try {
-      return unwrap(await rawApi(api, payload, state.via));
+      return unwrap(await rawApi(api, payload, ch));
     } catch (e) {
       lastErr = e;
       if (e.code === "REQUEST_TOO_FREQUENT") { await sleep(1800 * (attempt + 1)); continue; }
@@ -175,6 +176,13 @@ async function callApi(api, payload, isFirst) {
         state.fallbackTried = true;
         await switchChannel("bridge",
           "直连未成功（" + (e.message || "未知原因") + "），已自动切换到「静默桥接」：后台标签取数，不弹窗、不抢焦点。");
+        continue;
+      }
+      // v3.57.96：桥接失败（后台标签被 Chrome 休眠时会报权限错误）→ 切回直连重试
+      if (ch === "bridge" && !directRetried) {
+        directRetried = true;
+        await switchChannel("direct",
+          "后台桥接未成功（" + (e.message || "未知原因") + "），已切回直连重试。");
         continue;
       }
       throw e;
@@ -400,8 +408,7 @@ function syncDateChrome() {
   const modeLabel = history ? "历史定稿" : "实时快照";
   $("mode-tag").textContent = modeLabel;
   $("mode-tag").className = "mode-tag" + (history ? " history" : "");
-  $("auto").disabled = history;
-  $("auto").title = history ? "历史日期为定稿数据，无需自动刷新" : "今天每 5 分钟自动增量刷新";
+  if (window.WBAutoRefresh) WBAutoRefresh.setEnabled(!history);
   $("btn-today").classList.toggle("date-active", !history);
   $("btn-t1").classList.toggle("date-active", state.date === shiftDate(todayStr(), -1));
   if ($("date-picker").value !== state.date) $("date-picker").value = state.date;
@@ -682,7 +689,6 @@ $("btn-full").addEventListener("click", () => {
   try { localStorage.removeItem(TEAM_KEY); } catch (e) { /* ignore */ }
   restart({ force: true });
 });
-$("auto").addEventListener("change", (e) => localStorage.setItem("wb_auto", e.target.checked ? "1" : "0"));
 $("btn-channel").addEventListener("click", async () => {
   const next = state.via === "direct" ? "bridge" : "direct";
   await switchChannel(next, next === "bridge"
@@ -703,11 +709,12 @@ $("btn-clean").addEventListener("click", () => {
   b.onclick = () => { document.body.classList.remove("clean"); b.remove(); $("btn-clean").textContent = "纯净看板"; };
   document.body.appendChild(b);
 });
-setInterval(() => {
-  // 历史日期是定稿数据，不需要每 5 分钟重拉；只有 T0 的实时快照才自动增量刷新
-  if (!$("auto").checked || state.loading || document.hidden || state.mode !== "live") return;
+// 自动刷新：间隔取全局设置（默认 5 分钟，可在工具栏改）
+// 历史日期是定稿数据不重拉；只有 T0 的实时快照才自动增量刷新
+if (window.WBAutoRefresh) WBAutoRefresh.register(() => {
+  if (!WBAutoRefresh.enabled || state.loading || document.hidden || state.mode !== "live") return;
   loadAll();
-}, REFRESH_MS);
+});
 
 // ---------------------------------------------------------------- 日期选择事件
 function setDate(date) {
@@ -739,7 +746,6 @@ window.addEventListener("keydown", (e) => {
 });
 
 (async function init() {
-  const a = localStorage.getItem("wb_auto"); if (a != null) $("auto").checked = a === "1";
   const saved = localStorage.getItem("wb_assess_date");
   const today = todayStr();
   if (validDate(saved) && saved <= today && saved >= shiftDate(today, -HISTORY_DAYS)) {

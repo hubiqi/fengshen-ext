@@ -729,3 +729,13 @@ window.__SCH__ = { state, compute, render, renderTable, renderSummary, syncContr
   if (window.__WB_TEST__) { render(); setProgress(1, 1, "done"); return; }
   loadAll(false);
 })();
+
+// 自动刷新：间隔取全局设置（默认 5 分钟，可在工具栏改）
+if (window.WBAutoRefresh) WBAutoRefresh.register(() => {
+  try {
+    if (document.hidden || state.loading) return;
+    const ae = document.activeElement;
+    if (ae && (ae.tagName === "INPUT" || ae.tagName === "SELECT" || ae.tagName === "TEXTAREA" || ae.isContentEditable)) return;
+    loadAll(false);
+  } catch (e) { /* ignore */ }
+});

@@ -55,7 +55,8 @@ const API_KPI_DETAIL = XT + "xtop.performance.fs.opp.perfDetail.queryDetailList/
 // v3.41.0：违规处罚列表（违规状态=成立 / 违规分类=差评+投诉），单次查询窗口不能超过 2 天
 const API_VIOLATION = XT + "xtop.lpd.quality.control.violation.violationOrderAeolusCenterApi.queryList/1.0";
 const VIOL_SEG_DAYS = 2;          // 违规处罚接口硬限制：单次查询 ≤ 2 天
-const VIOL_BATCH = 50;            // 差评/投诉运单号逗号拼接批量回查考核运单明细的批次大小
+const VIOL_BATCH = 300;           // 整包回查失败时的兜底分批大小（实测一次 300+ 运单号可行）
+const KPI_TID_MAX_PAGES = 50;     // v3.58.9：整包回查最多 50 页（pageSize=100，即 5000 单）
 const VIOL_MAX_PAGES = 6;         // 每个 2 天段最多翻 6 页（pageSize=500，异常情况防全量翻页）
 const API_TEAMS = XT + "xtop.lpd.intelligentConfig.getTeamsAll/1.0";
 const SHARE_LS = "wb_wf_raw_v6_";      // v3.57.18：质量运营复用运力模块整月原始明细（v6 起高笔单与物流责双标签并存）
@@ -66,7 +67,7 @@ const SCALE_DAYS = 5;                      // 有效出勤规模默认近 5 天
 const SCALE_ONJOB_DAYS = 7;                // 在职规模默认近 7 天
 const SCALE_FIRST_DAYS = 14;               // v3.35.0：今日首跑对比窗口默认近 14 天（T-14 ~ T-1）
 const SCALE_DAYS_MIN = 1, SCALE_DAYS_MAX = 10;              // 有效出勤规模可选 1~10 天
-const SCALE_ONJOB_DAYS_MIN = 3, SCALE_ONJOB_DAYS_MAX = 15;  // 在职规模可选 3~15 天
+const SCALE_ONJOB_DAYS_MIN = 1, SCALE_ONJOB_DAYS_MAX = 15;  // 在职规模可选 1~15 天（v3.58.1：放开 1/2 天）
 const SCALE_FIRST_DAYS_MIN = 1, SCALE_FIRST_DAYS_MAX = 30;  // 首跑对比窗口可选 1~30 天
 const SCALE_NEAR_DAYS = 7;                 // v3.57.75：近 N 天入职/首跑/离职/流失，默认 7 天
 const SCALE_NEAR_MIN = 1, SCALE_NEAR_MAX = 30;
@@ -315,7 +316,18 @@ async function request(url, method, payload) {
       showNotice("直连未成功（" + (e.message || "未知原因") + "），已自动切到「静默桥接」后台标签取数。", "blue");
     }
   }
-  return await bridge(url, method, payload);
+  try {
+    return await bridge(url, method, payload);
+  } catch (e) {
+    // v3.57.96：桥接标签可能被 Chrome 休眠，失败后一律退回直连，避免整页取不到数；
+    // 同时把通道偏好写回直连，后续刷新不再先卡在死掉的桥接上。
+    state.via = "direct";
+    try { localStorage.setItem("wb_via", "direct"); } catch (x) { /* ignore */ }
+    const btn = $("btn-channel");
+    if (btn) btn.textContent = "通道：直连";
+    showNotice("后台桥接失败（" + ((e && e.message) || "未知原因") + "），已切回直连重试。", "blue");
+    return await direct(url, method, payload);
+  }
 }
 
 // ---------------------------------------------------------------- 月份 / 二进制
@@ -627,25 +639,44 @@ async function loadViolationTrackingIds(b) {
   state.violAppealPass = 0;
   state.violOvertime = 0;
   state.violMap = new Map();
+  state.violExcluded = new Set();     // 申诉成功 / 超时：近 7 天兜底扫描时要剔除
+  let violErr = "";
+  const isTransient = (msg) => /频繁|TOO_FREQUENT|303|HTTP 5\d\d|Failed to fetch|network|timeout|超时/i.test(String(msg || ""));
   for (let d = 1; d <= b.maxDay; d += VIOL_SEG_DAYS) {
     const segEnd = Math.min(d + VIOL_SEG_DAYS - 1, b.maxDay);
     const start = new Date(b.y, b.m - 1, d, 0, 0, 0).getTime();
     const end = new Date(b.y, b.m - 1, segEnd, 23, 59, 59, 999).getTime();
     for (let p = 1; p <= VIOL_MAX_PAGES; p++) {
-      const j = await request(API_VIOLATION, "POST", {
-        params: { request: {
-          violationStartTime: start, violationEndTime: end,
-          pageNo: p, pageSize: 500
-        } }
-      });
+      // v3.58.7：限流 / 网络抖动自动重试；某一段彻底失败只跳过该段，不丢掉其它天的坏单
+      let j = null, lastErr = null;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          j = await request(API_VIOLATION, "POST", {
+            params: { request: {
+              violationStartTime: start, violationEndTime: end,
+              pageNo: p, pageSize: 500
+            } }
+          });
+          break;
+        } catch (e) {
+          lastErr = e;
+          const msg = String((e && e.message) || e);
+          if (!isTransient(msg) || attempt >= 2) break;
+          await sleep(1200 * (attempt + 1));
+        }
+      }
+      if (!j) {
+        violErr = violErr || String((lastErr && lastErr.message) || lastErr || "违规处罚明细未返回");
+        break;
+      }
       const d0 = (j && j.result && j.result.data) || {};
       const list = Array.isArray(d0.violationEventList) ? d0.violationEventList : [];
       for (const x of list) {
         state.violTotal += 1;
         const v = violationMeta(x);
         if (!v) continue;
-        if (v.appeal === 30) { state.violAppealPass += 1; continue; }   // 申诉成功
-        if (v.category === "OVERTIME") { state.violOvertime += 1; continue; } // 超时
+        if (v.appeal === 30) { state.violAppealPass += 1; state.violExcluded.add(v.tid); continue; }   // 申诉成功
+        if (v.category === "OVERTIME") { state.violOvertime += 1; state.violExcluded.add(v.tid); continue; } // 超时
         tids.add(v.tid);
         if (v.category === "CLAIM") claimTids.add(v.tid);
         const prev = state.violMap.get(v.tid);
@@ -662,10 +693,89 @@ async function loadViolationTrackingIds(b) {
         }
       }
       if (!list.length || list.length < 500 || (d0.count && p * 500 >= d0.count)) break;
+      await sleep(120);
     }
+    if (segEnd < b.maxDay) await sleep(150);
   }
   state.violClaimCount = claimTids.size;
+  state.errors = state.errors || {};
+  state.errors.viol = violErr ? `部分区间未取到：${violErr}` : "";
+  if (violErr) { try { console.warn("[viol] 违规处罚明细部分失败:", violErr); } catch (e) { /* ignore */ } }
   return [...tids];
+}
+
+const KPI_RECENT_DAYS = 7;   // v3.58.8：违规处罚明细有生成延迟，近 7 天用考核明细直接兜底
+/** 近 7 天（不跨本月）按 4 类问题订单直接查考核运单明细，结果合并进 seen。 */
+async function loadKpiRecent(b, seen) {
+  const now = new Date();
+  const today0 = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const month0 = new Date(b.y, b.m - 1, 1).getTime();
+  const start = Math.max(today0 - (KPI_RECENT_DAYS - 1) * 86400000, month0);
+  const end = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999).getTime();
+  let firstErr = "";
+  for (const f of KPI_FILTERS) {
+    for (let page = 1; page <= KPI_MAX_PAGES; page++) {
+      const payload = { params: { request: {
+        queryParam: Object.assign({ ds: [start, end] }, f),
+        planType: "UPLUS_AGENCY", tabCode: "TRACK_UB",
+        pageIndex: page, pageSize: KPI_PAGE_SIZE
+      } } };
+      let j = null;
+      for (let attempt = 0; attempt < 2 && !j; attempt++) {
+        try {
+          j = await request(API_KPI_DETAIL, "POST", payload);
+        } catch (e) {
+          const msg = String((e && e.message) || e);
+          firstErr = firstErr || msg;
+          if (!/频繁|TOO_FREQUENT|303|HTTP 5\d\d|Failed to fetch|network|timeout|超时/i.test(msg) || attempt >= 1) break;
+          await sleep(900);
+        }
+      }
+      if (!j) break;
+      const d = (j && j.result && j.result.data) || {};
+      const list = Array.isArray(d.data) ? d.data : [];
+      parseKpiRows(j, seen);
+      if (!list.length || list.length < KPI_PAGE_SIZE) break;
+      await sleep(120);
+    }
+  }
+  return firstErr;
+}
+
+/** 一次性提交全部运单号；失败自动对半拆分重试（不设固定批次上限，二分到单条为止）。 */
+async function kpiQueryAllTids(tids, run) {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try { await run(tids); return ""; }
+    catch (e) {
+      const msg = String((e && e.message) || e);
+      const transient = /频繁|TOO_FREQUENT|303|HTTP 5\d\d|Failed to fetch|network|timeout|超时/i.test(msg);
+      if (transient && attempt === 0) { await sleep(1000); continue; }
+      if (tids.length <= 1) return msg;
+      const mid = Math.floor(tids.length / 2);
+      const e1 = await kpiQueryAllTids(tids.slice(0, mid), run);
+      const e2 = await kpiQueryAllTids(tids.slice(mid), run);
+      return e1 || e2;
+    }
+  }
+  return "";
+}
+
+/** v3.58.9：所有运单号一次性回查，结果分页合并进 seen。 */
+async function kpiQueryTrackingIds(tids, seen, maxPages) {
+  for (let page = 1; page <= maxPages; page++) {
+    const j = await request(API_KPI_DETAIL, "POST", {
+      params: { request: {
+        queryParam: { trackingId: tids.join(",") },
+        planType: "UPLUS_AGENCY", tabCode: "TRACK_UB",
+        pageIndex: page, pageSize: KPI_PAGE_SIZE
+      } }
+    });
+    const d = (j && j.result && j.result.data) || {};
+    const list = Array.isArray(d.data) ? d.data : [];
+    parseKpiRows(j, seen);
+    if (!list.length || list.length < KPI_PAGE_SIZE) break;
+    await sleep(120);
+  }
 }
 
 async function loadKpiFlags(month) {
@@ -676,20 +786,35 @@ async function loadKpiFlags(month) {
   // 不再额外跑 4 个 Radio 筛选，避免把已申诉成功或超时单混进来。
   try {
     const tids = await loadViolationTrackingIds(b);
-    for (let i = 0; i < tids.length; i += VIOL_BATCH) {
-      const batch = tids.slice(i, i + VIOL_BATCH);
-      const j = await request(API_KPI_DETAIL, "POST", {
-        params: { request: {
-          // 按运单号回查不带 ds —— 索赔 / 投诉可能跨月，带本月区间会把旧运单漏掉
-          queryParam: { trackingId: batch.join(",") },
-          planType: "UPLUS_AGENCY", tabCode: "TRACK_UB",
-          pageIndex: 1, pageSize: KPI_PAGE_SIZE
-        } }
-      });
-      parseKpiRows(j, seen);
+    if (tids.length) {
+      // 全部运单号一次请求；失败（参数过长 / 限流）自动对半拆分重试
+      const err = await kpiQueryAllTids(tids, (batch) =>
+        kpiQueryTrackingIds(batch, seen, KPI_TID_MAX_PAGES));
+      if (err) {
+        state.errors = state.errors || {};
+        state.errors.viol = ((state.errors.viol ? state.errors.viol + "；" : "") +
+          `运单回查部分失败：${err}`).slice(0, 220);
+      }
     }
   } catch (e) {
     console.warn("[viol] 坏单确认失败:", e && e.message);
+  }
+  // v3.58.8：违规处罚明细往往晚几天才生成，近 7 天直接用考核明细 4 类筛选兜底
+  try {
+    const recentErr = await loadKpiRecent(b, seen);
+    if (recentErr) {
+      state.errors = state.errors || {};
+      state.errors.viol = ((state.errors.viol ? state.errors.viol + "；" : "") +
+        `近 ${KPI_RECENT_DAYS} 天兜底部分失败：${recentErr}`).slice(0, 240);
+    }
+  } catch (e) {
+    state.errors = state.errors || {};
+    state.errors.viol = ((state.errors.viol ? state.errors.viol + "；" : "") +
+      `近 ${KPI_RECENT_DAYS} 天兜底失败：${String((e && e.message) || e)}`).slice(0, 240);
+  }
+  // 违规明细里明确「申诉成功 / 超时」的单，兜底扫描到的也要剔除
+  if (state.violExcluded && state.violExcluded.size) {
+    for (const tid of state.violExcluded) seen.delete(tid);
   }
   // 索赔单同样只认考核运单明细的确认结果
   state.claimConfirmed = [...seen.values()].filter((o) => o.claim).length;
@@ -740,6 +865,15 @@ function clueMap(list) {
     if (!m.has(rid)) m.set(rid, hh);
   }
   return m;
+}
+/** 骑手的人资商：线索结果明细里有 headHunterCompanyName 就用它，没有就是「自招」。 */
+function hunterOf(rid) {
+  const key = String(rid == null ? "" : rid).trim();
+  if (!key) return "";
+  const hh = state.clues.get(key);
+  if (hh) return hh;
+  // 线索接口失败时信息不可信，显示「—」而不是把所有三方骑手误标成自招
+  return state.errors && state.errors.clue ? "" : "自招";
 }
 function splitSep(list) {
   let take = 0, give = 0;
@@ -2072,7 +2206,7 @@ function defaultScaleRange() {
   const n = state.scale.days || SCALE_DAYS;
   return [shiftDay(t, -n), shiftDay(t, -1)];
 }
-/** v3.34.0：在职规模默认近 7 天（可选 3~15 天），不随有效出勤的起止日期手动微调。 */
+/** v3.34.0：在职规模默认近 7 天（v3.58.1 起可选 1~15 天），不随有效出勤的起止日期手动微调。 */
 function scaleOnJobRange() {
   const t = todayYmd();
   const n = state.scale.onJobDays || SCALE_ONJOB_DAYS;
@@ -2892,7 +3026,8 @@ function firstDetailRows(q) {
   const kw = String(q || "").trim().toLowerCase();
   if (!kw) return list;
   return list.filter((x) => String(x.name || "").toLowerCase().includes(kw)
-    || String(x.rid).includes(kw) || String(x.area || "").includes(kw));
+    || String(x.rid).includes(kw) || String(x.area || "").includes(kw)
+    || String(hunterOf(x.rid)).toLowerCase().includes(kw));
 }
 function renderFirstDetail() {
   const box = $("sfd-body"), sum = $("sfd-sum");
@@ -2914,10 +3049,13 @@ function renderFirstDetail() {
       : x.status === "new" ? "对比窗口内从未有完单"
       : x.status === "no-order" ? "今日有出勤但完单量为 0"
       : "人资名单里有离职时间或状态非在职";
+    const hunter = hunterOf(x.rid);
     return `<tr class="${st[1]}"><td class="sfd-name">${esc(x.name || "未命名")}<em>${esc(x.rid)}</em></td>` +
-      `<td>${esc(x.area || "未识别站点")}</td><td>${int(x.orders)}</td>` +
+      `<td>${esc(x.area || "未识别站点")}</td>` +
+      `<td class="sp-company${!hunter ? " is-unknown" : hunter === "自招" ? " is-self" : ""}">${esc(hunter || "—")}</td>` +
+      `<td>${int(x.orders)}</td>` +
       `<td>${st[0]}</td><td class="sfd-why">${why}</td></tr>`;
-  }).join("") : `<tr><td colspan="5" class="c-empty">没有取到数据，或没有匹配的骑手</td></tr>`;
+  }).join("") : `<tr><td colspan="6" class="c-empty">没有取到数据，或没有匹配的骑手</td></tr>`;
 }
 function openFirstDetail() {
   const p = $("scale-first-pop");
@@ -2952,10 +3090,10 @@ function bindFirstDetail() {
 // ------------------------------------- v3.37.0 三类人数的骑手明细 / 两类规模的手动增减
 const SCALE_PEOPLE = {
   entry: { title: "今日入职", col: "入职时间", tip: "人资名单 entryTime 为今天" },
-  leave: { title: "今日离职", col: "离职时间", tip: "人资名单 leaveTime 为今天" },
+  leave: { title: "今日离职", col: "离职时间", tip: "人资名单 leaveTime 为今天；右侧给出离职前 7 天逐日完单" },
   firstRun: { title: "今日首跑", col: "今日完单", tip: "今日完单>0 且对比窗口内从无完单" },
   entry7: { title: "近7天入职", col: "入职时间", tip: "entryTime 落在 T-7 ~ T-1" },
-  leave7: { title: "近7天离职", col: "离职时间", tip: "leaveTime 落在 T-7 ~ T-1" },
+  leave7: { title: "近7天离职", col: "离职时间", tip: "leaveTime 落在 T-7 ~ T-1；右侧给出离职前 7 天逐日完单" },
   first7: { title: "近7天首跑", col: "首跑日 / 完单", tip: "T-7 ~ T-1 每天按首跑定义判定后求和" },
   lostToday: { title: "今日流失", col: "流失日", tip: "最后跑单日 n，n+4 为流失日；取流失日=今天" },
   lost7: { title: "近7天流失", col: "流失日", tip: "流失日落在 T-7 ~ T-1（逐日计数后求和）" }
@@ -2973,6 +3111,25 @@ function scaleAreaOfTeam(tid) {
   const t = (state.scale.teams || []).find((x) => normId(x.id) === id);
   return t ? scaleAreaOfSite(t.name) : "";
 }
+/** 骑手 → 日完单（Map<day, orders>），供流失 / 离职的「前 7 天」共用。
+ *  数据来自 scaleLostRows()（本月出勤明细 + 规模区间导出），按 attRows/sheets 长度做缓存。 */
+let scaleDayOrdersCache = { key: "", map: null };
+function scaleDayOrders() {
+  const key = `${state.month}|${(state.attRows || []).length}|${(state.scale.sheets || []).length}|${state.attReady ? 1 : 0}|${state.loadedAt || ""}|${state.scale.nearDays || 0}`;
+  if (scaleDayOrdersCache.key === key) return scaleDayOrdersCache.map;
+  const map = new Map();
+  try {
+    for (const x of scaleLostRows()) {
+      if (!x.rid || !x.day) continue;
+      if (!map.has(x.rid)) map.set(x.rid, new Map());
+      const m = map.get(x.rid);
+      m.set(x.day, (m.get(x.day) || 0) + num(x.orders));
+    }
+  } catch (e) { /* 数据未就绪时返回空表 */ }
+  scaleDayOrdersCache = { key, map };
+  return map;
+}
+
 /** 今日入职 / 离职：人资名单里 entryTime / leaveTime 落在今天的骑手。 */
 function scaleStaffPeople(kind, key) {
   const today = todayYmd();
@@ -2988,11 +3145,25 @@ function scaleStaffPeople(kind, key) {
     if (day < from || day > to) continue;
     const area = scaleAreaOfTeam(s.departmentId) || "未识别站点";
     if (key && key !== "*" && area !== key) continue;
-    out.push({
-      rid: normId(s.knightId == null ? s.id : s.knightId),
+    const rid = normId(s.knightId == null ? s.id : s.knightId);
+    const item = {
+      rid,
       name: String(s.staffName || s.knightName || ""),
       area, time: raw.slice(5, 16).replace("T", " "), orders: null
-    });
+    };
+    // v3.57.98：离职骑手也给「近 7 天订单明细」，口径 = 离职日前 7 天（与流失的「流失前 7 天」一致）
+    if (!isEntry && day) {
+      const dm = scaleDayOrders().get(rid);
+      const series = [];
+      for (let i = 7; i >= 1; i--) {
+        const d = shiftDay(day, -i);
+        series.push({ day: d, orders: dm ? num(dm.get(d)) : 0 });
+      }
+      item.series = series;
+      item.leaveDay = day;
+      item.lastDay = dm ? ([...dm.keys()].filter((x) => x < day).sort().pop() || "") : "";
+    }
+    out.push(item);
   }
   return out;
 }
@@ -3030,7 +3201,8 @@ function scalePeopleRows() {
   const q = String(($("sp-search") || {}).value || "").trim().toLowerCase();
   const hit = !q ? list : list.filter((x) =>
     String(x.name || "").toLowerCase().includes(q) || String(x.rid).includes(q)
-    || String(x.area || "").toLowerCase().includes(q));
+    || String(x.area || "").toLowerCase().includes(q)
+    || String(hunterOf(x.rid)).toLowerCase().includes(q));
   return hit.sort((a, b) =>
     String(a.area || "").localeCompare(String(b.area || ""), "zh-CN")
     || String(a.name || a.rid).localeCompare(String(b.name || b.rid), "zh-CN"));
@@ -3054,25 +3226,34 @@ function renderScalePeople() {
   const col = $("sp-col4");
   if (col) col.textContent = meta.col;
   const lostKind = !!SCALE_LOST_KINDS[kind];
+  const leaveKind = kind === "leave" || kind === "leave7";
+  const seriesKind = lostKind || leaveKind;
   const col5 = $("sp-col5");
-  if (col5) col5.hidden = !lostKind;
+  if (col5) {
+    col5.hidden = !seriesKind;
+    col5.textContent = lostKind ? "流失前 7 天完单" : "离职前 7 天完单";
+  }
   const hint = $("sp-hint");
   if (hint) hint.textContent = (kind === "firstRun" || kind === "first7")
     ? "历史按骑手全局对比（换站点不算首跑），已排除离职状态"
-    : "来源：人资综合服务 → 成员管理（全部状态）";
+    : (leaveKind ? "来源：人资综合服务 → 成员管理；右侧为离职日前 7 天逐日完单" : "来源：人资综合服务 → 成员管理（全部状态）");
   const box = $("sp-body");
   if (!box) return;
   box.innerHTML = rows.length ? rows.map((x) => {
     const c4 = lostKind
       ? `${esc(x.lostDay || "—")}<em>最后跑单 ${esc(x.lastDay || "—")}</em>`
       : (kind === "firstRun" || kind === "first7") ? esc(x.time || "—") : esc(x.time || "—");
-    const c5 = lostKind ? `<td class="lost-series">${scaleSeriesHtml(x.series)}</td>` : "";
+    const c5 = seriesKind ? `<td class="lost-series">${scaleSeriesHtml(x.series)}</td>` : "";
+    const hunter = hunterOf(x.rid);
+    const hunterCell = `<td class="sp-company${!hunter ? " is-unknown" : hunter === "自招" ? " is-self" : ""}"` +
+      ` title="${hunter ? esc(hunter === "自招" ? "线索结果明细里没有人资商，按自招" : "人资商：" + hunter) : "线索数据未取到"}">` +
+      `${esc(hunter || "—")}</td>`;
     return `<tr>` +
       `<td class="sfd-name">${esc(x.name || "未命名")}<em>${esc(x.rid)}</em></td>` +
       `<td>${esc(x.rid)}</td><td>${esc(x.area || "未识别站点")}</td>` +
-      `<td>${c4}</td>${c5}</tr>`;
+      hunterCell + `<td>${c4}</td>${c5}</tr>`;
   }).join("")
-    : `<tr><td colspan="${lostKind ? 5 : 4}" class="c-empty">没有匹配的骑手</td></tr>`;
+    : `<tr><td colspan="${seriesKind ? 6 : 5}" class="c-empty">没有匹配的骑手</td></tr>`;
 }
 function openScalePeople(kind, key) {
   const p = $("scale-people");
@@ -3417,17 +3598,18 @@ function refreshScaleFirstRun() {
 }
 // ------------------------------------- v3.34.0 规模统计口径设置 / v3.35.0 首跑对比天数
 /* 「规模设置」按钮打开一个小浮层：有效出勤规模近 N 天（1~10，默认 5）、
-   在职规模近 M 天（3~15，默认 7）、今日首跑对比近 K 天（1~30，默认 14）。
+   在职规模近 M 天（1~15，默认 7）、今日首跑对比近 K 天（1~30，默认 14）。
    浮层挂在 body 上、不进 #sheet，所以「复制图片」导出图里只有表头 / 口径说明的
    变化，不会出现按钮。三个天数统一记在本机 wb_wf_scale_days_v1。 */
 function scaleSettingsEl() { return $("scale-settings"); }
-function scaleDayOptions(id, lo, hi, cur) {
+function scaleDayOptions(id, lo, hi, cur, dflt) {
   const el = $(id);
   if (!el) return;
   const out = [];
   for (let n = lo; n <= hi; n++) out.push(`<option value="${n}">近 ${n} 天</option>`);
   el.innerHTML = out.join("");
-  el.value = String(clampScaleDays(cur, lo, hi, lo));
+  // v3.58.2：缺值/越界时退回该项的默认天数（如在职规模 7 天），不能退回下限（否则会悄悄变成 1 天）
+  el.value = String(clampScaleDays(cur, lo, hi, dflt == null ? lo : dflt));
 }
 function placeScaleSettings(anchor) {
   const p = scaleSettingsEl();
@@ -3445,10 +3627,10 @@ function openScaleSettings(anchor) {
   const p = scaleSettingsEl();
   if (!p) return;
   closePop();
-  scaleDayOptions("ss-days", SCALE_DAYS_MIN, SCALE_DAYS_MAX, state.scale.days);
-  scaleDayOptions("ss-onjob-days", SCALE_ONJOB_DAYS_MIN, SCALE_ONJOB_DAYS_MAX, state.scale.onJobDays);
-  scaleDayOptions("ss-first-days", SCALE_FIRST_DAYS_MIN, SCALE_FIRST_DAYS_MAX, state.scale.firstDays);
-  scaleDayOptions("ss-near-days", SCALE_NEAR_MIN, SCALE_NEAR_MAX, state.scale.nearDays || SCALE_NEAR_DAYS);
+  scaleDayOptions("ss-days", SCALE_DAYS_MIN, SCALE_DAYS_MAX, state.scale.days, SCALE_DAYS);
+  scaleDayOptions("ss-onjob-days", SCALE_ONJOB_DAYS_MIN, SCALE_ONJOB_DAYS_MAX, state.scale.onJobDays, SCALE_ONJOB_DAYS);
+  scaleDayOptions("ss-first-days", SCALE_FIRST_DAYS_MIN, SCALE_FIRST_DAYS_MAX, state.scale.firstDays, SCALE_FIRST_DAYS);
+  scaleDayOptions("ss-near-days", SCALE_NEAR_MIN, SCALE_NEAR_MAX, state.scale.nearDays || SCALE_NEAR_DAYS, SCALE_NEAR_DAYS);
   const note = $("ss-note");
   if (note) {
     const [os, oe] = scaleOnJobRange();
@@ -3614,7 +3796,10 @@ function renderSummary(rows) {
   if (miss) bits.push(`<b>${int(miss)}</b> 条账单没在人资名单里匹配到（在职 / 入职 / 离职显示「—」）`);
   if (state.crossSiteRiders) bits.push(`<b>${int(state.crossSiteRiders)}</b> 名骑手跨站点，出勤与坏单按「骑手id＋站点id」各站分开计`);
   if (errs.length) bits.push(`<b>${errs.length}</b> 个数据源未取到：${esc(errs.map(([k]) => SRC_LABEL[k] || k).join("、"))}`);
-  $("wf-note").innerHTML = bits.join("　·　");
+  // v3.58.3：表格上方统计行右侧加一个「导出 CSV」入口（和工具栏同一个功能）
+  $("wf-note").innerHTML = `<span class="wf-note-text">${bits.join("　·　")}</span>` +
+    `<button type="button" id="btn-export-csv-inline" class="ghost wf-note-export" ` +
+    `title="导出当前筛选后的账单为 CSV（含账单ID；页面与复制图片不含该列）">导出 CSV</button>`;
 }
 
 function renderTable(rows) {
@@ -4188,6 +4373,10 @@ $("wf-search").addEventListener("input", (e) => { state.query = e.target.value; 
 $("wf-site").addEventListener("change", (e) => { state.site = e.target.value; applyData(); });
 $("wf-third").addEventListener("change", (e) => { state.third = e.target.value; applyData(); });
 $("btn-export-csv").addEventListener("click", exportCsv);
+// v3.58.3：统计行右侧的同款导出按钮（每次统计行重绘，用事件委托）
+$("wf-note").addEventListener("click", (e) => {
+  if (e.target && e.target.closest && e.target.closest("#btn-export-csv-inline")) exportCsv();
+});
 
 // ---- v3.18.0：表头排序 / 列筛选 / 冻结列交互 ----
 $("wf-table").addEventListener("click", (e) => {
@@ -4453,3 +4642,15 @@ window.__WF__ = { state, COLS, PAGE_COLS, buildRows, attachDetail, visibleRows, 
   if (window.__WB_TEST__) { applyData(); setProgress(100, ""); return; }
   loadAll();
 })();
+
+// 自动刷新：间隔取全局设置（默认 5 分钟，可在工具栏改）
+// 页面不可见 / 弹层打开 / 输入中 / 正在加载时跳过
+if (window.WBAutoRefresh) WBAutoRefresh.register(() => {
+  try {
+    if (document.hidden || state.loading || state.detailLoading) return;
+    if (document.querySelector(".wf-pop:not([hidden])")) return;
+    const ae = document.activeElement;
+    if (ae && (ae.tagName === "INPUT" || ae.tagName === "SELECT" || ae.tagName === "TEXTAREA" || ae.isContentEditable)) return;
+    loadAll();
+  } catch (e) { /* ignore */ }
+});
