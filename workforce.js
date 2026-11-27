@@ -2344,14 +2344,16 @@ function scaleAreaOfSite(name) {
   const s = String(name == null ? "" : name).trim();
   if (!s) return "";
   if (SITE_TO_AREA[s]) return SITE_TO_AREA[s];
-  const bare = s.replace(/-UB$/i, "").trim();
+  const bare = s.replace(/^福州/, "").replace(/-UB$/i, "").replace(/站$/, "").replace(/\s+/g, "");
   for (const [k, v] of Object.entries(SITE_TO_AREA)) {
-    if (k.replace(/-UB$/i, "").trim() === bare) return v;
+    const nk = String(k).replace(/^福州/, "").replace(/-UB$/i, "").replace(/站$/, "").replace(/\s+/g, "");
+    if (nk === bare) return v;
   }
   const dyn = dynSiteArea();
   if (dyn[s]) return dyn[s];
   for (const [k, v] of Object.entries(dyn)) {
-    if (String(k).replace(/-UB$/i, "").trim() === bare) return v;
+    const nk = String(k).replace(/^福州/, "").replace(/-UB$/i, "").replace(/站$/, "").replace(/\s+/g, "");
+    if (nk === bare) return v;
   }
   return s;
 }

@@ -52,6 +52,22 @@ const DEFAULT_PROJECT = "下午茶在线";      // 示例：福建省双十网�
 const AGENCY_FALLBACK = "福建省双十网络科技有限公司";  // 与 schedule.js 的 AGENCY_NAME 一致
 
 // 站点名 → 商圈片（与 assess.js / schedule.js 同一套映射；没命中的按站点自己成组）
+/** v3.58.18：站点名归一化后再匹配（去福州 / -UB / 结尾「站」/ 空格）。 */
+function areaOfTeamName(name) {
+  const nm = String(name || "").trim();
+  if (!nm) return "";
+  if (SITE_TO_AREA[nm]) return SITE_TO_AREA[nm];
+  const key = nm.replace(/^福州/, "").replace(/-UB$/i, "").replace(/站$/, "").replace(/\s+/g, "");
+  for (const [k, v] of Object.entries(SITE_TO_AREA)) {
+    if (String(k).replace(/^福州/, "").replace(/-UB$/i, "").replace(/站$/, "").replace(/\s+/g, "") === key) return v;
+  }
+  const dyn = dynSiteArea();
+  if (dyn[nm]) return dyn[nm];
+  for (const [k, v] of Object.entries(dyn)) {
+    if (String(k).replace(/^福州/, "").replace(/-UB$/i, "").replace(/站$/, "").replace(/\s+/g, "") === key) return v;
+  }
+  return nm;
+}
 let dynAreaCache = null;
 function dynSiteArea() {
   if (dynAreaCache) return dynAreaCache;
@@ -297,7 +313,7 @@ function siteSummary(team, stat, rows, code) {
   const cell = (stat && stat.byCode && stat.byCode[num(code)]) || null;
   return {
     teamId: String(team.id), teamName: team.name,
-    area: SITE_TO_AREA[String(team.name || "").trim()] || dynSiteArea()[String(team.name || "").trim()] || String(team.name || ""),
+    area: areaOfTeamName(String(team.name || "")),
     应排: num(cell && cell.predict), 实排: num(cell && cell.actual),
     在线: online.length, 下线背单: offlineOrder.length, 异常: abnormal.length,
     骑手数: list.length, 在线全站: onlineAll,

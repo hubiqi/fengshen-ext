@@ -462,7 +462,13 @@ function teamNameById() {
 function areaOf(teamId, siteName) {
   const names = teamNameById();
   const nm = str(siteName) || names[normId(teamId)] || "";
-  return SITE_TO_AREA[nm] || dynSiteArea()[nm] || nm || ("未映射站点 " + normId(teamId));
+  const nmKey = String(nm).replace(/^福州/, "").replace(/-UB$/i, "").replace(/站$/, "").replace(/\s+/g, "");
+  const stat = SITE_TO_AREA[nm] || Object.entries(SITE_TO_AREA).find(([k]) =>
+    String(k).replace(/^福州/, "").replace(/-UB$/i, "").replace(/站$/, "").replace(/\s+/g, "") === nmKey)?.[1];
+  const dynObj = dynSiteArea();
+  const dyn = dynObj[nm] || Object.entries(dynObj).find(([k]) =>
+    String(k).replace(/^福州/, "").replace(/-UB$/i, "").replace(/站$/, "").replace(/\s+/g, "") === nmKey)?.[1];
+  return stat || dyn || nm || ("未映射站点 " + normId(teamId));
 }
 function areaList() {
   const set = new Set();

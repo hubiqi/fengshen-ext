@@ -1387,6 +1387,54 @@ async function resolveTeamIds(gen) {
   return [...ids];   // 为空时导出接口按当前账号的默认范围返回
 }
 
+/** v3.58.18：排班表里有、但静态 / 动态映射都没有的站点，按站点 id 各查 1 页近 7 天运单补映射。
+ *  只在首次遇到缺失站点时发生，补完写本机缓存，后续不再请求。 */
+async function fillSiteAreaFromSchedule(sheets, gen) {
+  if (window.__WB_TEST__) return;
+  const sheet = XLSX_READER.pickSheet(sheets || [], ["团队名称"]);
+  if (!sheet) return;
+  const c = sheet.col;
+  const iName = c["团队名称"];
+  const iId = c["团队id"] != null ? c["团队id"] : (c["团队ID"] != null ? c["团队ID"] : -1);
+  if (iName == null) return;
+  const norm = (v) => String(v == null ? "" : v).replace(/^福州/, "").replace(/-UB$/i, "")
+    .replace(/站$/, "").replace(/\s+/g, "");
+  const stat = (ASSESS && ASSESS.SITE_TO_AREA) || {};
+  const cur = loadSiteArea();
+  const known = (nm) => {
+    const k = norm(nm);
+    if (Object.keys(cur).some((x) => x === nm || norm(x) === k)) return true;
+    return Object.keys(stat).some((x) => x === nm || norm(x) === k);
+  };
+  const missing = [];
+  for (const r of sheet.rows) {
+    const nm = String(r[iName] == null ? "" : r[iName]).trim();
+    if (!nm || known(nm) || missing.some((x) => x.name === nm)) continue;
+    missing.push({ name: nm, id: iId >= 0 ? Math.round(num(String(r[iId]).replace(/[^0-9.eE+-]/g, ""))) : 0 });
+  }
+  if (!missing.length) return;
+  const now = new Date();
+  const end = now.getTime();
+  const start = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 7).getTime();
+  for (const it of missing.slice(0, 6)) {
+    if (gen !== state.gen) return;
+    if (!it.id) continue;
+    try {
+      const d = await callApi(API_QUERY, { params: { request: {
+        deliverTypeList: [1, 2], teamIds: [it.id],
+        trackingFinishStart: start, trackingFinishEnd: end,
+        merchantConsumerDistanceStart: "0", merchantConsumerDistanceEnd: "999999",
+        payAmountStart: "0", payAmountEnd: "999999",
+        weightStart: "0", weightEnd: "999999",
+        trackingFinishTimePeriodList: ["0-86400"],
+        current: 1, pageSize: PAGE_SIZE
+      } } }, false);
+      if (gen !== state.gen) return;
+      mergeSiteArea(Array.isArray(d.data) ? d.data : []);
+    } catch (e) { /* 单个站补映射失败不影响出表 */ }
+  }
+}
+
 /** 按所选日期取考勤：今天走实时快照 xlsx，历史日期走时段明细 xlsx 并标准化 */
 async function loadAttendanceSheets(mode, teamIds, date) {
   if (mode === "live") {
@@ -1485,7 +1533,11 @@ async function loadAll(opts) {
       loadReassignOrders(teamIds, date)
     ]);
     if (gen !== state.gen) return;
-    if (results[0].status === "fulfilled") state.schSheets = results[0].value;
+    if (results[0].status === "fulfilled") {
+      state.schSheets = results[0].value;
+      // 补全静态 / 动态都没覆盖的站点（首次遇到才发请求）
+      await fillSiteAreaFromSchedule(state.schSheets, gen);
+    }
     if (results[1].status === "fulfilled") {
       state.attSheets = results[1].value.sheets;
       state.detailStats = results[1].value.stats;

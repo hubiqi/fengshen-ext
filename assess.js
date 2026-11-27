@@ -293,6 +293,14 @@ const ASSESS = (() => {
         if (kk && vv && !teamToDistrict.has(kk)) teamToDistrict.set(kk, vv);
       }
     }
+    // v3.58.18：站点名归一化（去「福州」前缀 / -UB 后缀 / 结尾「站」/ 空格），
+    // 不同账号对同一站点的命名可能差一个后缀，精确匹配会漏。
+    const normSite = (v) => key(v).replace(/^福州/, "").replace(/-UB$/i, "").replace(/站$/, "").replace(/\s+/g, "");
+    const siteNormMap = new Map();
+    for (const [k, v] of Object.entries(SITE_TO_AREA)) {
+      const nk = normSite(k);
+      if (nk && !siteNormMap.has(nk)) siteNormMap.set(nk, v);
+    }
     // 接口原生商圈名 → 官方商圈片名（静态表里同片区的站点优先给官方名，避免同一片区被拆成两行）
     const districtOfficial = new Map();
     for (const [site, dist] of teamToDistrict) {
@@ -303,6 +311,8 @@ const ASSESS = (() => {
     const areaOf = (site) => {
       const s = key(site);
       if (SITE_TO_AREA[s]) return SITE_TO_AREA[s];
+      const ns = normSite(s);
+      if (siteNormMap.has(ns)) return siteNormMap.get(ns);
       const dist = teamToDistrict.get(s);
       if (dist) return districtOfficial.get(dist) || dist;
       return s || "未识别";
@@ -311,7 +321,7 @@ const ASSESS = (() => {
     const areaOfSite = (site) => {
       const s = key(site);
       const dist = teamToDistrict.get(s);
-      if (SITE_TO_AREA[s] || (dist && districtOfficial.get(dist))) mappedCnt++;
+      if (SITE_TO_AREA[s] || siteNormMap.has(normSite(s)) || (dist && districtOfficial.get(dist))) mappedCnt++;
       else fallbackCnt++;
       return areaOf(s);
     };
@@ -750,5 +760,6 @@ const ASSESS = (() => {
 
   return { build, detailToAttendance,
            PERIOD_NAMES, PERIOD_DEFS, DEFAULT_PERIOD_NAMES, DAY_ATTEND_STANDARD,
+           SITE_TO_AREA,
            periodOf, scoreComplete, scoreBiao2 };
 })();
