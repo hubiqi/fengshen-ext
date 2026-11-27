@@ -402,7 +402,12 @@ function buildDetails(sites) {
       if (row.trend === "up") continue;
       abnormal.push(row);
     }
-    for (const r of s.offlineOrder) offline.push(detailRow(s, r));
+    for (const r of s.offlineOrder) {
+      const row = detailRow(s, r);
+      row.elapsedSec = elapsed;
+      row.slackSec = SLACK_ALLOW_SEC - Math.max(0, elapsed - num(r.validOnline));
+      offline.push(row);
+    }
   }
   const byName = (a, b) => String(a.site).localeCompare(String(b.site), "zh") || a.knightId - b.knightId;
   abnormal.sort((a, b) => String(a.area).localeCompare(String(b.area), "zh") || byName(a, b));
@@ -583,10 +588,11 @@ function renderAreas() {
   });
 }
 function detailHead() {
-  return `<thead><tr><th class="c-site">站点</th><th class="c-area">商圈片</th><th class="c-name">骑手 / 手机号</th>` +
+  return `<thead><tr><th class="c-site">站点</th><th class="c-area">商圈片</th><th class="c-name">骑手</th>` +
     `<th class="c-shift">排班时段</th>` +
     `<th class="c-num c-ord" title="当前背单数（deliveryOrder）">背单</th>` +
     `<th class="c-num c-time" title="本时段有效在线 / 目标时长（timeValidOnlineTime / timeOnlineTimeTarget），显示到秒">有效在线</th>` +
+    `<th class="c-num c-slack" title="冗余时长 = 30分钟 −（本时段已过时长 − 本时段有效在线）；10 分钟以下红 / 10~20 分黄 / 20 分以上绿">冗余</th>` +
     `<th class="c-num c-ord" title="本时段有效完单 / 目标完单（timeFinishOrder / timeFinishOrderTarget）">完单</th>` +
     `<th class="c-num">最近上线</th><th class="c-state">状态</th></tr></thead>`;
 }
@@ -600,38 +606,44 @@ function renderDetails() {
       ? state.abnormal.map((r) => `<tr>` +
         `<td class="c-site" title="${esc(r.site)}">${esc(r.site.replace(/^福州/, "").replace(/-UB$/, ""))}</td>` +
         `<td class="c-area" title="${esc(r.area)}">${esc(r.area)}</td>` +
-        `<td class="c-name">${esc(r.name || "未命名")}<em>${esc(r.knightId)}</em>` +
-        `<span class="rt-mob">${esc(r.mobile || "—")}</span></td>` +
-        `<td class="c-shift" title="${esc(r.shifts)}">${esc(r.shifts || "—")}</td>` +
+        `<td class="c-name"><b>${esc(r.name || "未命名")}</b><em>${esc(r.knightId)}</em></td>` +
+        `<td class="c-shift" title="${esc(r.shifts)}"><div class="rt-shift">${esc(r.shifts || "—")}</div></td>` +
         `<td class="c-num c-ord">${r.orders}</td>` +
         `<td class="c-num c-time${r.trend ? " rt-trend-" + r.trend : ""}" ` +
           `title="${esc(r.onlineTipText + "；趋势：" + (r.trend === "up" ? "较上次刷新在增长（绿）" : r.trend === "flat" ? "较上次刷新没有变化（红）" : r.trend === "down" ? "较上次刷新减少（红）" : "首次读取，下次刷新开始比较"))}">` +
-          fracCell(r.validText, r.targetText) +
-          (r.slackSec != null
-            ? `<span class="rt-slack${r.slackSec < 0 ? " bad" : ""}" ` +
-              `title="冗余时长 = 30分钟 −（本时段已过 ${esc(durText(r.elapsedSec))} − 有效在线 ${esc(r.validText)}）">` +
-              `冗余 ${esc(slackText(r.slackSec))}</span>`
-            : "") +
-          `</td>` +
+          fracCell(r.validText, r.targetText) + `</td>` +
+        (() => {
+          if (r.slackSec == null) return `<td class="c-num c-slack">—</td>`;
+          const m = r.slackSec / 60;
+          const cls = m < 10 ? "bad" : (m <= 20 ? "warn" : "good");
+          return `<td class="c-num c-slack rt-slack-cell ${cls}" ` +
+            `title="冗余时长 = 30分钟 −（本时段已过 ${esc(durText(r.elapsedSec))} − 有效在线 ${esc(r.validText)}）">` +
+            `${esc(slackText(r.slackSec))}</td>`;
+        })() +
         `<td class="c-num c-ord">${fracCell(r.doneOrd, r.targetOrd)}</td>` +
         `<td class="c-num">${esc(r.lastOnline || "—")}</td>` +
         `<td class="c-state bad" title="工作状态 ${esc(r.statusText)}">异常 · ${esc(r.statusText)} · ${r.orders} 背单</td></tr>`).join("")
-      : `<tr><td colspan="9" class="rt-empty">${state.loading ? "正在取数…" : "本时段没有异常骑手 🎉"}</td></tr>`) + `</tbody>`;
+      : `<tr><td colspan="10" class="rt-empty">${state.loading ? "正在取数…" : "本时段没有异常骑手 🎉"}</td></tr>`) + `</tbody>`;
   }
   if (to) {
     to.innerHTML = detailHead() + `<tbody>` + (state.offline.length
       ? state.offline.map((r) => `<tr>` +
         `<td class="c-site" title="${esc(r.site)}">${esc(r.site.replace(/^福州/, "").replace(/-UB$/, ""))}</td>` +
         `<td class="c-area" title="${esc(r.area)}">${esc(r.area)}</td>` +
-        `<td class="c-name">${esc(r.name || "未命名")}<em>${esc(r.knightId)}</em>` +
-        `<span class="rt-mob">${esc(r.mobile || "—")}</span></td>` +
-        `<td class="c-shift" title="${esc(r.shifts)}">${esc(r.shifts || "—")}</td>` +
+        `<td class="c-name"><b>${esc(r.name || "未命名")}</b><em>${esc(r.knightId)}</em></td>` +
+        `<td class="c-shift" title="${esc(r.shifts)}"><div class="rt-shift">${esc(r.shifts || "—")}</div></td>` +
         `<td class="c-num c-ord warn">${r.orders}</td>` +
         `<td class="c-num c-time" title="${esc(r.onlineTipText)}">${fracCell(r.validText, r.targetText)}</td>` +
+        (() => {
+          if (r.slackSec == null) return `<td class="c-num c-slack">—</td>`;
+          const m = r.slackSec / 60;
+          const cls = m < 10 ? "bad" : (m <= 20 ? "warn" : "good");
+          return `<td class="c-num c-slack rt-slack-cell ${cls}">${esc(slackText(r.slackSec))}</td>`;
+        })() +
         `<td class="c-num c-ord">${fracCell(r.doneOrd, r.targetOrd)}</td>` +
         `<td class="c-num">${esc(r.lastOnline || "—")}</td>` +
         `<td class="c-state warn" title="工作状态 ${esc(r.statusText)}">${esc(r.statusText)} · 下线背单</td></tr>`).join("")
-      : `<tr><td colspan="9" class="rt-empty">${state.loading ? "正在取数…" : "本时段没有下线背单的骑手"}</td></tr>`) + `</tbody>`;
+      : `<tr><td colspan="10" class="rt-empty">${state.loading ? "正在取数…" : "本时段没有下线背单的骑手"}</td></tr>`) + `</tbody>`;
   }
 }
 function renderTimer() {

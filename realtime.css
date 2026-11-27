@@ -115,7 +115,7 @@ table.tbl.rt-detail-table .c-site { width: 112px; max-width: 112px; text-align: 
   text-overflow: ellipsis; white-space: nowrap; }
 table.tbl.rt-detail-table .c-area { width: 150px; max-width: 150px; text-align: left; color: #6B7280; white-space: normal; line-height: 1.35;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-table.tbl.rt-detail-table .c-name { width: 172px; text-align: left; color: #1F2937; font-weight: 600; }
+table.tbl.rt-detail-table .c-name { width: 128px; text-align: left; color: #1F2937; font-weight: 600; }
 table.tbl.rt-detail-table .c-name em { font-style: normal; font-weight: 400; color: #9CA3AF;
   font-size: 11px; margin-left: 5px; }
 table.tbl.rt-detail-table .c-mobile { width: 118px; color: #6B7280; font-variant-numeric: tabular-nums; }
@@ -169,3 +169,18 @@ table.tbl.rt-detail-table .rt-mob { display: block; font-size: 10.5px; font-weig
 .rt-slack { font-weight: 700; }
 .rt-slack { color: #B45309; }
 .rt-slack.bad { color: #DC2626; }
+
+/* v3.58.15：明细表去掉手机号，骑手姓名在上、ID 在下 */
+table.tbl.rt-detail-table .c-name b { display: block; font-weight: 600; color: #1F2937;
+  line-height: 1.3; white-space: nowrap; }
+table.tbl.rt-detail-table .c-name em { display: block; margin-left: 0; font-style: normal;
+  font-weight: 400; color: #9CA3AF; font-size: 10.5px; line-height: 1.3; }
+
+/* v3.58.16：排班时段最多两行；冗余独立列并按分钟分色 */
+table.tbl.rt-detail-table .c-shift .rt-shift { display: -webkit-box; -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical; overflow: hidden; white-space: normal; line-height: 1.45; }
+table.tbl.rt-detail-table .c-slack { width: 108px; white-space: nowrap; }
+.rt-slack-cell { font-weight: 700; font-variant-numeric: tabular-nums; }
+.rt-slack-cell.bad { color: #DC2626; }
+.rt-slack-cell.warn { color: #B45309; }
+.rt-slack-cell.good { color: #15803D; }
