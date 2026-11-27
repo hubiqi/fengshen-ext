@@ -52,6 +52,15 @@ const DEFAULT_PROJECT = "下午茶在线";      // 示例：福建省双十网�
 const AGENCY_FALLBACK = "福建省双十网络科技有限公司";  // 与 schedule.js 的 AGENCY_NAME 一致
 
 // 站点名 → 商圈片（与 assess.js / schedule.js 同一套映射；没命中的按站点自己成组）
+let dynAreaCache = null;
+function dynSiteArea() {
+  if (dynAreaCache) return dynAreaCache;
+  try {
+    const o = JSON.parse(localStorage.getItem("wb_site_area_v1") || "{}");
+    dynAreaCache = o && typeof o === "object" && !Array.isArray(o) ? o : {};
+  } catch (e) { dynAreaCache = {}; }
+  return dynAreaCache;
+}
 const SITE_TO_AREA = {
   "福州仓山区城门站-UB": "福州仓山区城门商圈片",
   "福州台江区宝龙站-UB": "福州台江区台江商圈片",
@@ -288,7 +297,7 @@ function siteSummary(team, stat, rows, code) {
   const cell = (stat && stat.byCode && stat.byCode[num(code)]) || null;
   return {
     teamId: String(team.id), teamName: team.name,
-    area: SITE_TO_AREA[String(team.name || "").trim()] || String(team.name || ""),
+    area: SITE_TO_AREA[String(team.name || "").trim()] || dynSiteArea()[String(team.name || "").trim()] || String(team.name || ""),
     应排: num(cell && cell.predict), 实排: num(cell && cell.actual),
     在线: online.length, 下线背单: offlineOrder.length, 异常: abnormal.length,
     骑手数: list.length, 在线全站: onlineAll,

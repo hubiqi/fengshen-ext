@@ -38,6 +38,27 @@ const API_KPI_DAY = XT + "xtop.performance.fs.opp.perfDetail.queryDetailList/1.0
 const PAGE_SIZE = 90;
 const THROTTLE_MS = 1200;
 const HISTORY_DAYS = 90;
+const SITE_AREA_KEY = "wb_site_area_v1";   // 站点 → 商圈片（从运单采集，换账号也能自动识别）
+
+/** 读取本机缓存的「站点 → 商圈片」映射。 */
+function loadSiteArea() {
+  try {
+    const o = JSON.parse(localStorage.getItem(SITE_AREA_KEY) || "{}");
+    return o && typeof o === "object" && !Array.isArray(o) ? o : {};
+  } catch (e) { return {}; }
+}
+/** 从运单行里补充映射（teamName + merchantBusDistrictName）。 */
+function mergeSiteArea(rows) {
+  const cur = loadSiteArea();
+  let changed = 0;
+  for (const r of rows || []) {
+    const t = String((r && r.teamName) || "").trim();
+    const d = String((r && r.merchantBusDistrictName) || "").trim();
+    if (t && d && cur[t] !== d) { cur[t] = d; changed++; }
+  }
+  if (changed) { try { localStorage.setItem(SITE_AREA_KEY, JSON.stringify(cur)); } catch (e) { /* ignore */ } }
+  return cur;
+}
 
 const $ = (id) => document.getElementById(id);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -297,8 +318,10 @@ function setBusy(b) { $("btn-refresh").disabled = b; $("btn-refresh").textConten
 function recompute() {
   // 运单传空数组：出勤达成只依赖排班统计 + 考勤（实时快照或历史时段明细），
   // 与原考核看板的运单增量链路解耦；dateStr 传所选日期，排班统计按该日期过滤。
-  // 改派单已查过才传（空数组 = 当天确实没有改派，与「没查」严格区分）
-  const opts = Array.isArray(state.reassignOrders) ? { reassignOrders: state.reassignOrders } : undefined;
+  // 改派单已查过才传（空数组 = 当天确实没有改派，与「没查」严格区分）；
+  // 站点 → 商圈片映射来自运单缓存，换账号 / 新站点也能正确归片
+  const opts = { teamDistrict: loadSiteArea() };
+  if (Array.isArray(state.reassignOrders)) opts.reassignOrders = state.reassignOrders;
   state.assess = ASSESS.build([], state.schSheets, state.attSheets, state.date, XLSX_READER, opts);
   state.mode = isToday(state.date) ? "live" : "history";
   render();
@@ -1311,7 +1334,16 @@ async function resolveTeamIds(gen) {
     const saved = JSON.parse(localStorage.getItem(TEAM_KEY) || "[]");
     if (Array.isArray(saved) && saved.length) {
       for (const id of saved) { const v = String(id || "").trim(); if (v) ids.add(v); }
-      if (ids.size) { state.teamSource = "记住的站点范围"; return [...ids]; }
+      if (ids.size) {
+        state.teamSource = "记住的站点范围";
+        if (Object.keys(loadSiteArea()).length < ids.size && gen === state.gen) {
+          try {
+            const d = await callApi(API_QUERY, buildQueryPayload(1), false);
+            if (gen === state.gen) mergeSiteArea(Array.isArray(d.data) ? d.data : []);
+          } catch (e) { /* 映射补全失败不影响主流程，退回静态表 / 站点名 */ }
+        }
+        return [...ids];
+      }
     }
   } catch (e) { /* 解析失败当作没有 */ }
   try {
@@ -1321,6 +1353,7 @@ async function resolveTeamIds(gen) {
       const res = (typeof WB_SYNC !== "undefined")
         ? await WB_SYNC.read(day, localStorage.getItem("wb_agency") || "") : null;
       if (res && res.ok && res.cache && Array.isArray(res.cache.rows)) {
+        mergeSiteArea(res.cache.rows);
         for (const r of res.cache.rows) {
           const id = String((r && r.teamId) || "").trim();
           if (id) ids.add(id);
@@ -1338,6 +1371,7 @@ async function resolveTeamIds(gen) {
     setProgress(1, 1, "teams");
     const d = await callApi(API_QUERY, buildQueryPayload(1), true);
     if (gen !== state.gen) return [];
+    mergeSiteArea(Array.isArray(d.data) ? d.data : []);
     for (const r of (Array.isArray(d.data) ? d.data : [])) {
       const id = String((r && r.teamId) || "").trim();
       if (id) ids.add(id);

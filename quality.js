@@ -88,6 +88,15 @@ const BAD_COLS = [
 const VIOL_CAT_BY_TAG = { lgt: "CANCEL", complain: "COMPLAIN", negative: "BAD_REVIEW", claim: "CLAIM", early: "COMPLAIN", high: "CANCEL" };
 
 // 站点 → 商圈片（与考核看板 / 运力模块 / 排班 / 实时出勤同一套映射；未映射站点自成一组）
+let dynAreaCache = null;
+function dynSiteArea() {
+  if (dynAreaCache) return dynAreaCache;
+  try {
+    const o = JSON.parse(localStorage.getItem("wb_site_area_v1") || "{}");
+    dynAreaCache = o && typeof o === "object" && !Array.isArray(o) ? o : {};
+  } catch (e) { dynAreaCache = {}; }
+  return dynAreaCache;
+}
 const SITE_TO_AREA = {
   "福州仓山区城门站-UB": "福州仓山区城门商圈片",
   "福州台江区宝龙站-UB": "福州台江区台江商圈片",
@@ -453,11 +462,11 @@ function teamNameById() {
 function areaOf(teamId, siteName) {
   const names = teamNameById();
   const nm = str(siteName) || names[normId(teamId)] || "";
-  return SITE_TO_AREA[nm] || nm || ("未映射站点 " + normId(teamId));
+  return SITE_TO_AREA[nm] || dynSiteArea()[nm] || nm || ("未映射站点 " + normId(teamId));
 }
 function areaList() {
   const set = new Set();
-  for (const t of state.teams) set.add(SITE_TO_AREA[t.name] || t.name);
+  for (const t of state.teams) set.add(SITE_TO_AREA[t.name] || dynSiteArea()[t.name] || t.name);
   return [...set];
 }
 function inScope() { return true; }   // v3.45.0：行实体随维度分组，不再按范围过滤记录（保留空实现兼容旧引用）

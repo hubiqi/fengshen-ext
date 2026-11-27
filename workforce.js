@@ -2330,6 +2330,16 @@ function scaleShortRange() {
   return f(state.scale.start) + "-" + f(state.scale.end);
 }
 /** 站点名 → 商圈片；没命中的按站点名自成一组（不丢数，也不误并到别的片区）。 */
+/** v3.58.17：本机缓存的「站点 → 商圈片」（由出勤达成 / 运单采集），静态表没命中时用。 */
+let dynAreaCache = null;
+function dynSiteArea() {
+  if (dynAreaCache) return dynAreaCache;
+  try {
+    const o = JSON.parse(localStorage.getItem("wb_site_area_v1") || "{}");
+    dynAreaCache = o && typeof o === "object" && !Array.isArray(o) ? o : {};
+  } catch (e) { dynAreaCache = {}; }
+  return dynAreaCache;
+}
 function scaleAreaOfSite(name) {
   const s = String(name == null ? "" : name).trim();
   if (!s) return "";
@@ -2337,6 +2347,11 @@ function scaleAreaOfSite(name) {
   const bare = s.replace(/-UB$/i, "").trim();
   for (const [k, v] of Object.entries(SITE_TO_AREA)) {
     if (k.replace(/-UB$/i, "").trim() === bare) return v;
+  }
+  const dyn = dynSiteArea();
+  if (dyn[s]) return dyn[s];
+  for (const [k, v] of Object.entries(dyn)) {
+    if (String(k).replace(/-UB$/i, "").trim() === bare) return v;
   }
   return s;
 }

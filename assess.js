@@ -285,16 +285,35 @@ const ASSESS = (() => {
       const t = key(r.teamName), d = key(r.merchantBusDistrictName);
       if (t && d && !teamToDistrict.has(t)) teamToDistrict.set(t, d);
     }
+    // v3.58.17：允许调用方传「站点 → 商圈片」映射（来自运单，本机缓存），
+    // 解决换账号 / 新站点不在静态表里时被拆成单独一行的问题。
+    if (opts && opts.teamDistrict && typeof opts.teamDistrict === "object") {
+      for (const [k, v] of Object.entries(opts.teamDistrict)) {
+        const kk = key(k), vv = key(v);
+        if (kk && vv && !teamToDistrict.has(kk)) teamToDistrict.set(kk, vv);
+      }
+    }
+    // 接口原生商圈名 → 官方商圈片名（静态表里同片区的站点优先给官方名，避免同一片区被拆成两行）
+    const districtOfficial = new Map();
+    for (const [site, dist] of teamToDistrict) {
+      const off = SITE_TO_AREA[site];
+      if (off && !districtOfficial.has(dist)) districtOfficial.set(dist, off);
+    }
     // 纯解析（不计数）：出勤模块复用同一套商圈片分组，不能把 areaLabel 的映射统计带偏
     const areaOf = (site) => {
       const s = key(site);
-      return SITE_TO_AREA[s] || teamToDistrict.get(s) || s || "未识别";
+      if (SITE_TO_AREA[s]) return SITE_TO_AREA[s];
+      const dist = teamToDistrict.get(s);
+      if (dist) return districtOfficial.get(dist) || dist;
+      return s || "未识别";
     };
     let mappedCnt = 0, fallbackCnt = 0;
     const areaOfSite = (site) => {
-      if (SITE_TO_AREA[key(site)]) mappedCnt++;
+      const s = key(site);
+      const dist = teamToDistrict.get(s);
+      if (SITE_TO_AREA[s] || (dist && districtOfficial.get(dist))) mappedCnt++;
       else fallbackCnt++;
-      return areaOf(site);
+      return areaOf(s);
     };
 
     // ---------------- 排班：先确定「当天有哪些班次」，再累加规划单量 ----------------
